@@ -31,6 +31,26 @@ typecheck:
 build:
     cd app && npm install && npm run build
 
+# Vite serves React with HMR; tauri-cli watches src-tauri/ and relaunches the
+# window when Rust changes. Quit the window (or Ctrl-C) to stop.
+#
+# If nvm is installed, source it and switch to the .nvmrc version automatically
+# so contributors don't have to remember `nvm use` each shell. Falls back to the
+# ambient `npm` (and its engine warning) when nvm is absent.
+#
+# Launch the desktop window with hot reload.
+dev:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd app
+    NVM_SH="${NVM_DIR:-$HOME/.nvm}/nvm.sh"
+    if [ -s "$NVM_SH" ]; then
+        # shellcheck source=/dev/null
+        . "$NVM_SH"
+        nvm use --silent || nvm install
+    fi
+    exec npm run tauri dev
+
 # Engine — produce a standalone sidecar binary via PyInstaller.
 # The spec file lands in Phase 3; until then this just prints a TODO.
 sidecar:

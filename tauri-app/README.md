@@ -10,7 +10,9 @@ that will be wrapped as a sidecar binary. The full plan is in
 - [`uv`](https://github.com/astral-sh/uv) (manages Python 3.13 itself — no need
   to install Python by hand)
 - [`just`](https://github.com/casey/just) (task runner)
-- Node.js 20.19+ or 22.12+ (Vite 7 requirement)
+- Node.js — pinned to 22 via [`app/.nvmrc`](app/.nvmrc). With nvm installed,
+  run `cd app && nvm install && nvm use` once. Vite 7's dev server requires
+  Node 20.19+ or 22.12+.
 - Rust stable (for the Tauri shell)
 - Platform extras for Tauri 2: see the
   [Tauri prerequisites guide](https://v2.tauri.app/start/prerequisites/)
@@ -38,12 +40,34 @@ just sync        # uv sync
 just test        # pytest (engine)
 just lint        # ruff
 just typecheck   # mypy
+just dev         # launch the desktop app with hot reload
 just build       # Vite production bundle
 just sidecar     # (Phase 3) PyInstaller sidecar binary
 just package     # (Phase 6) Tauri bundle (.msi/.dmg/.AppImage)
 ```
 
 `just` with no recipe lists everything.
+
+### Live development loop
+
+`just dev` sources nvm (if installed), runs `nvm use` against
+[`app/.nvmrc`](app/.nvmrc) so Node 22 is active for the session, then runs
+`tauri dev`, which:
+
+- starts Vite on `http://localhost:1420` with React HMR — saving a `.tsx` /
+  `.css` file under `app/src/` updates the running window without losing state.
+- watches `app/src-tauri/` and recompiles + relaunches the desktop window when
+  Rust changes.
+- ignores `app/src-tauri/target/` and the Vite `dist/` so Rust rebuilds don't
+  trigger Vite reloads and vice versa.
+
+First launch compiles Tauri's Rust deps from scratch (~30–60 s on a warm
+toolchain, longer cold). Subsequent launches are incremental. Quit the desktop
+window or press Ctrl-C in the terminal to stop both processes.
+
+The Python sidecar isn't wired in yet (Phase 3), so for now `just dev` only
+shows the React shell. Once the sidecar lands, Tauri will spawn it as part of
+`tauri dev` automatically.
 
 ## Layout
 

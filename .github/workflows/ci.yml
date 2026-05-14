@@ -47,7 +47,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version-file: tauri-app/app/.nvmrc
           cache: npm
           cache-dependency-path: tauri-app/app/package-lock.json
 
