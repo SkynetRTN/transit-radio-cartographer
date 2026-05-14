@@ -7,6 +7,8 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 set windows-shell := ["pwsh.exe", "-NoLogo", "-NoProfile", "-Command"]
 
+#store os as string
+os_name := os()
 default:
     @just --list
 
@@ -40,12 +42,19 @@ build:
 #
 # Launch the desktop window with hot reload.
 dev:
+    @ {{ if os_name == "windows" { "just _dev-windows" } else { "just _dev-unix" } }}
+
+# Internal helper for Windows
+_dev-windows:
+    cd app && npm run tauri dev
+
+# Internal helper for Mac/Linux
+_dev-unix:
     #!/usr/bin/env bash
     set -euo pipefail
     cd app
     NVM_SH="${NVM_DIR:-$HOME/.nvm}/nvm.sh"
     if [ -s "$NVM_SH" ]; then
-        # shellcheck source=/dev/null
         . "$NVM_SH"
         nvm use --silent || nvm install
     fi
