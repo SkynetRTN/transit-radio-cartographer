@@ -481,15 +481,312 @@ The engine ships as a standalone binary bundled into the Tauri app:
 
 ## 8. Phases and milestones
 
-| Phase | Output | Definition of done |
-|---|---|---|
-| 0a. Workspace bootstrap | `tauri-app/` scaffolded: uv workspace, `pyproject.toml`, `.python-version` = `3.13`, `uv.lock`, empty `engine/` and `app/` skeletons, `justfile` | `uv sync` succeeds on Win/Mac/Linux; `just test` runs (zero tests) |
-| 0b. Fixture capture | `tauri-app/fixtures/` populated from legacy EXE | Every legacy format has ≥1 fixture; provenance README written |
-| 1. Codecs | All `tauri-app/engine/src/radio_cartographer/io/*.py` | §6.1 tests pass; round-trips bytes-identical |
-| 2. Numerics | `survey.py`, `scan.py`, `calibration.py`, `image.py`, `palette.py` | §6.2 tests pass |
-| 3. RPC | `tauri-app/engine/src/radio_cartographer/rpc.py` | §6.3 tests pass; sidecar binary builds on all three OSes |
-| 4. Pipeline glue + FITS export | End-to-end tutorial replay headless | §6.4 tests pass; FITS opens cleanly in DS9 |
-| 5. Tauri shell + React UI | The actual app | §6.5 + §6.6 tests pass; a domain user completes the tutorial PDF on each OS without help |
+Work proceeds in strict order: each phase's tests exist and fail before that
+phase's production code is written, and each phase's exit criteria gate the
+next. The summary table comes first; the detailed breakdown follows.
+
+### 8.0 Summary
+
+| Phase | Output | Definition of done | Depends on |
+|---|---|---|---|
+| 0a. Workspace bootstrap | `tauri-app/` scaffolded: uv workspace, `pyproject.toml`, `.python-version` = `3.13`, `uv.lock`, empty `engine/` and `app/` skeletons, `justfile` | `uv sync` succeeds on Win/Mac/Linux; `just test` runs (zero tests); CI green | — |
+| 0b. Fixture capture | `tauri-app/fixtures/` populated from legacy EXE | Every legacy format has ≥1 fixture; provenance README written; SHA-256 manifest committed | 0a |
+| 1. Codecs | All `tauri-app/engine/src/radio_cartographer/io/*.py` | §6.1 tests pass; round-trips bytes-identical for every fixture | 0b |
+| 2. Numerics | `survey.py`, `scan.py`, `calibration.py`, `image.py`, `palette.py` | §6.2 tests pass; tutorial-fixture intermediates reproduced within tolerance | 1 |
+| 3. RPC | `tauri-app/engine/src/radio_cartographer/rpc.py` + PyInstaller spec | §6.3 tests pass; sidecar binary builds on all three OSes; binary handshakes under 1 s cold-start | 2 |
+| 4. Pipeline glue + FITS export | End-to-end tutorial replay headless; `io/fits.py` | §6.4 tests pass; FITS opens cleanly in DS9 with correct WCS | 3 |
+| 5. Tauri shell + React UI | The actual app | §6.5 + §6.6 tests pass; a domain user completes the tutorial PDF on each OS without help | 4 |
+| 6. Release hardening | Packaged artifacts + docs | Unsigned `.msi` / `.dmg` / `.AppImage` published to GitHub Releases; install/launch instructions verified on a clean VM per OS | 5 |
+
+### 8.1 Phase 0a — Workspace bootstrap
+
+**Purpose.** Stand up the build/test/lint loop on every contributor's
+machine and in CI before a single line of product code is written. If the
+toolchain isn't reproducible, every later phase pays for it.
+
+**Tasks.**
+1. Create `tauri-app/` with the directory shape from §3.
+2. Write `tauri-app/pyproject.toml` as a uv workspace root declaring
+   `members = ["engine"]`; add `tauri-app/.python-version` containing
+   `3.13`; run `uv lock` and commit `uv.lock`.
+3. Write a stub `tauri-app/engine/pyproject.toml` with no runtime deps yet
+   (deps land per phase, on demand). Add `tauri-app/engine/src/radio_cartographer/__init__.py`
+   so the package is importable.
+4. Scaffold `tauri-app/app/` with `npm create tauri-app@latest` (React +
+   TypeScript + Vite template). Pin Tauri to a specific 2.x minor in
+   `Cargo.toml` (see §9 risk table). Strip the boilerplate "Welcome to
+   Tauri" UI down to an empty `<App />`.
+5. Write `tauri-app/justfile` with the canonical tasks: `just sync`,
+   `just test`, `just lint`, `just typecheck`, `just build`, `just sidecar`,
+   `just package`. Each is a thin wrapper; the goal is one-line muscle memory.
+6. Add the three GitHub Actions matrix jobs (Windows x64, macOS
+   arm64+x64 universal, Linux x64). Each runs `uv sync`, `just lint`,
+   `just typecheck`, `just test`. No bundling yet.
+
+**Definition of done.**
+- A fresh clone followed by `uv sync && just test && cd app && npm install
+  && npm run build` succeeds on all three OSes.
+- CI is green on the bootstrap PR.
+- `just test` reports "0 passed" — not an error.
+
+**Risks specific to this phase.** uv on Windows occasionally needs the
+"long paths" registry flag; document it in the README before the first
+external contributor hits it.
+
+### 8.2 Phase 0b — Fixture capture
+
+**Purpose.** Establish the regression oracle. Every later phase compares
+its output against bytes the legacy EXE actually produced. Without a
+faithful fixture set, "backward compatible" is unverifiable.
+
+**Tasks.**
+1. Stand up a Windows VM (Windows 10 x64 is sufficient) with
+   `KARALEAH2002.exe` and its dependencies.
+2. Pick a representative dataset — the tutorial dataset is the obvious
+   first choice. Also pick one minimal dataset (smallest plausible `.md1`,
+   `.md2`) and one stress dataset (largest `.md2` we have access to) so we
+   catch boundary cases the tutorial misses.
+3. Replay the tutorial PDF end-to-end and save *every* intermediate at
+   *every* step: input `.md1`/`.md2`/`.cal`, post-calibration `.srv`,
+   each round of `.scn`/`.srv` between cut/smooth/baseline/align, final
+   `.img` and `.bmp`, plus all `.pal` files referenced.
+4. For each fixture: record provenance — which EXE build, which input,
+   what menu sequence produced it. Write to `fixtures/README.md`.
+5. Compute SHA-256 of every fixture and check in
+   `fixtures/MANIFEST.sha256`. CI verifies the manifest on every run;
+   accidental edits to a fixture are caught.
+6. Decide and document the *binary-equality* policy per format
+   (CRLF/LF, trailing whitespace, leading-space-for-positive-numbers,
+   etc.). This becomes the spec the codec tests encode.
+
+**Definition of done.**
+- `fixtures/` contains, for each of `.md1`, `.md2`, `.scn`, `.srv`,
+  `.img`, `.cal`, `.pal`, `.bmp`: at least one tutorial fixture and at
+  least one minimal fixture.
+- `fixtures/README.md` documents provenance per file.
+- `fixtures/MANIFEST.sha256` matches reality; CI enforces it.
+
+**Risks specific to this phase.** If the legacy EXE behaves
+non-deterministically (e.g., timestamps in headers), we have to identify
+and document the non-deterministic fields *here*, before codecs depend on
+the wrong bytes being load-bearing. Spend an extra day on this if needed.
+
+### 8.3 Phase 1 — Codecs
+
+**Purpose.** Read and write every legacy format losslessly. Codecs are
+the foundation of every later test — numerics tests load fixture inputs,
+pipeline tests assert against fixture outputs. Get this wrong and
+everything downstream is suspect.
+
+**Tasks.**
+1. Author §6.1 tests *first*, one file per format. Each starts red.
+2. Implement codecs one format at a time, in dependency order:
+   `pal.py` → `cal.py` → `md1.py` → `md2.py` → `scn.py` → `srv.py` →
+   `img.py` → `bmp.py`. The new `fits.py` is deferred to Phase 4.
+3. For each codec: match VB's `Print #1` text semantics exactly —
+   leading space for positive numbers, `0` not `0.0`, CRLF unconditionally
+   on text formats. Encode this as a small `_vb_format.py` helper used
+   by every text codec, not copy-pasted.
+4. Round-trip test (`read → write → bytes identical`) is the gate.
+5. As a side artifact, write `engine/src/radio_cartographer/models.py`
+   defining the typed dataclasses each codec returns (`Sweep`, `Survey`,
+   `Scan`, `CalibrationTable`, `Palette`, `Image`). These are the lingua
+   franca for §8.4.
+
+**Definition of done.**
+- §6.1 (codec tests) is fully green.
+- Every fixture round-trips bytes-identically.
+- `models.py` is the only place the in-memory types are defined; no codec
+  invents its own.
+
+**Risks specific to this phase.** `.bmp` byte-fidelity is the highest-risk
+sub-task (see §9). If it proves infeasible after a week of effort,
+downgrade `.bmp` to "round-trips through Pillow + opens in Photo Viewer"
+and document the deviation in `fixtures/README.md`.
+
+### 8.4 Phase 2 — Numerics
+
+**Purpose.** Reproduce the legacy reductions (FFT, baseline, smooth,
+align, calibrate, gridding, palette application) with vetted numpy/scipy
+implementations, accurate to within agreed tolerance vs. the fixture
+intermediates.
+
+**Tasks.**
+1. Author §6.2 tests first. The synthetic-input tests (impulse → flat
+   FFT, pure DC → zero baseline, etc.) pin behavior independent of any
+   fixture; the fixture-based tests pin behavior against the legacy EXE.
+2. Implement `survey.py` (Ra/Dec/Flux cube + sweep-level operations),
+   `scan.py` (single-sweep reductions), `calibration.py`,
+   `image.py` (gridding + WCS derivation), `palette.py`.
+3. For FFT specifically: keep a faithfully re-coded `four1`
+   (the legacy Numerical Recipes routine) under
+   `_legacy/four1.py` as a *test-only* oracle. Production code uses
+   `numpy.fft`. The test asserts they agree to machine precision on real
+   sweeps; if they don't, that's the alarm.
+4. Define tolerance per operation in a single
+   `engine/tests/_tolerances.py` constants file. Don't sprinkle magic
+   `rtol=1e-6` literals across tests.
+5. `image.py` must emit, alongside the pixel grid, the WCS metadata
+   (CTYPE1/CTYPE2, CRVAL, CRPIX, CDELT) that Phase 4's FITS exporter will
+   consume. Wire it through the dataclass now, not later.
+
+**Definition of done.**
+- §6.2 (numerics tests) is fully green.
+- Running the legacy reductions on tutorial fixture inputs reproduces
+  tutorial fixture intermediates within the documented tolerance.
+- `image.py` exposes a WCS-bearing return type.
+
+**Risks specific to this phase.** Operation order matters: VB applies
+align-then-baseline in some menus and baseline-then-align in others. If
+the test results disagree, audit the legacy code path (see [AGENT.md](../AGENT.md))
+before "fixing" the math.
+
+### 8.5 Phase 3 — RPC
+
+**Purpose.** Expose the engine over JSON-RPC on stdio so the Tauri shell
+can drive it. This is the contract surface — once frozen, the front-end
+can be built against a mock and the engine against fixtures, in parallel.
+
+**Tasks.**
+1. Author §6.3 tests first.
+2. Implement `rpc.py` with `jsonrpcserver` over stdin/stdout. Method names
+   mirror the UI verbs: `open_survey`, `open_scan`, `apply_calibration`,
+   `cut_segment`, `smooth`, `baseline`, `align`, `make_image`,
+   `apply_palette`, `save_*`, `export_fits` (stub for Phase 4).
+3. Build the binary side-channel: length-prefixed numpy `.npy` blobs on a
+   second pipe, referenced by handle in the JSON-RPC payload. Document the
+   wire format in `engine/PROTOCOL.md` — it's the contract the front-end
+   will speak to.
+4. Wire the PyInstaller spec at `engine/sidecar.spec`. Strip unused
+   astropy submodules; verify the resulting binary on all three OSes.
+5. Define `engine/src/radio_cartographer/_handles.py` — the registry
+   that maps integer handles to in-memory Survey/Scan/Image objects so the
+   front-end never sees Python references.
+
+**Definition of done.**
+- §6.3 (RPC tests) is fully green.
+- `pyinstaller engine/sidecar.spec` produces a working binary on Windows,
+  macOS (arm64 + x64), and Linux.
+- Cold-start handshake (`ping` → `pong`) completes within 1 s on a
+  reference machine per OS; documented in `engine/PROTOCOL.md`.
+- `engine/PROTOCOL.md` exists and enumerates every method, every error
+  code, and the binary-channel framing.
+
+**Risks specific to this phase.** Sidecar startup latency on Windows
+Defender machines can balloon past 5 s on first run because of
+AV scanning. Mitigation: package the sidecar as `.exe` (not a directory),
+warm it on Tauri app start, and surface a "starting engine…" splash if
+the handshake takes more than 500 ms.
+
+### 8.6 Phase 4 — Pipeline glue + FITS export
+
+**Purpose.** Replay the tutorial end-to-end headlessly. If the tutorial
+pipeline passes, the math is right, the codecs are right, and the RPC
+surface is rich enough. FITS export lands here because it depends on the
+WCS-bearing image type from Phase 2.
+
+**Tasks.**
+1. Author §6.4 tests first (`test_tutorial_pipeline_scan.py`,
+   `test_tutorial_pipeline_survey.py`,
+   `test_tutorial_pipeline_fits_export.py`).
+2. Implement orchestration in `survey.py` / `scan.py`: high-level
+   `run_tutorial_pipeline(...)` helpers that the pipeline tests call.
+   These are the same primitives the UI will trigger from the menu —
+   exercise them headlessly first.
+3. Implement `io/fits.py` write path using `astropy.io.fits` with the WCS
+   derived in Phase 2. Round-trip via `astropy.io.fits.open` is the unit
+   test; opening the output in DS9 and confirming the source lands at
+   the right RA/Dec is the human acceptance test.
+4. Decide AIPS-vs-IAU WCS conventions for the FITS header (§10
+   question 2) and document the choice in `engine/PROTOCOL.md`.
+
+**Definition of done.**
+- §6.4 (pipeline tests) is fully green.
+- Generated FITS opens in DS9 with the correct WCS overlay, verified
+  by-eye against the tutorial source coordinates.
+- `astropy.io.fits.verify('exception')` passes on every emitted FITS file.
+
+**Risks specific to this phase.** WCS reference-pixel conventions differ
+by 1 between FITS (1-indexed) and numpy (0-indexed). Get this wrong and
+sources land half a pixel off. The DS9 by-eye check is the safety net,
+but the unit test should also assert "brightest pixel is within 0.5 px of
+expected RA/Dec."
+
+### 8.7 Phase 5 — Tauri shell + React UI
+
+**Purpose.** The actual product. Everything before this point is
+plumbing; this is where an ERIRA student opens an app and follows the
+tutorial PDF. The bar is fidelity to VB, not novelty (§5).
+
+**Tasks.**
+1. Author §6.5 (Vitest) and §6.6 (Rust integration) tests first.
+2. In `app/src-tauri/src/main.rs`: spawn the sidecar binary on app
+   start; pipe stdin/stdout through a Tauri command bridge; restart it
+   on crash; kill it on app quit.
+3. In `app/src/ipc/client.ts`: a typed JSON-RPC client that mirrors
+   `engine/PROTOCOL.md`. The binary side-channel returns numpy arrays
+   wrapped in typed views.
+4. Build the views in §3's UI map order:
+   `MainWindow` (menu bar) → `SurveyView` → `ScanView` →
+   `CalibrationView` → `PaletteEditor` → `AboutBox`. Each view is a
+   thin shell over RPC calls; no science logic in the front-end.
+5. Plotly panels with the VB-default aesthetic — Tahoma 8pt, grey
+   background, no dark mode. Drag-select for cuts; double-click confirm;
+   right-click cancel.
+6. Native menu bar via Tauri's menu API, labels and accelerators
+   matching VB exactly (§5).
+7. Mid-phase milestone (≈ week 1): a clickable drag-select prototype
+   demoed to the original VB user (§9 risk). Block on their sign-off
+   before building out the rest.
+
+**Definition of done.**
+- §6.5 and §6.6 tests fully green.
+- A domain user (someone who learned the VB version) completes the
+  tutorial PDF on each OS, on the new app, without asking for help.
+- The about box credits the original authors plus a "ported to Tauri
+  2026" line.
+
+**Risks specific to this phase.** Plotly performance on the full
+gridded image is the main unknown — mitigation in §9 (Heatmapgl, fall
+back to canvas). If the drag-select gesture demo fails the original-user
+review, *stop and rework it* before continuing — getting this wrong
+late is much more expensive than getting it wrong early.
+
+### 8.8 Phase 6 — Release hardening
+
+**Purpose.** Turn a working dev build into an artifact a stranger can
+download and run. This phase exists separately because dogfooding ≠
+shipping; a clean-VM install is the only honest acceptance test.
+
+**Tasks.**
+1. Have CI produce signed-as-unsigned `.msi` (Windows), `.dmg` (macOS
+   universal), `.AppImage` (Linux) artifacts on tag push. Attach to a
+   GitHub Release.
+2. Write `tauri-app/README.md` install/launch sections per OS,
+   including the macOS `xattr -d com.apple.quarantine` step and the
+   Windows SmartScreen click-through (§7.3). These are not optional —
+   first-launch failure with no docs is the most likely "ship-blocker"
+   bug report.
+3. On a clean VM per OS, install from the release artifact and complete
+   the tutorial. No source checkout, no developer tools. If it doesn't
+   work cold, the release isn't ready.
+4. Tag `v0.1.0`. Write release notes that explicitly call out: no code
+   signing, manual update mechanism, supported OS versions, known
+   deviations from the VB original (e.g., any `.bmp` fallback from §8.3).
+5. File follow-up issues for §10 open questions still unresolved
+   (history sidebar, AIPS-vs-IAU defaults if not already decided).
+
+**Definition of done.**
+- `v0.1.0` artifacts published to GitHub Releases.
+- Clean-VM install + tutorial completion verified on Windows 10/11,
+  macOS 13+, and Ubuntu 22.04+.
+- README install section is accurate to the literal observed clicks.
+- All §10 questions either resolved in the codebase or filed as issues.
+
+**Risks specific to this phase.** Linux distribution coverage —
+`.AppImage` works almost everywhere but fails on systems with
+`libfuse2` missing. Document the one-line fix; don't try to support
+flatpak/snap in v0.1.
 
 ---
 
