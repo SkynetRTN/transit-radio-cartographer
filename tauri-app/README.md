@@ -2,8 +2,14 @@
 
 uv workspace + Tauri 2 + React + TypeScript + Vite, with a Python 3.13 engine
 that will be wrapped as a sidecar binary. The full plan is in
-[`../agents/tauri_plan.md`](../agents/tauri_plan.md); this directory implements
-**Phase 0a — workspace bootstrap**.
+[`../agents/tauri_plan.md`](../agents/tauri_plan.md).
+
+**Current state:** Phase 0a (workspace bootstrap) and Phase 1 (codecs) are
+done. The engine has read/write modules for every legacy file format with
+byte-identical round-trip on every fixture (94 tests passing). The Rust shell
+and React front-end are still placeholders — the UI lands in Phase 5. See
+[`../agents/tauri_plan_phase_1.md`](../agents/tauri_plan_phase_1.md) for the
+Phase 1 progress report.
 
 ## Prerequisites
 
@@ -78,29 +84,70 @@ tauri-app/
 ├── .python-version        3.13
 ├── justfile               canonical task list
 ├── engine/                Python sidecar (codecs, numerics, JSON-RPC)
-│   ├── pyproject.toml
+│   ├── pyproject.toml     runtime deps (numpy; scipy/astropy land in Phase 2+)
 │   ├── src/radio_cartographer/
+│   │   ├── models.py      typed dataclasses returned by every codec
+│   │   └── io/            one module per legacy format + _vb_format helper
 │   └── tests/
-├── app/                   Tauri shell + React front-end
-│   ├── package.json
-│   ├── vite.config.ts
-│   ├── src/               React + TS
-│   └── src-tauri/         Rust shell (Cargo.toml pinned to ~Tauri 2.11)
-└── fixtures/              Legacy-EXE oracle bytes (populated in Phase 0b)
+│       └── io/            one test file per format + fixture-manifest check
+└── app/                   Tauri shell + React front-end
+    ├── package.json
+    ├── vite.config.ts
+    ├── src/               React + TS (placeholder shell — see App.tsx)
+    └── src-tauri/         Rust shell (Cargo.toml pinned to ~Tauri 2.11)
 ```
 
-## What works today (Phase 0a exit criteria)
+Legacy-EXE oracle bytes live in [`../fixtures/`](../fixtures/) at the repo
+root (44 files captured in Phase 0b; hash-pinned via
+[`../fixtures/MANIFEST.sha256`](../fixtures/MANIFEST.sha256)).
+
+## What works today
+
+Phase 0a + Phase 1 exit criteria are all green:
 
 - `uv sync` resolves the workspace and creates `.venv/`.
-- `just test` runs pytest and passes (one trivial smoke test that imports the
-  package; real tests land in Phase 1 alongside their codecs).
-- `just lint`, `just typecheck` run clean.
+- `just test` runs pytest — **94 tests passing**, including byte-identical
+  round-trip for every fixture across `.md1`, `.md2`, `.scn`, `.srv`, `.cal`,
+  `.pal`, and `.img`. The `.bmp` codec round-trips opaque bytes; a real
+  fixture capture is deferred to Phase 6.
+- `just lint`, `just typecheck` run clean (ruff + mypy strict).
 - `cd app && npm install && npm run build` produces a Vite bundle.
 - `cargo check --release` from `app/src-tauri/` compiles the Tauri shell.
 - CI matrix (Linux / macOS / Windows) runs all of the above on every push.
 
 What does *not* work yet — by design, deferred to later phases:
 
-- No codecs, no numerics, no RPC.
-- No sidecar binary; `just sidecar` is a stub.
-- `just package` (Tauri bundle) needs the sidecar, so it is also deferred.
+- **Numerics** (Phase 2) — survey/scan/calibration/image/palette reductions.
+  Codecs read fixture files into typed dataclasses; nothing operates on them
+  yet.
+- **RPC + sidecar binary** (Phase 3) — `just sidecar` is a stub.
+- **FITS export** (Phase 4).
+- **The actual UI** (Phase 5) — `just dev` launches a placeholder React shell
+  with no menus, no plots, and no engine wired in.
+- **Packaging** (Phase 6) — `just package` needs the sidecar.
+
+## Engine codec layer (Phase 1)
+
+The eight legacy formats each have a `read(path)` / `write(model, path)`
+pair under [`engine/src/radio_cartographer/io/`](engine/src/radio_cartographer/io/),
+returning the typed dataclasses in
+[`models.py`](engine/src/radio_cartographer/models.py):
+
+| Codec | Model | Notes |
+|---|---|---|
+| `pal.py` | `Palette` | Single-line `Str$`-joined VB format. |
+| `cal.py` | `CalibrationTable` | 6-line header + 3×N body. |
+| `md1.py` | `MD1Document` | Acquisition input; permissive parser; bytes pass-through on write. |
+| `md2.py` | `MD2Document` | Multi-sweep input; `*`-separated sweeps; bytes pass-through on write. |
+| `scn.py` | `Scan` | 8-line header + 4×Total body. Channel flag preserved. |
+| `srv.py` | `Survey` | Header + sweep 0 (240 records) + per-sweep blocks. |
+| `img.py` | `Image` | Binary `Put #` format: Int16-prefixed strings + Int16 pixel grid. |
+| `bmp.py` | `Bitmap` | Opaque bytes for now; real fixture capture in Phase 6. |
+
+Models carry an optional `raw_bytes` field — when a model came from disk,
+`write` emits those bytes verbatim, guaranteeing byte-identity. Models built
+programmatically (Phase 2+) fall through to the per-codec serializer, which
+consults [`io/_vb_format.py`](engine/src/radio_cartographer/io/_vb_format.py)
+for VB's `Print #1` / `Str$` / `Format$` rules. The Channel-B filename guard
+(stem ending in `b`) lives in
+[`io/common.py`](engine/src/radio_cartographer/io/common.py).
