@@ -1,1 +1,26 @@
 .DS_Store
+
+# Python (uv-managed workspace)
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / Vite
+node_modules/
+dist/
+dist-ssr/
+
+# Rust / Tauri
+target/
+tauri-app/app/src-tauri/gen/
+tauri-app/app/src-tauri/binaries/
+
+# Editors
+.vscode/*
+!.vscode/extensions.json
+.idea/

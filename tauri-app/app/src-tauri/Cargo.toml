@@ -1,0 +1,21 @@
+[package]
+name = "radio-cartographer-app"
+version = "0.0.0"
+description = "Tauri shell for the Radio Cartographer app."
+edition = "2021"
+publish = false
+
+[lib]
+name = "radio_cartographer_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+# Tauri minor pins per §9: "Pin to a specific Tauri minor version in Cargo.toml;
+# budget time for a single major-version bump per year." The `~MAJOR.MINOR`
+# constraint allows patch upgrades but blocks accidental minor drift.
+[build-dependencies]
+tauri-build = { version = "~2.6", features = [] }
+
+[dependencies]
+tauri = { version = "~2.11", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

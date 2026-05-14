@@ -1,0 +1,42 @@
+# Radio Cartographer — top-level task runner.
+#
+# All commands run from the `tauri-app/` directory. The justfile is intentionally
+# thin: each recipe is a one-liner that wraps the underlying tool so contributors
+# get one-line muscle memory (`just test`, `just build`) without memorising flags.
+
+set shell := ["bash", "-euo", "pipefail", "-c"]
+set windows-shell := ["pwsh.exe", "-NoLogo", "-NoProfile", "-Command"]
+
+default:
+    @just --list
+
+# Python — install workspace deps from uv.lock into .venv/
+sync:
+    uv sync
+
+# Python — run the engine test suite
+test:
+    uv run pytest
+
+# Python — lint and format check
+lint:
+    uv run ruff check .
+    uv run ruff format --check .
+
+# Python — type-check the engine package
+typecheck:
+    uv run mypy
+
+# Front-end — install npm deps and produce a production web bundle
+build:
+    cd app && npm install && npm run build
+
+# Engine — produce a standalone sidecar binary via PyInstaller.
+# The spec file lands in Phase 3; until then this just prints a TODO.
+sidecar:
+    @echo "TODO(phase 3): uv run pyinstaller engine/sidecar.spec --distpath app/src-tauri/binaries/"
+
+# Whole app — build the bundled Tauri artifact (.msi/.dmg/.AppImage).
+# Bundling depends on the sidecar binary, so `just sidecar` must succeed first.
+package: sidecar build
+    cd app && npm run tauri build
