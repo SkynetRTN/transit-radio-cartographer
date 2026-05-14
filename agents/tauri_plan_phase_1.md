@@ -19,13 +19,13 @@ All six exit criteria are green as of this update:
 3. All §6.1 tests exist as separate per-format files under
    [engine/tests/io/](../tauri-app/engine/tests/io/) and are green
    (94 tests passing).
-4. Every fixture in [tauri-app/fixtures/](../tauri-app/fixtures/) round-trips
+4. Every fixture in [fixtures/](../fixtures/) round-trips
    bytes-identically (39 fixtures across `.md1`, `.md2`, `.scn`, `.srv`,
    `.cal`, `.img`). The only deviation is `.bmp` — see "Carry-over to later
    phases" below.
-5. [fixtures/README.md](../tauri-app/fixtures/README.md) documents per-file
+5. [fixtures/README.md](../fixtures/README.md) documents per-file
    provenance and the per-format binary-equality policy;
-   [fixtures/MANIFEST.sha256](../tauri-app/fixtures/MANIFEST.sha256) records
+   [fixtures/MANIFEST.sha256](../fixtures/MANIFEST.sha256) records
    every fixture hash and is enforced by
    [test_fixture_manifest.py](../tauri-app/engine/tests/io/test_fixture_manifest.py).
 6. [_vb_format.py](../tauri-app/engine/src/radio_cartographer/io/_vb_format.py)
@@ -86,10 +86,10 @@ engine/tests/io/test_vb_format.py              23 tests
 
 ### Phase 0b artifacts
 
-- [fixtures/MANIFEST.sha256](../tauri-app/fixtures/MANIFEST.sha256) — 44
+- [fixtures/MANIFEST.sha256](../fixtures/MANIFEST.sha256) — 44
   SHA-256 hashes covering every fixture across `inputs/`, `intermediates/`,
   and `outputs/`.
-- [fixtures/README.md](../tauri-app/fixtures/README.md) — per-file provenance
+- [fixtures/README.md](../fixtures/README.md) — per-file provenance
   table and the per-format binary-equality policy spec.
 
 ### Dependency hygiene

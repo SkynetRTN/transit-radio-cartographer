@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
+FIXTURES = Path(__file__).resolve().parents[3] / "fixtures"
 
 
 @pytest.fixture(scope="session")
 def fixtures_dir() -> Path:
-    """Absolute path to `tauri-app/fixtures/`."""
+    """Absolute path to `fixtures/` at the repo root."""
     return FIXTURES
 
 

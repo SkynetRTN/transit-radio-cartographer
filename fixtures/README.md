@@ -121,7 +121,7 @@ adding a deviation.
 ## Verifying the manifest
 
 ```bash
-cd tauri-app/fixtures
+cd fixtures
 shasum -a 256 -c MANIFEST.sha256
 ```
 
@@ -133,7 +133,7 @@ CI runs the equivalent on every push.
 2. Place it under the appropriate subdirectory.
 3. Re-generate the manifest:
    ```bash
-   cd tauri-app/fixtures
+   cd fixtures
    {
      (cd inputs && shasum -a 256 *) | awk '{print $1"  inputs/"$2}'
      (cd intermediates && shasum -a 256 *) | awk '{print $1"  intermediates/"$2}'

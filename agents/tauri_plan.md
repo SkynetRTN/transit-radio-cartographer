@@ -101,6 +101,11 @@ ogrc/
 ├── agents/
 │   └── tauri_plan.md                     (this file)
 ├── vb/                                   (legacy source, read-only)
+├── fixtures/                             (golden test data, shared by engine + app)
+│   ├── inputs/                           (real .md1/.md2/.cal samples)
+│   ├── intermediates/                    (real .srv/.scn from legacy EXE)
+│   ├── outputs/                          (real .img/.bmp from legacy EXE)
+│   └── README.md                         (provenance of each fixture)
 └── tauri-app/                            (NEW — everything modern lives here)
     ├── README.md                         (how to build/run the app)
     ├── pyproject.toml                    (uv workspace root; pins Python 3.13)
@@ -149,11 +154,7 @@ ogrc/
     │   │       └── plots/                (Plotly wrappers)
     │   ├── package.json
     │   └── vite.config.ts
-    └── fixtures/                         (golden test data, shared by engine + app)
-        ├── inputs/                       (real .md1/.md2/.cal samples)
-        ├── intermediates/                (real .srv/.scn from legacy EXE)
-        ├── outputs/                      (real .img/.bmp from legacy EXE)
-        └── README.md                     (provenance of each fixture)
+    └── (engine + app live here; no fixtures subdir)
 ```
 
 **Why this shape.** Putting `engine/` and `app/` under one `tauri-app/`
@@ -180,7 +181,7 @@ The single hardest requirement. Strategy:
 1. **Phase 0 — Fixture capture (before any other code).** Run
    `KARALEAH2002.exe` under a Windows VM on a representative dataset and
    capture every intermediate file at each step of the tutorial. Store
-   under `tauri-app/fixtures/` with a README documenting provenance.
+   under `fixtures/` with a README documenting provenance.
    These are the regression oracle.
 2. **One Python codec module per legacy format.** Each module exposes
    `read(path) -> Model` and `write(Model, path) -> None`. The text formats
@@ -406,7 +407,7 @@ Library.
 
 The implementation order is dictated by test order:
 
-1. Fixtures captured into `tauri-app/fixtures/` (§4 step 1).
+1. Fixtures captured into `fixtures/` (§4 step 1).
 2. Codec tests (§6.1) → codec implementations.
 3. Numerics tests (§6.2) → numerics implementations.
 4. RPC tests (§6.3) → RPC server.
@@ -490,7 +491,7 @@ next. The summary table comes first; the detailed breakdown follows.
 | Phase | Output | Definition of done | Depends on |
 |---|---|---|---|
 | 0a. Workspace bootstrap | `tauri-app/` scaffolded: uv workspace, `pyproject.toml`, `.python-version` = `3.13`, `uv.lock`, empty `engine/` and `app/` skeletons, `justfile` | `uv sync` succeeds on Win/Mac/Linux; `just test` runs (zero tests); CI green | — |
-| 0b. Fixture capture | `tauri-app/fixtures/` populated from legacy EXE | Every legacy format has ≥1 fixture; provenance README written; SHA-256 manifest committed | 0a |
+| 0b. Fixture capture | `fixtures/` populated from legacy EXE | Every legacy format has ≥1 fixture; provenance README written; SHA-256 manifest committed | 0a |
 | 1. Codecs | All `tauri-app/engine/src/radio_cartographer/io/*.py` | §6.1 tests pass; round-trips bytes-identical for every fixture | 0b |
 | 2. Numerics | `survey.py`, `scan.py`, `calibration.py`, `image.py`, `palette.py` | §6.2 tests pass; tutorial-fixture intermediates reproduced within tolerance | 1 |
 | 3. RPC | `tauri-app/engine/src/radio_cartographer/rpc.py` + PyInstaller spec | §6.3 tests pass; sidecar binary builds on all three OSes; binary handshakes under 1 s cold-start | 2 |
