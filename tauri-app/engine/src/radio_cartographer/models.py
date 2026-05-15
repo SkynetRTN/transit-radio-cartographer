@@ -185,6 +185,7 @@ class Image:
     pix: int
     palette: Palette
     pixels: NDArray[np.int16]
+    wcs: dict[str, float | str] = field(default_factory=dict)
     raw_bytes: bytes | None = None
 
 
