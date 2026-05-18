@@ -21,9 +21,7 @@ SRV_FIXTURES = [
 
 
 @pytest.mark.parametrize("name", SRV_FIXTURES)
-def test_round_trip_srv(
-    intermediates_dir: Path, tmp_path: Path, name: str
-) -> None:
+def test_round_trip_srv(intermediates_dir: Path, tmp_path: Path, name: str) -> None:
     src = intermediates_dir / name
     survey = read_srv(src)
     out = tmp_path / name

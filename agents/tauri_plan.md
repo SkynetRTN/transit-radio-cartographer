@@ -262,7 +262,7 @@ One file per legacy format. Each must include the listed cases.
 - **`test_srv_io.py`** — reduced survey
   - `test_round_trip_srv` — bytes-identical round-trip for every fixture.
   - `test_srv_carries_calibration_state` — a fixture `.srv` that was
-    calibrated against `cal18a.cal` reads back with the calibration flag set
+    calibrated against `cal25a.cal` reads back with the calibration flag set
     and the Jy/count value preserved.
 
 - **`test_img_io.py`** — gridded image
@@ -333,7 +333,7 @@ where the analytical answer is known.
     legacy fit form).
   - `test_calibration_converts_counts_to_jy` — apply a fitted cal to a
     synthetic measurement, assert Jy result.
-  - `test_calibration_against_tutorial_cal18a` — load `cal18a.cal`, apply
+  - `test_calibration_against_tutorial_cal25a` — load `cal25a.cal`, apply
     to the tutorial `.srv`, assert the resulting Jy values match the
     legacy `.img` to tolerance.
 
@@ -370,7 +370,7 @@ These replay the tutorial workflow headlessly against fixtures.
 - **`test_tutorial_pipeline_scan.py`** — open tutorial `.md1`, baseline,
   cut, calibrate, save `.scn` → matches checked-in `.scn`.
 - **`test_tutorial_pipeline_survey.py`** — open tutorial `.md2`,
-  calibrate against `cal18a.cal`, cut bad segments (script-replays the
+  calibrate against `cal25a.cal`, cut bad segments (script-replays the
   same cut coordinates the human chose in the tutorial), baseline each
   sweep, smooth, baseline, align(0.5), make_image(1) → matches
   checked-in `.img` and `.bmp`.

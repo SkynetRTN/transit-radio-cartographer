@@ -3,6 +3,9 @@ name = "radio-cartographer-workspace"
 version = "0.0.0"
 description = "uv workspace root for the Radio Cartographer Tauri port."
 requires-python = "==3.13.*"
+dependencies = [
+    "numpy>=2.4.4",
+]
 
 [tool.uv.workspace]
 members = ["engine"]

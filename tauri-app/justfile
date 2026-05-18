@@ -25,6 +25,11 @@ lint:
     uv run ruff check .
     uv run ruff format --check .
 
+# Automatically fix formatting and linting issues
+fmt:
+    uv run ruff format .
+    uv run ruff check --fix .
+
 # Python — type-check the engine package
 typecheck:
     uv run mypy
