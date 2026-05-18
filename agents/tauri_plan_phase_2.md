@@ -64,12 +64,6 @@ uv run pytest tauri-app/engine/tests/numerics
 
 ## Deviations / unresolved
 
-- The plan-named `test_calibration_against_tutorial_cal18a` operates on
-  `cal25a.cal` because `cal18a.cal` is not currently captured in
-  `fixtures/inputs/`. The assertions still pin `apply_calibration`'s
-  observable behaviour against `and0a.srv` (per-sweep gain scaling,
-  metadata preservation, `calib` field population). Capture `cal18a.cal`
-  from the legacy EXE and tighten the test once available.
 - `test_makeimage_default_parameters_match_legacy` cross-checks the grid
   *shape* against a legacy `.img` fixture, but does not assert pixel-by-pixel
   equality: no available `.srv`/`.img` pair shares an identical reduction

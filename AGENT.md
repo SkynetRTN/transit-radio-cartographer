@@ -17,7 +17,7 @@ The user manual treats the app as a Survey-reduction pipeline. The canonical pat
 
 1. **Pick the right input.** Use `.md2` files for surveys, `.md1` for scans. Channel-B files (filenames ending `…b.md2`) and B-channel calibration files are explicitly **not** to be used. If `File → New Survey` can't find the data, the file is probably an `.md1` — open it via `Scan → New Scan` instead.
 2. **New Survey.** `Survey → New Survey…` → pick `.md2` → opens [vb/survform.frm](vb/survform.frm).
-3. **Attach a calibration.** `Calibration → Select Calibration…` → pick a `.cal` file (the tutorial uses `cal18a.cal`) → click **Calibrate Survey**. Calibration files are produced by [vb/calform.frm](vb/calform.frm).
+3. **Attach a calibration.** `Calibration → Select Calibration…` → pick a `.cal` file (`cal25a.cal` is the checked-in tutorial fixture) → click **Calibrate Survey**. Calibration files are produced by [vb/calform.frm](vb/calform.frm).
 4. **Cut bad segments** on the survey picture. Click **Cut Segment**, drag from the cut point to the plot edge, double-click to confirm. The green-highlighted region is what gets removed. Cut anything that looks like a "jump" or "drop" plus any excess data at the ends. When done, click **Calibrate Survey** again.
 5. **Walk every sweep individually** to remove RFI spikes and drop-outs. On each sweep click **Baseline Segment**, drag from start to end of the bad region, click to confirm. Right-click cancels a cut in progress. `Survey → GoTo Sweep…` navigates between sweeps (and is how you undo by returning to a sweep). Sweeps with too few points can be skipped.
 6. **Save the survey** when prompted at the end of the sweep walk → produces `.srv`.

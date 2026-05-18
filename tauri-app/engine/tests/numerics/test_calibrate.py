@@ -29,12 +29,10 @@ def test_calibration_converts_counts_to_jy(inputs_dir) -> None:
     assert np.allclose(measured * gain, known, rtol=0.25)
 
 
-def test_calibration_against_tutorial_cal18a(inputs_dir, intermediates_dir) -> None:
-    # The plan names this test for `cal18a.cal`, but only `cal25a.cal` is
-    # currently captured in `fixtures/inputs/` — fixture-parity gap tracked
-    # in `agents/tauri_plan_phase_2.md`. The assertions below pin
-    # `apply_calibration`'s observable behaviour against a real reduced
-    # survey, which is what the test name's intent demands.
+def test_calibration_against_tutorial_cal25a(inputs_dir, intermediates_dir) -> None:
+    # `cal25a.cal` is the checked-in tutorial calibration fixture (ERIRA 2025
+    # cohort — Cyg A = 1581 Jy known-source row). Verifies `apply_calibration`
+    # scales every flux by the fitted gain and preserves geometry.
     cal = read_cal(inputs_dir / "cal25a.cal")
     survey = read_srv(intermediates_dir / "and0a.srv")
     gain = fit_counts_to_jy(cal)
