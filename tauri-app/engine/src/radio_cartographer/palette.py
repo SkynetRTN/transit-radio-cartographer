@@ -6,7 +6,9 @@ from numpy.typing import NDArray
 from .models import Palette
 
 
-def apply_palette(data: NDArray[np.float64], palette: Palette, flux_min: float, flux_max: float) -> NDArray[np.uint8]:
+def apply_palette(
+    data: NDArray[np.float64], palette: Palette, flux_min: float, flux_max: float
+) -> NDArray[np.uint8]:
     arr = np.asarray(data, dtype=np.float64)
     clipped = np.clip(arr, flux_min, flux_max)
     norm = (clipped - flux_min) / max(flux_max - flux_min, 1e-12)

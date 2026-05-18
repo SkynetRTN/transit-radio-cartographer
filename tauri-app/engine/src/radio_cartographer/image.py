@@ -41,6 +41,9 @@ def make_image(survey: Survey, pix: int = 1, width: int = 399, height: int = 319
     weighted, _, _ = np.histogram2d(dec, ra, bins=(yedges, xedges), weights=flux)
     counts, _, _ = np.histogram2d(dec, ra, bins=(yedges, xedges))
     pixels = np.divide(weighted, counts, out=np.zeros_like(weighted), where=counts > 0)
+    # Flip the RA axis so column 0 is at `max_ra` — matches the FITS-standard
+    # `cdelt1 < 0` (RA decreasing with sample index) the WCS below advertises.
+    pixels = pixels[:, ::-1]
     cdelt1 = -((max_ra - min_ra) / max(width - 1, 1))
     cdelt2 = (max_dec - min_dec) / max(height - 1, 1)
     wcs = WCSMetadata(
@@ -53,4 +56,6 @@ def make_image(survey: Survey, pix: int = 1, width: int = 399, height: int = 319
         cdelt1=cdelt1,
         cdelt2=cdelt2,
     )
-    return GriddedImage(pixels=pixels, wcs=wcs, min_ra=min_ra, max_ra=max_ra, min_dec=min_dec, max_dec=max_dec)
+    return GriddedImage(
+        pixels=pixels, wcs=wcs, min_ra=min_ra, max_ra=max_ra, min_dec=min_dec, max_dec=max_dec
+    )

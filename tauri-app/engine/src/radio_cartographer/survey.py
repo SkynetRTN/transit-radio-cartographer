@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 
 import numpy as np
@@ -29,10 +30,11 @@ def align_sweep(sweep: Sweep, offset: float) -> Sweep:
 
 
 def apply_to_survey(survey: Survey, op: str, **kwargs: float | int) -> Survey:
-    fn = {
+    ops: dict[str, Callable[[Sweep], Sweep]] = {
         "smooth": lambda s: smooth_sweep(s, int(kwargs.get("window", 5))),
         "baseline": lambda s: baseline_sweep(s, int(kwargs.get("degree", 1))),
         "align": lambda s: align_sweep(s, float(kwargs.get("offset", 0.0))),
-    }[op]
-    sweeps = tuple(fn(s) for s in survey.sweeps)
+    }
+    fn = ops[op]
+    sweeps: tuple[Sweep, ...] = tuple(fn(s) for s in survey.sweeps)
     return replace(survey, sweeps=sweeps)

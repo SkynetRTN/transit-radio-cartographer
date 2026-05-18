@@ -48,8 +48,7 @@ def _parse_cal(raw: bytes) -> CalibrationTable:
     expected_body = 3 * cal_num
     if len(lines) < body_start + expected_body:
         raise ValueError(
-            f".cal claims {cal_num} entries but file has only "
-            f"{len(lines) - body_start} body lines"
+            f".cal claims {cal_num} entries but file has only {len(lines) - body_start} body lines"
         )
     entries: list[CalibrationEntry] = []
     for i in range(cal_num):

@@ -1,5 +1,4 @@
 import numpy as np
-
 from radio_cartographer.models import Palette, PaletteStop
 from radio_cartographer.palette import apply_palette
 

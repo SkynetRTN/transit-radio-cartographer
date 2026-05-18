@@ -59,9 +59,7 @@ def test_rejects_b_channel_filename(inputs_dir: Path) -> None:
         "jupiter00a.md2",
     ],
 )
-def test_md2_roundtrip_bytes_identical(
-    inputs_dir: Path, tmp_path: Path, name: str
-) -> None:
+def test_md2_roundtrip_bytes_identical(inputs_dir: Path, tmp_path: Path, name: str) -> None:
     src = inputs_dir / name
     doc = read_md2(src)
     out = tmp_path / name

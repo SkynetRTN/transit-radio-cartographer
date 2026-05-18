@@ -1,5 +1,4 @@
 import numpy as np
-
 from radio_cartographer.scan import smooth_flux
 
 

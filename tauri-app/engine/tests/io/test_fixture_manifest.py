@@ -27,7 +27,6 @@ def test_manifest_matches_fixtures(fixtures_dir: Path) -> None:
         actual = hashlib.sha256(target.read_bytes()).hexdigest()
         if actual != expected_hash:
             failures.append(
-                f"hash mismatch: {rel_path} (expected {expected_hash[:12]}…, "
-                f"got {actual[:12]}…)"
+                f"hash mismatch: {rel_path} (expected {expected_hash[:12]}…, got {actual[:12]}…)"
             )
     assert not failures, "MANIFEST.sha256 out of sync:\n  " + "\n  ".join(failures)

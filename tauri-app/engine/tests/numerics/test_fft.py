@@ -1,5 +1,4 @@
 import numpy as np
-
 from radio_cartographer._legacy.four1 import four1_real
 from radio_cartographer.scan import fft_real
 from tests._tolerances import FFT_ATOL

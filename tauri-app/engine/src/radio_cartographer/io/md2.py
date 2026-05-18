@@ -62,9 +62,7 @@ def _parse_md2(raw: bytes) -> MD2Document:
 
 def _finalize_sweep(tokens: list[float]) -> RawSweep:
     if len(tokens) % 3 != 0:
-        raise ValueError(
-            f".md2 sweep has {len(tokens)} numeric tokens, not a multiple of 3"
-        )
+        raise ValueError(f".md2 sweep has {len(tokens)} numeric tokens, not a multiple of 3")
     arr = np.array(tokens, dtype=np.float64).reshape(-1, 3)
     return RawSweep(
         ra=arr[:, 0].copy(),

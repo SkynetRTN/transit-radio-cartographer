@@ -33,5 +33,3 @@ def split_crlf_lines(blob: bytes) -> list[str]:
     else:
         lines = text.split("\r\n")
     return lines
-
-

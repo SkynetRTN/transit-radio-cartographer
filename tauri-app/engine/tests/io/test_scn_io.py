@@ -22,9 +22,7 @@ SCN_FIXTURES = [
 
 
 @pytest.mark.parametrize("name", SCN_FIXTURES)
-def test_round_trip_scn(
-    intermediates_dir: Path, tmp_path: Path, name: str
-) -> None:
+def test_round_trip_scn(intermediates_dir: Path, tmp_path: Path, name: str) -> None:
     src = intermediates_dir / name
     scan = read_scn(src)
     out = tmp_path / name

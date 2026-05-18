@@ -18,7 +18,9 @@ def smooth_flux(flux: NDArray[np.float64], window: int = 5) -> NDArray[np.float6
     return np.convolve(xp, kernel, mode="valid")[: x.size]
 
 
-def subtract_baseline(dec: NDArray[np.float64], flux: NDArray[np.float64], degree: int = 1) -> NDArray[np.float64]:
+def subtract_baseline(
+    dec: NDArray[np.float64], flux: NDArray[np.float64], degree: int = 1
+) -> NDArray[np.float64]:
     deca = np.asarray(dec, dtype=np.float64)
     fluxa = np.asarray(flux, dtype=np.float64)
     coeff = np.polyfit(deca, fluxa, deg=degree)
@@ -26,9 +28,12 @@ def subtract_baseline(dec: NDArray[np.float64], flux: NDArray[np.float64], degre
     return fluxa - baseline
 
 
-def align_by_offset(dec: NDArray[np.float64], flux: NDArray[np.float64], offset: float) -> NDArray[np.float64]:
+def align_by_offset(
+    dec: NDArray[np.float64], flux: NDArray[np.float64], offset: float
+) -> NDArray[np.float64]:
     deca = np.asarray(dec, dtype=np.float64)
     fluxa = np.asarray(flux, dtype=np.float64)
     if fluxa.size == 0 or offset == 0.0:
         return fluxa.copy()
-    return np.interp(deca - offset, deca, fluxa, left=fluxa[0], right=fluxa[-1])
+    interpolated = np.interp(deca - offset, deca, fluxa, left=fluxa[0], right=fluxa[-1])
+    return np.asarray(interpolated, dtype=np.float64)

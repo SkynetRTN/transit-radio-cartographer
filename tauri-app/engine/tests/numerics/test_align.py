@@ -1,5 +1,4 @@
 import numpy as np
-
 from radio_cartographer.scan import align_by_offset
 from tests._tolerances import ALIGN_ATOL
 
