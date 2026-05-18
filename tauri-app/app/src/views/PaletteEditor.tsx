@@ -1,0 +1,3 @@
+import { useState } from "react"; import { rpcClient } from "../ipc/client";
+export function PaletteEditor(){const [count,setCount]=useState(0);const [error,setError]=useState("");const add=()=>{if(count>=100){setError("Maximum 100 palette points.");return;}setError("");setCount(count+1)};
+return <section><h2>Palette Editor</h2><button onClick={add}>Add Point</button><button onClick={()=>rpcClient.request("save_palette",{})}>Save Palette</button><button onClick={()=>rpcClient.request("open_palette",{})}>Load Palette</button><div data-testid='point-count'>{count}</div>{error&&<div>{error}</div>}</section>}
