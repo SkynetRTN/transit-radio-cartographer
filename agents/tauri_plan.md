@@ -366,6 +366,9 @@ where the analytical answer is known.
 ### 6.4 Engine — end-to-end pipeline tests (`tauri-app/engine/tests/pipeline/`)
 
 These replay the tutorial workflow headlessly against fixtures.
+*Deferred to Phase 6 (later / bonus) — see §8.8.* They are a
+regression net for everything in Phases 1–3, not a prerequisite for
+the Phase 4 UI work.
 
 - **`test_tutorial_pipeline_scan.py`** — open tutorial `.md1`, baseline,
   cut, calibrate, save `.scn` → matches checked-in `.scn`.
@@ -408,12 +411,13 @@ Library.
 The implementation order is dictated by test order:
 
 1. Fixtures captured into `fixtures/` (§4 step 1).
-2. Codec tests (§6.1) → codec implementations.
+2. Codec tests (§6.1) → codec implementations (FITS codec deferred).
 3. Numerics tests (§6.2) → numerics implementations.
-4. RPC tests (§6.3) → RPC server.
-5. Pipeline tests (§6.4) → glue code in `survey.py` / `scan.py`.
-6. Front-end tests (§6.5) and Tauri tests (§6.6) → React components and
+4. RPC tests (§6.3) → RPC server (`export_fits` is a stub at this stage).
+5. Front-end tests (§6.5) and Tauri tests (§6.6) → React components and
    `main.rs` bridge.
+6. (Later / bonus) Pipeline tests (§6.4) → end-to-end regression replay
+   and the real `io/fits.py` + `export_fits` implementation.
 
 No production module is written before its tests exist and fail.
 
@@ -495,9 +499,9 @@ next. The summary table comes first; the detailed breakdown follows.
 | 1. Codecs | All `tauri-app/engine/src/radio_cartographer/io/*.py` | §6.1 tests pass; round-trips bytes-identical for every fixture | 0b |
 | 2. Numerics | `survey.py`, `scan.py`, `calibration.py`, `image.py`, `palette.py` | §6.2 tests pass; tutorial-fixture intermediates reproduced within tolerance | 1 |
 | 3. RPC | `tauri-app/engine/src/radio_cartographer/rpc.py` + PyInstaller spec | §6.3 tests pass; sidecar binary builds on all three OSes; binary handshakes under 1 s cold-start | 2 |
-| 4. Pipeline glue + FITS export | End-to-end tutorial replay headless; `io/fits.py` | §6.4 tests pass; FITS opens cleanly in DS9 with correct WCS | 3 |
-| 5. Tauri shell + React UI | The actual app | §6.5 + §6.6 tests pass; a domain user completes the tutorial PDF on each OS without help | 4 |
-| 6. Release hardening | Packaged artifacts + docs | Unsigned `.msi` / `.dmg` / `.AppImage` published to GitHub Releases; install/launch instructions verified on a clean VM per OS | 5 |
+| 4. Tauri shell + React UI | The actual app | §6.5 + §6.6 tests pass; a domain user completes the tutorial PDF on each OS without help | 3 |
+| 5. Release hardening | Packaged artifacts + docs | Unsigned `.msi` / `.dmg` / `.AppImage` published to GitHub Releases; install/launch instructions verified on a clean VM per OS | 4 |
+| 6. (Later / bonus) Pipeline glue + FITS export | Headless tutorial replay; `io/fits.py`; `export_fits` RPC + menu item | §6.4 tests pass; FITS opens cleanly in DS9 with correct WCS; shipped as a v0.2 follow-up | 5 |
 
 ### 8.1 Phase 0a — Workspace bootstrap
 
@@ -583,7 +587,7 @@ everything downstream is suspect.
 1. Author §6.1 tests *first*, one file per format. Each starts red.
 2. Implement codecs one format at a time, in dependency order:
    `pal.py` → `cal.py` → `md1.py` → `md2.py` → `scn.py` → `srv.py` →
-   `img.py` → `bmp.py`. The new `fits.py` is deferred to Phase 4.
+   `img.py` → `bmp.py`. The new `fits.py` is deferred to Phase 6 (bonus).
 3. For each codec: match VB's `Print #1` text semantics exactly —
    leading space for positive numbers, `0` not `0.0`, CRLF unconditionally
    on text formats. Encode this as a small `_vb_format.py` helper used
@@ -653,7 +657,8 @@ can be built against a mock and the engine against fixtures, in parallel.
 2. Implement `rpc.py` with `jsonrpcserver` over stdin/stdout. Method names
    mirror the UI verbs: `open_survey`, `open_scan`, `apply_calibration`,
    `cut_segment`, `smooth`, `baseline`, `align`, `make_image`,
-   `apply_palette`, `save_*`, `export_fits` (stub for Phase 4).
+   `apply_palette`, `save_*`, `export_fits` (stub returning
+   `not_implemented`; real impl lands in Phase 6).
 3. Build the binary side-channel: length-prefixed numpy `.npy` blobs on a
    second pipe, referenced by handle in the JSON-RPC payload. Document the
    wire format in `engine/PROTOCOL.md` — it's the contract the front-end
@@ -679,45 +684,14 @@ AV scanning. Mitigation: package the sidecar as `.exe` (not a directory),
 warm it on Tauri app start, and surface a "starting engine…" splash if
 the handshake takes more than 500 ms.
 
-### 8.6 Phase 4 — Pipeline glue + FITS export
-
-**Purpose.** Replay the tutorial end-to-end headlessly. If the tutorial
-pipeline passes, the math is right, the codecs are right, and the RPC
-surface is rich enough. FITS export lands here because it depends on the
-WCS-bearing image type from Phase 2.
-
-**Tasks.**
-1. Author §6.4 tests first (`test_tutorial_pipeline_scan.py`,
-   `test_tutorial_pipeline_survey.py`,
-   `test_tutorial_pipeline_fits_export.py`).
-2. Implement orchestration in `survey.py` / `scan.py`: high-level
-   `run_tutorial_pipeline(...)` helpers that the pipeline tests call.
-   These are the same primitives the UI will trigger from the menu —
-   exercise them headlessly first.
-3. Implement `io/fits.py` write path using `astropy.io.fits` with the WCS
-   derived in Phase 2. Round-trip via `astropy.io.fits.open` is the unit
-   test; opening the output in DS9 and confirming the source lands at
-   the right RA/Dec is the human acceptance test.
-4. Decide AIPS-vs-IAU WCS conventions for the FITS header (§10
-   question 2) and document the choice in `engine/PROTOCOL.md`.
-
-**Definition of done.**
-- §6.4 (pipeline tests) is fully green.
-- Generated FITS opens in DS9 with the correct WCS overlay, verified
-  by-eye against the tutorial source coordinates.
-- `astropy.io.fits.verify('exception')` passes on every emitted FITS file.
-
-**Risks specific to this phase.** WCS reference-pixel conventions differ
-by 1 between FITS (1-indexed) and numpy (0-indexed). Get this wrong and
-sources land half a pixel off. The DS9 by-eye check is the safety net,
-but the unit test should also assert "brightest pixel is within 0.5 px of
-expected RA/Dec."
-
-### 8.7 Phase 5 — Tauri shell + React UI
+### 8.6 Phase 4 — Tauri shell + React UI
 
 **Purpose.** The actual product. Everything before this point is
 plumbing; this is where an ERIRA student opens an app and follows the
-tutorial PDF. The bar is fidelity to VB, not novelty (§5).
+tutorial PDF. The bar is fidelity to VB, not novelty (§5). Because the
+RPC surface from Phase 3 already exposes every reduction verb the UI
+needs, the shell can be built directly on top of it without waiting on
+the Phase 6 headless pipeline replay or FITS export.
 
 **Tasks.**
 1. Author §6.5 (Vitest) and §6.6 (Rust integration) tests first.
@@ -735,15 +709,22 @@ tutorial PDF. The bar is fidelity to VB, not novelty (§5).
    background, no dark mode. Drag-select for cuts; double-click confirm;
    right-click cancel.
 6. Native menu bar via Tauri's menu API, labels and accelerators
-   matching VB exactly (§5).
-7. Mid-phase milestone (≈ week 1): a clickable drag-select prototype
+   matching VB exactly (§5). The `Image → Save Image As FITS…` item is
+   intentionally **not** added in this phase — it lands with Phase 6 so
+   the menu never advertises a dead button.
+7. Drive the workflow through the per-step RPC verbs (`open_survey`,
+   `apply_calibration`, `cut_segment`, `smooth`, `baseline`, `align`,
+   `make_image`, `apply_palette`, `save_*`). No `run_tutorial_pipeline`
+   helper is required; the UI *is* the orchestration.
+8. Mid-phase milestone (≈ week 1): a clickable drag-select prototype
    demoed to the original VB user (§9 risk). Block on their sign-off
    before building out the rest.
 
 **Definition of done.**
 - §6.5 and §6.6 tests fully green.
 - A domain user (someone who learned the VB version) completes the
-  tutorial PDF on each OS, on the new app, without asking for help.
+  tutorial PDF on each OS, on the new app, without asking for help —
+  using only the legacy `.img` / `.bmp` save paths.
 - The about box credits the original authors plus a "ported to Tauri
   2026" line.
 
@@ -753,7 +734,7 @@ back to canvas). If the drag-select gesture demo fails the original-user
 review, *stop and rework it* before continuing — getting this wrong
 late is much more expensive than getting it wrong early.
 
-### 8.8 Phase 6 — Release hardening
+### 8.7 Phase 5 — Release hardening
 
 **Purpose.** Turn a working dev build into an artifact a stranger can
 download and run. This phase exists separately because dogfooding ≠
@@ -772,10 +753,12 @@ shipping; a clean-VM install is the only honest acceptance test.
    the tutorial. No source checkout, no developer tools. If it doesn't
    work cold, the release isn't ready.
 4. Tag `v0.1.0`. Write release notes that explicitly call out: no code
-   signing, manual update mechanism, supported OS versions, known
-   deviations from the VB original (e.g., any `.bmp` fallback from §8.3).
+   signing, manual update mechanism, supported OS versions, the absence
+   of FITS export (deferred to Phase 6 / v0.2), and known deviations
+   from the VB original (e.g., any `.bmp` fallback from §8.3).
 5. File follow-up issues for §10 open questions still unresolved
-   (history sidebar, AIPS-vs-IAU defaults if not already decided).
+   (history sidebar, AIPS-vs-IAU defaults if not already decided), and
+   open a tracking issue for the Phase 6 FITS-export work.
 
 **Definition of done.**
 - `v0.1.0` artifacts published to GitHub Releases.
@@ -788,6 +771,58 @@ shipping; a clean-VM install is the only honest acceptance test.
 `.AppImage` works almost everywhere but fails on systems with
 `libfuse2` missing. Document the one-line fix; don't try to support
 flatpak/snap in v0.1.
+
+### 8.8 Phase 6 — Pipeline glue + FITS export
+
+
+1. A **headless tutorial replay** that exercises the full reduction
+   chain end-to-end. Cheap to write once the RPC surface and codecs
+   are stable, and a very strong regression net for everything in
+   Phases 1–3. It is *not* user-facing — its value is to CI and to
+   future contributors who change the math.
+2. **FITS export** — Goal #2 in §1. Deferred here, not dropped: the
+   `export_fits` RPC stub from Phase 3 gets a real implementation, and
+   the `Image → Save Image As FITS…` menu item appears for the first
+   time.
+
+This phase can be picked up at any point Phase 3 and does not
+block anything else. Treat it as a single focused issue rather than a
+roadmap milestone.
+
+**Tasks.**
+1. Author §6.4 tests first (`test_tutorial_pipeline_scan.py`,
+   `test_tutorial_pipeline_survey.py`,
+   `test_tutorial_pipeline_fits_export.py`).
+2. Replay the tutorial workflow in tests using the same RPC verbs the
+   UI calls. If a thin `run_tutorial_pipeline(...)` helper in
+   `survey.py` / `scan.py` makes the tests more readable, add it — but
+   it is purely a test convenience, not a UI dependency.
+3. Implement `io/fits.py` write path using `astropy.io.fits` with the
+   WCS derived in Phase 2. Round-trip via `astropy.io.fits.open` is the
+   unit test; opening the output in DS9 and confirming the source
+   lands at the right RA/Dec is the human acceptance test.
+4. Replace the Phase 3 `export_fits` stub with the real implementation.
+   Add the `Image → Save Image As FITS…` menu item and wire it up in
+   the React shell.
+5. Decide AIPS-vs-IAU WCS conventions for the FITS header (§10
+   question 2) and document the choice in `engine/PROTOCOL.md`.
+6. Cut a `v0.2.0` release reusing the Phase 5 packaging pipeline; call
+   out FITS export as the headline new capability.
+
+**Definition of done.**
+- §6.4 (pipeline tests) is fully green and wired into CI.
+- Generated FITS opens in DS9 with the correct WCS overlay, verified
+  by-eye against the tutorial source coordinates.
+- `astropy.io.fits.verify('exception')` passes on every emitted FITS file.
+- The unit test additionally asserts "brightest pixel is within 0.5 px
+  of expected RA/Dec" to catch the FITS-vs-numpy indexing pitfall
+  before the human DS9 check.
+- `v0.2.0` is tagged and the menu item is no longer hidden.
+
+**Risks specific to this phase.** WCS reference-pixel conventions differ
+by 1 between FITS (1-indexed) and numpy (0-indexed). Get this wrong and
+sources land half a pixel off — the unit-test assertion above plus the
+DS9 by-eye check together cover it.
 
 ---
 
