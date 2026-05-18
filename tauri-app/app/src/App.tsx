@@ -1,3 +1,11 @@
 import './App.css';
 import { MainWindow } from './views/MainWindow';
-export default function App(){ return <MainWindow/>; }
+import { SurveyProvider } from './state/survey-context';
+
+export default function App() {
+  return (
+    <SurveyProvider>
+      <MainWindow />
+    </SurveyProvider>
+  );
+}

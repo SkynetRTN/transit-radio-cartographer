@@ -5,13 +5,320 @@ body,
   height: 100%;
 }
 
-.app-root {
-  font-family: Tahoma, "DejaVu Sans", sans-serif;
+body {
+  font-family: Tahoma, "Segoe UI", "DejaVu Sans", sans-serif;
   font-size: 12px;
-  color: #000;
-  background: #c0c0c0;
+  color: #111;
+  background: #bdbdbd;
+}
+
+.main-window {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.menu-bar {
+  display: flex;
+  gap: 0;
+  background: #ffffff;
+  border-bottom: 1px solid #b0b0b0;
+  padding: 4px 8px;
+}
+
+.menu-bar > .menu-root {
+  position: relative;
+}
+
+.menu-bar button {
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 4px 10px;
+  font: inherit;
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.menu-bar button:hover:not(:disabled) {
+  background: #e8e8e8;
+}
+
+.menu-bar button[aria-expanded='true'] {
+  background: #dcdcdc;
+}
+
+.menu-popup {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  background: #ffffff;
+  border: 1px solid #c8c8c8;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.18);
+  min-width: 220px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0;
+}
+
+.menu-popup button {
+  text-align: left;
+  padding: 6px 16px;
+  border: none;
+  border-radius: 0;
+  white-space: nowrap;
+}
+
+.menu-popup button:hover:not(:disabled) {
+  background: #e6f1ff;
+}
+
+.menu-popup button:disabled {
+  color: #a8a8a8;
+  cursor: default;
+}
+
+.menu-sep {
+  border-top: 1px solid #e2e2e2;
+  margin: 4px 0;
+}
+
+.status-bar {
+  background: #f3f3f3;
+  border-bottom: 1px solid #d0d0d0;
+  padding: 6px 12px;
+  font-size: 11px;
+  color: #444;
+}
+
+.status-bar .error {
+  color: #a40000;
+}
+
+.view-area {
+  flex: 1;
+  padding: 12px;
+  overflow: auto;
+}
+
+.opening-hint {
   height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
+  color: #555;
+}
+
+.aux-close {
+  margin-top: 12px;
+}
+
+/* ---------- workspace frame (newsurvey / calibratesurvey) ------------ */
+
+.survey-view.workspace,
+.survey-view.workspace.calibrate-view {
+  width: 100%;
+}
+
+.workspace-frame {
+  background: #ffffff;
+  border: 1px solid #c8c8c8;
+  border-radius: 4px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  overflow: hidden;
+}
+
+.workspace-title {
+  background: #f0f0f0;
+  border-bottom: 1px solid #d8d8d8;
+  padding: 8px 14px;
+  font-weight: 600;
+  color: #444;
+}
+
+.workspace-body {
+  display: grid;
+  grid-template-columns: 1fr 220px;
+  gap: 16px;
+  padding: 16px;
+}
+
+.workspace-plots {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.plot-row {
+  display: grid;
+  grid-template-columns: 24px 1fr;
+  align-items: stretch;
+}
+
+.axis-label-y {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  text-align: center;
+  letter-spacing: 6px;
+  color: #333;
+  font-weight: 600;
+  padding-right: 6px;
+}
+
+.plot-cell {
+  border: none;
+  position: relative;
+}
+
+.plot-status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  color: #666;
+}
+
+.plot-status.error {
+  color: #a40000;
+}
+
+.baseline-placeholder {
+  opacity: 0.55;
+}
+
+/* Calibrate-Survey: two side-by-side bracket panels (initial / terminal),
+   each zoomed to its own RA range. The thin gutter visually separates the
+   two clocks of time and emphasises that the on/off sub-clusters within
+   each panel are part of the same bracket. */
+.bracket-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  min-width: 0;
+}
+
+.bracket-split .plot-cell {
+  border: 1px solid #c8c8c8;
+  border-radius: 2px;
+  background: #ffffff;
+  min-width: 0;
+}
+
+.plot-row-label {
+  display: grid;
+  grid-template-columns: 24px 1fr;
+  margin-top: -4px;
+  margin-bottom: 4px;
+}
+
+.axis-label-y-spacer {
+  /* keeps the .x-axis-label aligned with the plot column above */
+}
+
+.x-axis-label {
+  text-align: center;
+  font-weight: 600;
+  color: #333;
+}
+
+/* ---------- workspace side panel ------------ */
+
+.workspace-side {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.side-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.side-buttons button {
+  padding: 8px 14px;
+  border: 1px solid #999;
+  border-radius: 4px;
+  background: #f6f6f6;
+  font: inherit;
+  cursor: pointer;
+}
+
+.side-buttons button:hover:not(:disabled) {
+  background: #ececec;
+}
+
+.side-buttons button:disabled {
+  background: #f0f0f0;
+  color: #888;
+  cursor: default;
+}
+
+.side-buttons button.primary {
+  background: #ffffff;
+  border-color: #5a5a5a;
+  font-weight: 600;
+}
+
+.side-buttons button.active {
+  background: #d8f0ff;
+  border-color: #2e7ec0;
+}
+
+.button-gap {
+  height: 12px;
+}
+
+.cal-sidebar {
+  border-top: 1px solid #e2e2e2;
+  padding-top: 10px;
+}
+
+.cal-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.cal-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  cursor: pointer;
+}
+
+.readout {
+  border-top: 1px solid #e2e2e2;
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: #333;
+}
+
+.readout-pin {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #2e7ec0;
+}
+
+.sweep-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sweep-nav button {
+  padding: 4px 8px;
+}
+
+.survey-view.empty {
+  text-align: center;
+  padding: 32px 16px;
+  color: #555;
 }
