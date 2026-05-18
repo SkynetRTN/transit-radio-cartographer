@@ -18,7 +18,8 @@ Handshake:
 - `get_sweep({"handle": int, "index": int}) -> {"ra": BinaryRef, "dec": BinaryRef, "flux": BinaryRef, "sample_count": int}`
 - `close_handle({"handle": int}) -> {"closed": int}`
 - `echo_array({"token": string}) -> {"array": BinaryRef}` (test utility for binary side-channel)
-- `export_fits(...)` is a Phase 3 stub and returns an error.
+- `export_fits({"handle": int, "path": string}) -> {"ok": true, "path": string, "shape": [int, int]}
+  - `handle` must reference an open survey. The sidecar grids to a WCS-bearing image and writes FITS.
 
 `BinaryRef` format:
 - `{ "token": "bin-N", "size": <npy_payload_size_bytes> }`
@@ -51,3 +52,9 @@ Error codes:
 - `1002` I/O or parse failure opening files
 
 The sidecar should return structured errors for ordinary user/file problems and continue serving requests.
+
+
+`export_fits` error behavior:
+- `-32602`: missing/invalid params
+- `1001`: invalid or wrong-type handle
+- `1002`: FITS write failure

@@ -95,3 +95,37 @@ def subtract_baseline_off_source(
     coeff = np.polyfit(ra_arr[mask], flux_arr[mask], deg=1)
     baseline = np.polyval(coeff, ra_arr)
     return flux_arr - baseline
+
+from pathlib import Path
+
+from .io.md1 import read_md1
+from .models import Scan
+
+
+def run_tutorial_scan_pipeline(
+    md1_path: str | Path,
+    *,
+    off_source: NDArray[np.bool_] | NDArray[np.int_] | None = None,
+) -> Scan:
+    md1 = read_md1(md1_path)
+    flux = calibrate_scan(md1.samples.flux, md1.samples.ra)
+    ra = md1.samples.ra[120 : 120 + flux.size]
+    dec = md1.samples.dec[120 : 120 + flux.size]
+    check = np.zeros(flux.size, dtype=int)
+    if off_source is not None:
+        mask = np.asarray(off_source).astype(bool)
+        check[mask] = -1
+        flux = subtract_baseline_off_source(ra, flux, mask)
+    return Scan(
+        name=Path(md1_path).stem.upper(),
+        channel="A",
+        peak="",
+        min_dec=float(np.min(dec)),
+        max_dec=float(np.max(dec)),
+        min_flux=float(np.min(flux)),
+        max_flux=float(np.max(flux)),
+        check=check,
+        ra=ra,
+        dec=dec,
+        flux=np.asarray(flux, dtype=np.float64),
+    )

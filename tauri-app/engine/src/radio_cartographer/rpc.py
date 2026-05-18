@@ -12,7 +12,9 @@ from typing import Any
 import numpy as np
 
 from ._handles import HandleRegistry, UnknownHandleError
+from .io.fits import write_fits
 from .io.md2 import read_md2
+from .image import make_image
 from .models import Survey
 from .survey import reduce_raw_sweep
 
@@ -78,7 +80,7 @@ class RpcServer:
             elif method == "echo_array":
                 result = self._echo_array(params)
             elif method == "export_fits":
-                raise RpcError(ERR_INVALID_PARAMS, "export_fits is not implemented in Phase 3")
+                result = self._export_fits(params)
             else:
                 raise RpcError(ERR_UNKNOWN_METHOD, f"Unknown method: {method}")
             return {"jsonrpc": "2.0", "id": req_id, "result": result}
@@ -149,6 +151,25 @@ class RpcServer:
         return {"array": self._binary.put_array(arr)}
 
 
+
+    def _export_fits(self, params: dict[str, Any]) -> dict[str, Any]:
+        handle = int(params.get("handle", -1))
+        out_path = params.get("path")
+        if not out_path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        try:
+            obj = self._handles.get(handle)
+        except UnknownHandleError as exc:
+            raise RpcError(ERR_INVALID_HANDLE, f"unknown handle: {handle}") from exc
+        if isinstance(obj, Survey):
+            image = make_image(obj, pix=1)
+        else:
+            raise RpcError(ERR_INVALID_HANDLE, f"handle {handle} is not a survey")
+        try:
+            write_fits(image, out_path)
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to export fits: {exc}") from exc
+        return {"ok": True, "path": str(out_path), "shape": list(image.pixels.shape)}
 def serve(stdin: Any = sys.stdin, stdout: Any = sys.stdout) -> int:
     server = RpcServer()
     for line in stdin:
