@@ -1,6 +1,47 @@
+pub mod menu_bridge;
+pub mod sidecar;
+
+use std::path::PathBuf;
+use tauri::Manager;
+
+use crate::sidecar::SidecarBridge;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let workspace_dir = workspace_dir();
+            app.manage(SidecarBridge::new(workspace_dir));
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                if let Some(bridge) = window.try_state::<SidecarBridge>() {
+                    bridge.shutdown();
+                }
+            }
+        })
+        .invoke_handler(tauri::generate_handler![rpc_request])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn workspace_dir() -> PathBuf {
+    // CARGO_MANIFEST_DIR points at tauri-app/app/src-tauri. The uv workspace
+    // root (where `uv run` resolves the engine package from) is two levels up.
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    PathBuf::from(manifest)
+        .join("..")
+        .join("..")
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(manifest).join("..").join(".."))
+}
+
+#[tauri::command]
+fn rpc_request(
+    bridge: tauri::State<'_, SidecarBridge>,
+    payload: serde_json::Value,
+) -> serde_json::Value {
+    bridge.rpc(payload)
 }

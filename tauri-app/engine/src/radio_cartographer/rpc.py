@@ -12,9 +12,35 @@ from typing import Any
 import numpy as np
 
 from ._handles import HandleRegistry, UnknownHandleError
+from .image import GriddedImage, make_image
 from .io.md2 import read_md2
 from .models import Survey
-from .survey import reduce_raw_sweep
+from .survey import apply_to_survey, reduce_raw_sweep
+from .workspace import (
+    SurveyWorkspace,
+    apply_gain_calibration,
+    build_workspace,
+    cut_calibration_segment,
+    undo_cut,
+)
+
+
+def _maybe_downsample(
+    ra: np.ndarray, dec: np.ndarray, flux: np.ndarray, max_points: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    n = flux.shape[0]
+    if max_points <= 0 or n <= max_points:
+        return ra, dec, flux
+    step = max(1, n // max_points)
+    return ra[::step], dec[::step], flux[::step]
+
+
+_REDUCTION_PARAMS: dict[str, tuple[str, str, float]] = {
+    # rpc_key -> (front-end param name, apply_to_survey kwarg, default)
+    "smooth": ("width", "window", 5.0),
+    "baseline": ("degree", "degree", 1.0),
+    "align": ("factor", "offset", 0.5),
+}
 
 
 class RpcError(Exception):
@@ -73,10 +99,32 @@ class RpcServer:
                 result = self._open_survey(params)
             elif method == "get_sweep":
                 result = self._get_sweep(params)
+            elif method == "get_sweep_inline":
+                result = self._get_sweep_inline(params)
             elif method == "close_handle":
                 result = self._close_handle(params)
             elif method == "echo_array":
                 result = self._echo_array(params)
+            elif method in _REDUCTION_PARAMS:
+                result = self._reduce(method, params)
+            elif method == "make_image":
+                result = self._make_image(params)
+            elif method == "get_image_pixels":
+                result = self._get_image_pixels(params)
+            elif method == "get_workspace_overview":
+                result = self._get_workspace_overview(params)
+            elif method == "get_source_sweep":
+                result = self._get_source_sweep(params)
+            elif method == "get_calibration_view":
+                result = self._get_calibration_view(params)
+            elif method == "cut_calibration_segment":
+                result = self._cut_calibration_segment(params)
+            elif method == "undo_calibration_cut":
+                result = self._undo_calibration_cut(params)
+            elif method == "apply_gain_calibration":
+                result = self._apply_gain_calibration(params)
+            elif method == "set_bracket_enabled":
+                result = self._set_bracket_enabled(params)
             elif method == "export_fits":
                 raise RpcError(ERR_INVALID_PARAMS, "export_fits is not implemented in Phase 3")
             else:
@@ -110,9 +158,30 @@ class RpcServer:
         sweeps = tuple(reduce_raw_sweep(s) for s in md2.sweeps)
         if not sweeps:
             raise RpcError(ERR_IO, "failed to open survey: no sweeps in file")
-        survey = Survey(label1=Path(path).name, label2="", sweep_count=len(sweeps), swp=0, sweep0=sweeps[0], sweeps=sweeps)
+        survey = Survey(
+            label1=Path(path).name,
+            label2="",
+            sweep_count=len(sweeps),
+            swp=0,
+            sweep0=sweeps[0],
+            sweeps=sweeps,
+        )
         handle = self._handles.create(survey)
-        return {"handle": handle, "metadata": {"sweep_count": len(sweeps), "path": str(path)}}
+        result: dict[str, Any] = {
+            "handle": handle,
+            "metadata": {"sweep_count": len(sweeps), "path": str(path)},
+        }
+        # Best-effort workspace build (requires the standard cal-bracket
+        # layout — short files produce a survey handle without a workspace,
+        # which is fine for non-interactive callers).
+        try:
+            workspace = build_workspace(str(path), md2)
+        except ValueError:
+            return result
+        ws_handle = self._handles.create(workspace)
+        result["workspace_handle"] = ws_handle
+        result["workspace"] = self._workspace_overview(workspace)
+        return result
 
     def _get_sweep(self, params: dict[str, Any]) -> dict[str, Any]:
         handle = int(params.get("handle", -1))
@@ -133,6 +202,35 @@ class RpcServer:
             "sample_count": int(sweep.ra.shape[0]),
         }
 
+    def _get_sweep_inline(self, params: dict[str, Any]) -> dict[str, Any]:
+        handle = int(params.get("handle", -1))
+        index = int(params.get("index", -1))
+        max_points = int(params.get("max_points", 2000))
+        try:
+            survey = self._handles.get(handle)
+        except UnknownHandleError as exc:
+            raise RpcError(ERR_INVALID_HANDLE, f"unknown handle: {handle}") from exc
+        if not isinstance(survey, Survey):
+            raise RpcError(ERR_INVALID_HANDLE, f"handle {handle} is not a survey")
+        if index < 0 or index >= len(survey.sweeps):
+            raise RpcError(ERR_INVALID_PARAMS, f"index out of range: {index}")
+        sweep = survey.sweeps[index]
+        n = int(sweep.flux.shape[0])
+        if max_points > 0 and n > max_points:
+            step = max(1, n // max_points)
+            ra = sweep.ra[::step]
+            dec = sweep.dec[::step]
+            flux = sweep.flux[::step]
+        else:
+            ra, dec, flux = sweep.ra, sweep.dec, sweep.flux
+        return {
+            "ra": ra.tolist(),
+            "dec": dec.tolist(),
+            "flux": flux.tolist(),
+            "sample_count": n,
+            "returned_count": int(flux.shape[0]),
+        }
+
     def _close_handle(self, params: dict[str, Any]) -> dict[str, Any]:
         handle = int(params.get("handle", -1))
         try:
@@ -140,6 +238,229 @@ class RpcServer:
         except UnknownHandleError as exc:
             raise RpcError(ERR_INVALID_HANDLE, f"unknown handle: {handle}") from exc
         return {"closed": handle}
+
+    def _resolve_survey(self, handle: int) -> Survey:
+        try:
+            obj = self._handles.get(handle)
+        except UnknownHandleError as exc:
+            raise RpcError(ERR_INVALID_HANDLE, f"unknown handle: {handle}") from exc
+        if not isinstance(obj, Survey):
+            raise RpcError(ERR_INVALID_HANDLE, f"handle {handle} is not a survey")
+        return obj
+
+    def _resolve_image(self, handle: int) -> GriddedImage:
+        try:
+            obj = self._handles.get(handle)
+        except UnknownHandleError as exc:
+            raise RpcError(ERR_INVALID_HANDLE, f"unknown handle: {handle}") from exc
+        if not isinstance(obj, GriddedImage):
+            raise RpcError(ERR_INVALID_HANDLE, f"handle {handle} is not an image")
+        return obj
+
+    def _reduce(self, op: str, params: dict[str, Any]) -> dict[str, Any]:
+        handle = int(params.get("handle", -1))
+        survey = self._resolve_survey(handle)
+        rpc_key, kwarg_name, default = _REDUCTION_PARAMS[op]
+        raw_value = params.get(rpc_key, default)
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise RpcError(
+                ERR_INVALID_PARAMS, f"{op}: {rpc_key} must be numeric, got {raw_value!r}"
+            ) from exc
+        kwargs: dict[str, float | int] = {kwarg_name: int(value) if op != "align" else value}
+        reduced = apply_to_survey(survey, op, **kwargs)
+        new_handle = self._handles.create(reduced)
+        return {
+            "handle": new_handle,
+            "sweep_count": int(reduced.sweep_count),
+            "op": op,
+        }
+
+    def _make_image(self, params: dict[str, Any]) -> dict[str, Any]:
+        handle = int(params.get("handle", -1))
+        survey = self._resolve_survey(handle)
+        try:
+            pix = int(params.get("pix", 1))
+        except (TypeError, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, "pix must be an integer") from exc
+        image = make_image(survey, pix=pix)
+        new_handle = self._handles.create(image)
+        height, width = image.pixels.shape
+        return {
+            "handle": new_handle,
+            "width": int(width),
+            "height": int(height),
+            "min_ra": float(image.min_ra),
+            "max_ra": float(image.max_ra),
+            "min_dec": float(image.min_dec),
+            "max_dec": float(image.max_dec),
+            "min_flux": float(np.min(image.pixels)),
+            "max_flux": float(np.max(image.pixels)),
+        }
+
+    def _get_image_pixels(self, params: dict[str, Any]) -> dict[str, Any]:
+        handle = int(params.get("handle", -1))
+        image = self._resolve_image(handle)
+        try:
+            max_dim = int(params.get("max_dim", 400))
+        except (TypeError, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, "max_dim must be an integer") from exc
+        pixels = image.pixels
+        height, width = pixels.shape
+        if max_dim > 0:
+            longest = max(height, width)
+            step = -(-longest // max_dim)  # ceil division
+            step = max(1, step)
+            if step > 1:
+                pixels = pixels[::step, ::step]
+                height, width = pixels.shape
+        return {
+            "pixels": pixels.tolist(),
+            "width": int(width),
+            "height": int(height),
+        }
+
+    def _resolve_workspace(self, handle: int) -> SurveyWorkspace:
+        try:
+            obj = self._handles.get(handle)
+        except UnknownHandleError as exc:
+            raise RpcError(ERR_INVALID_HANDLE, f"unknown handle: {handle}") from exc
+        if not isinstance(obj, SurveyWorkspace):
+            raise RpcError(ERR_INVALID_HANDLE, f"handle {handle} is not a workspace")
+        return obj
+
+    def _workspace_overview(self, ws: SurveyWorkspace) -> dict[str, Any]:
+        return {
+            "name": ws.name,
+            "path": ws.path,
+            "source_count": int(ws.source_count),
+            "initial_cal_samples": int(ws.initial.cal_on.flux.shape[0] + ws.initial.cal_off.flux.shape[0]),
+            "terminal_cal_samples": int(ws.terminal.cal_on.flux.shape[0] + ws.terminal.cal_off.flux.shape[0]),
+            "initial_kept": int(int(ws.initial.cal_on_mask.sum()) + int(ws.initial.cal_off_mask.sum())),
+            "terminal_kept": int(int(ws.terminal.cal_on_mask.sum()) + int(ws.terminal.cal_off_mask.sum())),
+            "cal1": float(ws.cal1()),
+            "cal2": float(ws.cal2()),
+            "calibrated": bool(ws.calibrated),
+            "initial_enabled": bool(ws.initial_enabled),
+            "terminal_enabled": bool(ws.terminal_enabled),
+            "can_undo": bool(ws.undo_stack),
+        }
+
+    def _get_workspace_overview(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._workspace_overview(self._resolve_workspace(int(params.get("handle", -1))))
+
+    def _get_source_sweep(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_workspace(int(params.get("handle", -1)))
+        index = int(params.get("index", 0))
+        if index < 0 or index >= ws.source_count:
+            raise RpcError(
+                ERR_INVALID_PARAMS,
+                f"source sweep index out of range: {index} (0..{ws.source_count - 1})",
+            )
+        raw = ws.source_sweeps[index]
+        if ws.calibrated and ws.calibrated_source_flux is not None:
+            flux = ws.calibrated_source_flux[index]
+            # After noise-injection bracket gain calibration the values are
+            # raw_volts / cal_volts — dimensionless. The legacy app didn't
+            # label this state; we call it "gain calibration units" until a
+            # `.cal` file (flux calibration) converts the survey to janskies.
+            unit = "gain"
+        else:
+            flux = raw.flux
+            unit = "volts"
+        max_points = int(params.get("max_points", 4000))
+        ra, dec, flux_d = _maybe_downsample(raw.ra, raw.dec, flux, max_points)
+        return {
+            "ra": ra.tolist(),
+            "dec": dec.tolist(),
+            "flux": flux_d.tolist(),
+            "sample_count": int(raw.flux.shape[0]),
+            "returned_count": int(flux_d.shape[0]),
+            "index": index,
+            "source_count": int(ws.source_count),
+            "unit": unit,
+            "label": f"{ws.name} - Sweep {index + 1}",
+            "calibrated": bool(ws.calibrated),
+        }
+
+    def _get_calibration_view(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_workspace(int(params.get("handle", -1)))
+
+        def bracket_payload(bracket_label: str, on, off, on_mask, off_mask) -> dict[str, Any]:
+            return {
+                "label": bracket_label,
+                "on": {
+                    "ra": on.ra.tolist(),
+                    "dec": on.dec.tolist(),
+                    "flux": on.flux.tolist(),
+                    "mask": on_mask.astype(bool).tolist(),
+                },
+                "off": {
+                    "ra": off.ra.tolist(),
+                    "dec": off.dec.tolist(),
+                    "flux": off.flux.tolist(),
+                    "mask": off_mask.astype(bool).tolist(),
+                },
+            }
+
+        return {
+            "name": ws.name,
+            "initial": bracket_payload(
+                "initial",
+                ws.initial.cal_on,
+                ws.initial.cal_off,
+                ws.initial.cal_on_mask,
+                ws.initial.cal_off_mask,
+            ),
+            "terminal": bracket_payload(
+                "terminal",
+                ws.terminal.cal_on,
+                ws.terminal.cal_off,
+                ws.terminal.cal_on_mask,
+                ws.terminal.cal_off_mask,
+            ),
+            "cal1": float(ws.cal1()),
+            "cal2": float(ws.cal2()),
+            "initial_enabled": bool(ws.initial_enabled),
+            "terminal_enabled": bool(ws.terminal_enabled),
+            "can_undo": bool(ws.undo_stack),
+        }
+
+    def _cut_calibration_segment(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_workspace(int(params.get("handle", -1)))
+        try:
+            ra_min = float(params["ra_min"])
+            ra_max = float(params["ra_max"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, "ra_min and ra_max are required numbers") from exc
+        removed = cut_calibration_segment(ws, ra_min, ra_max)
+        return {"removed": int(removed), "overview": self._workspace_overview(ws)}
+
+    def _undo_calibration_cut(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_workspace(int(params.get("handle", -1)))
+        undone = undo_cut(ws)
+        return {"undone": bool(undone), "overview": self._workspace_overview(ws)}
+
+    def _apply_gain_calibration(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_workspace(int(params.get("handle", -1)))
+        try:
+            apply_gain_calibration(ws)
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        return self._workspace_overview(ws)
+
+    def _set_bracket_enabled(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_workspace(int(params.get("handle", -1)))
+        which = params.get("bracket")
+        if which not in ("initial", "terminal"):
+            raise RpcError(ERR_INVALID_PARAMS, "bracket must be 'initial' or 'terminal'")
+        enabled = bool(params.get("enabled", True))
+        if which == "initial":
+            ws.initial_enabled = enabled
+        else:
+            ws.terminal_enabled = enabled
+        return self._workspace_overview(ws)
 
     def _echo_array(self, params: dict[str, Any]) -> dict[str, Any]:
         token = params.get("token")
