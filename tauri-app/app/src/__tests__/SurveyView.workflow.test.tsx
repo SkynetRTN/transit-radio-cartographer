@@ -24,6 +24,7 @@ vi.mock('../ipc/client', () => ({
     }),
     getCalibrationView: vi.fn(),
     cutCalibrationSegment: vi.fn(),
+    selectCalibrationDeclination: vi.fn(),
     undoCalibrationCut: vi.fn(),
     applyGainCalibration: vi.fn(),
     setBracketEnabled: vi.fn(),
@@ -116,6 +117,56 @@ test('clicking Calibrate Survey switches the view mode', async () => {
   await waitFor(() => expect(currentMode).toBe('survey'));
   fireEvent.click(screen.getByText('Calibrate Survey'));
   await waitFor(() => expect(currentMode).toBe('calibrate-survey'));
+});
+
+test('Accept Sweep is enabled after calibration and disabled per-sweep once accepted', async () => {
+  const calibrated: WorkspaceOverview = { ...workspaceOverview, calibrated: true };
+  await act(async () => {
+    render(
+      <SurveyProvider>
+        <HydrateSurvey
+          meta={{
+            handle: 1,
+            metadata: { sweep_count: 9, path: '/tmp/and0a.md2' },
+            workspace_handle: 2,
+            workspace: calibrated,
+          }}
+        />
+        <SurveyView />
+      </SurveyProvider>,
+    );
+  });
+  await waitFor(() => expect(screen.getByText('Accept Sweep')).toBeInTheDocument());
+  const acceptBtn = screen.getByText('Accept Sweep');
+  expect(acceptBtn).not.toBeDisabled();
+  // 0 / 5 accepted to start.
+  expect(screen.getByText(/0 \/ 5 sweeps accepted/)).toBeInTheDocument();
+  fireEvent.click(acceptBtn);
+  await waitFor(() =>
+    expect(screen.getByText(/1 \/ 5 sweeps accepted/)).toBeInTheDocument(),
+  );
+});
+
+test('Baseline Segment toggles the per-sweep baseline draw mode', async () => {
+  const calibrated: WorkspaceOverview = { ...workspaceOverview, calibrated: true };
+  await act(async () => {
+    render(
+      <SurveyProvider>
+        <HydrateSurvey
+          meta={{
+            handle: 1,
+            metadata: { sweep_count: 9, path: '/tmp/and0a.md2' },
+            workspace_handle: 2,
+            workspace: calibrated,
+          }}
+        />
+        <SurveyView />
+      </SurveyProvider>,
+    );
+  });
+  await waitFor(() => expect(screen.getByText('Baseline Segment')).toBeInTheDocument());
+  fireEvent.click(screen.getByText('Baseline Segment'));
+  expect(screen.getByText(/Baseline Segment \(click/)).toBeInTheDocument();
 });
 
 test('Prev/Next sweep nav advances the source sweep index', async () => {

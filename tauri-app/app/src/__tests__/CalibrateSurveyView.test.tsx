@@ -33,6 +33,10 @@ vi.mock('../ipc/client', () => ({
       removed: 1,
       overview: {} as WorkspaceOverview,
     }),
+    selectCalibrationDeclination: vi.fn().mockResolvedValue({
+      removed: 1,
+      overview: {} as WorkspaceOverview,
+    }),
     undoCalibrationCut: vi
       .fn()
       .mockResolvedValue({ undone: true, overview: {} as WorkspaceOverview }),
@@ -130,6 +134,31 @@ test('Apply Calibration calls the gain calibration rpc and returns to survey vie
     expect(rpcClient.applyGainCalibration as unknown as ReturnType<typeof vi.fn>).toHaveBeenCalledWith(2),
   );
   await waitFor(() => expect(mode).toBe('survey'));
+});
+
+test('Select Declination toggle enables drag-select mode then exits when toggled off', async () => {
+  await act(async () => {
+    render(
+      <SurveyProvider>
+        <HydrateSurvey
+          meta={{
+            handle: 1,
+            metadata: { sweep_count: 9, path: '/tmp/and0a.md2' },
+            workspace_handle: 2,
+            workspace: workspaceOverview,
+          }}
+        />
+        <CalibrateSurveyView />
+      </SurveyProvider>,
+    );
+  });
+  await waitFor(() => expect(screen.getByText('Select Declination')).toBeInTheDocument());
+  const selBtn = screen.getByText('Select Declination');
+  fireEvent.click(selBtn);
+  expect(screen.getByText(/Select Declination \(drag/)).toBeInTheDocument();
+  // Toggle back off
+  fireEvent.click(screen.getByText(/Select Declination \(drag/));
+  expect(screen.getByText('Select Declination')).toBeInTheDocument();
 });
 
 test('Initial / Terminal checkboxes toggle the cal brackets', async () => {

@@ -27,6 +27,7 @@ vi.mock('../ipc/client', () => ({
     }),
     getCalibrationView: vi.fn(),
     cutCalibrationSegment: vi.fn(),
+    selectCalibrationDeclination: vi.fn(),
     undoCalibrationCut: vi.fn(),
     applyGainCalibration: vi.fn(),
     setBracketEnabled: vi.fn(),

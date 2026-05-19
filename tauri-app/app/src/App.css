@@ -322,3 +322,96 @@ body {
   padding: 32px 16px;
   color: #555;
 }
+
+/* ---------- per-sweep workflow ------------ */
+
+.sweep-accepted-tag {
+  color: #2e7ec0;
+  font-weight: 400;
+}
+
+.sweep-progress {
+  border-top: 1px solid #e2e2e2;
+  padding-top: 8px;
+  color: #2e7ec0;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- pre-image view ------------ */
+
+.pre-image-view .workspace-plots {
+  position: relative;
+  min-height: 420px;
+}
+
+/* ---------- modal dialog (baseline/align prompts) ------------ */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal {
+  background: #f4f4f4;
+  border: 1px solid #888;
+  border-radius: 4px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  min-width: 320px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.modal-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: #222;
+}
+
+.modal-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.modal-row input {
+  padding: 6px 8px;
+  border: 1px solid #999;
+  border-radius: 2px;
+  font: inherit;
+}
+
+.modal-error {
+  color: #a40000;
+  font-size: 11px;
+}
+
+.modal-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.modal-buttons button {
+  padding: 6px 14px;
+  border: 1px solid #999;
+  border-radius: 4px;
+  background: #f6f6f6;
+  font: inherit;
+  cursor: pointer;
+  min-width: 64px;
+}
+
+.modal-buttons button.primary {
+  background: #ffffff;
+  border-color: #5a5a5a;
+  font-weight: 600;
+}

@@ -16,7 +16,7 @@ import {
   type WorkspaceOverview,
 } from '../ipc/client';
 
-export type WorkspaceViewMode = 'survey' | 'calibrate-survey';
+export type WorkspaceViewMode = 'survey' | 'calibrate-survey' | 'pre-image';
 
 export interface SurveyState {
   loading: boolean;
@@ -27,9 +27,18 @@ export interface SurveyState {
   viewMode: WorkspaceViewMode;
   image: ImageMeta | null;
   reducing: boolean;
+  // Per-sweep workflow state. `currentSweepIndex` is the sweep the user is
+  // editing; `acceptedSweeps` is the set of sweep indices that have been
+  // accepted into the survey. Once every source sweep is accepted the view
+  // mode flips to 'pre-image' so the user can render the gridded image.
+  currentSweepIndex: number;
+  acceptedSweeps: Set<number>;
   open: (path: string) => Promise<void>;
   close: () => Promise<void>;
   setViewMode: (mode: WorkspaceViewMode) => void;
+  setCurrentSweepIndex: (index: number) => void;
+  acceptCurrentSweep: () => void;
+  resetSweepReview: () => void;
   refreshWorkspace: () => Promise<void>;
   applyReduction: (op: (handle: number) => Promise<ReductionResult>) => Promise<void>;
   makeImage: (pix?: number) => Promise<ImageMeta | null>;
@@ -52,6 +61,8 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(false);
   const [reducing, setReducing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [currentSweepIndex, setCurrentSweepIndex] = useState(0);
+  const [acceptedSweeps, setAcceptedSweeps] = useState<Set<number>>(() => new Set());
 
   const surveyRef = useRef<SurveyMeta | null>(survey);
   const workspaceHandleRef = useRef<number | null>(workspaceHandle);
@@ -79,6 +90,8 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       setWorkspace(meta.workspace ?? null);
       setViewMode('survey');
       setImage(null);
+      setCurrentSweepIndex(0);
+      setAcceptedSweeps(new Set());
       closeInBackground(prevSurvey?.handle);
       closeInBackground(prevWorkspaceHandle);
       closeInBackground(prevImage?.handle);
@@ -101,6 +114,33 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     setWorkspaceHandle(null);
     setImage(null);
     setViewMode('survey');
+    setCurrentSweepIndex(0);
+    setAcceptedSweeps(new Set());
+  }, []);
+
+  const acceptCurrentSweep = useCallback(() => {
+    const sourceCount = workspace?.source_count ?? 0;
+    if (sourceCount <= 0) return;
+    const next = new Set(acceptedSweeps);
+    next.add(currentSweepIndex);
+    setAcceptedSweeps(next);
+    if (next.size >= sourceCount) {
+      setViewMode('pre-image');
+      return;
+    }
+    // Advance to the next un-accepted sweep, wrapping if needed.
+    for (let i = 1; i <= sourceCount; i++) {
+      const candidate = (currentSweepIndex + i) % sourceCount;
+      if (!next.has(candidate)) {
+        setCurrentSweepIndex(candidate);
+        break;
+      }
+    }
+  }, [workspace?.source_count, currentSweepIndex, acceptedSweeps]);
+
+  const resetSweepReview = useCallback(() => {
+    setAcceptedSweeps(new Set());
+    setCurrentSweepIndex(0);
   }, []);
 
   const refreshWorkspace = useCallback(async () => {
@@ -172,9 +212,14 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       viewMode,
       image,
       reducing,
+      currentSweepIndex,
+      acceptedSweeps,
       open,
       close,
       setViewMode,
+      setCurrentSweepIndex,
+      acceptCurrentSweep,
+      resetSweepReview,
       refreshWorkspace,
       applyReduction,
       makeImage,
@@ -189,8 +234,12 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       viewMode,
       image,
       reducing,
+      currentSweepIndex,
+      acceptedSweeps,
       open,
       close,
+      acceptCurrentSweep,
+      resetSweepReview,
       refreshWorkspace,
       applyReduction,
       makeImage,

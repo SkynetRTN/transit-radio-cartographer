@@ -74,9 +74,13 @@ export interface SweepInline {
 }
 
 export interface ReductionResult {
-  handle: number;
+  // Workspace-aware reductions land on the workspace's source sweeps and
+  // omit `handle`; legacy survey-handle reductions return a fresh handle for
+  // the reduced `Survey`.
+  handle?: number;
   sweep_count: number;
   op: 'smooth' | 'baseline' | 'align';
+  overview?: WorkspaceOverview;
 }
 
 export interface ImageMeta {
@@ -148,6 +152,17 @@ export class RpcClient {
       { handle, ra_min: raMin, ra_max: raMax },
     );
   }
+  selectCalibrationDeclination(
+    handle: number,
+    decMin: number,
+    decMax: number,
+    bracket: 'initial' | 'terminal',
+  ) {
+    return this.request<{ removed: number; overview: WorkspaceOverview }>(
+      'select_calibration_declination',
+      { handle, dec_min: decMin, dec_max: decMax, bracket },
+    );
+  }
   undoCalibrationCut(handle: number) {
     return this.request<{ undone: boolean; overview: WorkspaceOverview }>(
       'undo_calibration_cut',
@@ -164,17 +179,45 @@ export class RpcClient {
       enabled,
     });
   }
-  smooth(handle: number, width = 5) {
-    return this.request<ReductionResult>('smooth', { handle, width });
+  smooth(handle: number, width = 5, workspaceHandle?: number | null) {
+    return this.request<ReductionResult>('smooth', this._reductionParams(handle, { width }, workspaceHandle));
   }
-  baseline(handle: number, degree = 1) {
-    return this.request<ReductionResult>('baseline', { handle, degree });
+  baseline(handle: number, degree = 1, workspaceHandle?: number | null) {
+    return this.request<ReductionResult>(
+      'baseline',
+      this._reductionParams(handle, { degree }, workspaceHandle),
+    );
   }
-  align(handle: number, factor = 0.5) {
-    return this.request<ReductionResult>('align', { handle, factor });
+  align(handle: number, factor = 0.5, workspaceHandle?: number | null) {
+    return this.request<ReductionResult>(
+      'align',
+      this._reductionParams(handle, { factor }, workspaceHandle),
+    );
   }
-  makeImage(handle: number, pix = 1) {
-    return this.request<ImageMeta>('make_image', { handle, pix });
+  private _reductionParams(
+    handle: number,
+    extra: Record<string, unknown>,
+    workspaceHandle?: number | null,
+  ): Record<string, unknown> {
+    // When a workspace handle is supplied, the engine applies the reduction
+    // to the workspace's source sweeps so the next `make_image` reflects it.
+    // The survey handle is still passed as a fallback the engine ignores.
+    const params: Record<string, unknown> = { handle, ...extra };
+    if (workspaceHandle !== undefined && workspaceHandle !== null) {
+      params.workspace_handle = workspaceHandle;
+    }
+    return params;
+  }
+  makeImage(handle: number, pix = 1, workspaceHandle?: number | null) {
+    // When `workspaceHandle` is provided, the engine builds the pre-image
+    // from the workspace's source sweeps only (cal brackets excluded) and
+    // uses calibrated flux if `apply_gain_calibration` has run. The survey
+    // handle is sent unconditionally as the fallback path.
+    const params: Record<string, unknown> = { handle, pix };
+    if (workspaceHandle !== undefined && workspaceHandle !== null) {
+      params.workspace_handle = workspaceHandle;
+    }
+    return this.request<ImageMeta>('make_image', params);
   }
   getImagePixels(handle: number, maxDim = 400) {
     return this.request<ImagePixels>('get_image_pixels', { handle, max_dim: maxDim });

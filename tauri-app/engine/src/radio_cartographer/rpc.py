@@ -14,13 +14,15 @@ import numpy as np
 from ._handles import HandleRegistry, UnknownHandleError
 from .image import GriddedImage, make_image
 from .io.md2 import read_md2
-from .models import Survey
+from .models import Survey, Sweep
 from .survey import apply_to_survey, reduce_raw_sweep
 from .workspace import (
     SurveyWorkspace,
     apply_gain_calibration,
+    apply_workspace_reduction,
     build_workspace,
     cut_calibration_segment,
+    select_calibration_declination,
     undo_cut,
 )
 
@@ -33,6 +35,43 @@ def _maybe_downsample(
         return ra, dec, flux
     step = max(1, n // max_points)
     return ra[::step], dec[::step], flux[::step]
+
+
+def _survey_from_workspace_sources(ws: "SurveyWorkspace") -> Survey:
+    """Build an in-memory Survey containing only the workspace's source sweeps.
+
+    Skips the initial and terminal cal brackets so pre-image bounds and pixels
+    reflect the *swept region*, not the calibrator's RA/Dec. Pre-image
+    reductions win over calibration which wins over raw — for both flux
+    (Smooth/Baseline) and dec (Align Sweeps).
+    """
+    if ws.reduced_source_flux is not None:
+        flux_arrays = ws.reduced_source_flux
+    elif ws.calibrated and ws.calibrated_source_flux is not None:
+        flux_arrays = ws.calibrated_source_flux
+    else:
+        flux_arrays = tuple(np.asarray(raw.flux, dtype=np.float64) for raw in ws.source_sweeps)
+    if ws.reduced_source_dec is not None:
+        dec_arrays = ws.reduced_source_dec
+    else:
+        dec_arrays = tuple(np.asarray(raw.dec, dtype=np.float64) for raw in ws.source_sweeps)
+    sweeps: list[Sweep] = []
+    for raw, dec, flux in zip(ws.source_sweeps, dec_arrays, flux_arrays):
+        sweeps.append(
+            Sweep(
+                ra=np.asarray(raw.ra, dtype=np.float64),
+                dec=np.asarray(dec, dtype=np.float64),
+                flux=np.asarray(flux, dtype=np.float64),
+            )
+        )
+    return Survey(
+        label1=ws.name,
+        label2="",
+        sweep_count=len(sweeps),
+        swp=0,
+        sweep0=sweeps[0],
+        sweeps=tuple(sweeps),
+    )
 
 
 _REDUCTION_PARAMS: dict[str, tuple[str, str, float]] = {
@@ -119,6 +158,8 @@ class RpcServer:
                 result = self._get_calibration_view(params)
             elif method == "cut_calibration_segment":
                 result = self._cut_calibration_segment(params)
+            elif method == "select_calibration_declination":
+                result = self._select_calibration_declination(params)
             elif method == "undo_calibration_cut":
                 result = self._undo_calibration_cut(params)
             elif method == "apply_gain_calibration":
@@ -258,8 +299,6 @@ class RpcServer:
         return obj
 
     def _reduce(self, op: str, params: dict[str, Any]) -> dict[str, Any]:
-        handle = int(params.get("handle", -1))
-        survey = self._resolve_survey(handle)
         rpc_key, kwarg_name, default = _REDUCTION_PARAMS[op]
         raw_value = params.get(rpc_key, default)
         try:
@@ -269,6 +308,23 @@ class RpcServer:
                 ERR_INVALID_PARAMS, f"{op}: {rpc_key} must be numeric, got {raw_value!r}"
             ) from exc
         kwargs: dict[str, float | int] = {kwarg_name: int(value) if op != "align" else value}
+        # Workspace-aware path: when the caller passes `workspace_handle`, the
+        # reduction lands on the workspace's source sweeps so the next
+        # `make_image(workspace_handle=...)` call grids the reduced flux.
+        # This is what the Pre Image screen's Smooth/Baseline/Align buttons
+        # use — operating on a detached `Survey` would leave the pre-image
+        # untouched because that path is driven by `workspace.source_sweeps`.
+        ws_handle = params.get("workspace_handle")
+        if ws_handle is not None:
+            ws = self._resolve_workspace(int(ws_handle))
+            apply_workspace_reduction(ws, op, **kwargs)
+            return {
+                "op": op,
+                "sweep_count": int(ws.source_count),
+                "overview": self._workspace_overview(ws),
+            }
+        handle = int(params.get("handle", -1))
+        survey = self._resolve_survey(handle)
         reduced = apply_to_survey(survey, op, **kwargs)
         new_handle = self._handles.create(reduced)
         return {
@@ -278,12 +334,22 @@ class RpcServer:
         }
 
     def _make_image(self, params: dict[str, Any]) -> dict[str, Any]:
-        handle = int(params.get("handle", -1))
-        survey = self._resolve_survey(handle)
         try:
             pix = int(params.get("pix", 1))
         except (TypeError, ValueError) as exc:
             raise RpcError(ERR_INVALID_PARAMS, "pix must be an integer") from exc
+        ws_handle = params.get("workspace_handle")
+        if ws_handle is not None:
+            # Pre-image is built from source sweeps only — the cal brackets
+            # point at a different calibrator, so including them stretches the
+            # RA/Dec extent and dumps cal-voltage samples onto an unrelated
+            # part of the sky. After Apply Gain Calibration the workspace's
+            # `calibrated_source_flux` is in gain units; we prefer those.
+            ws = self._resolve_workspace(int(ws_handle))
+            survey = _survey_from_workspace_sources(ws)
+        else:
+            handle = int(params.get("handle", -1))
+            survey = self._resolve_survey(handle)
         image = make_image(survey, pix=pix)
         new_handle = self._handles.create(image)
         height, width = image.pixels.shape
@@ -435,6 +501,21 @@ class RpcServer:
         except (KeyError, TypeError, ValueError) as exc:
             raise RpcError(ERR_INVALID_PARAMS, "ra_min and ra_max are required numbers") from exc
         removed = cut_calibration_segment(ws, ra_min, ra_max)
+        return {"removed": int(removed), "overview": self._workspace_overview(ws)}
+
+    def _select_calibration_declination(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_workspace(int(params.get("handle", -1)))
+        try:
+            dec_min = float(params["dec_min"])
+            dec_max = float(params["dec_max"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RpcError(
+                ERR_INVALID_PARAMS, "dec_min and dec_max are required numbers"
+            ) from exc
+        bracket = params.get("bracket")
+        if bracket not in ("initial", "terminal"):
+            raise RpcError(ERR_INVALID_PARAMS, "bracket must be 'initial' or 'terminal'")
+        removed = select_calibration_declination(ws, dec_min, dec_max, bracket)
         return {"removed": int(removed), "overview": self._workspace_overview(ws)}
 
     def _undo_calibration_cut(self, params: dict[str, Any]) -> dict[str, Any]:

@@ -29,6 +29,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .models import MD2Document, RawSweep
+from .scan import align_dec_shifts, smooth_flux, subtract_baseline
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,13 @@ class SurveyWorkspace:
     terminal: CalBracket
     source_sweeps: tuple[RawSweep, ...]
     calibrated_source_flux: tuple[NDArray[np.float64], ...] | None = None
+    # Pre-image reductions stored on the workspace. `reduced_source_flux`
+    # tracks smooth/baseline output (per-sweep flux *after* every reduction
+    # the user has invoked); `reduced_source_dec` tracks Align Sweeps output
+    # (per-sweep dec arrays shifted to align adjacent sweeps). The pre-image
+    # uses whichever is set, falling back to calibrated/raw below.
+    reduced_source_flux: tuple[NDArray[np.float64], ...] | None = None
+    reduced_source_dec: tuple[NDArray[np.float64], ...] | None = None
     undo_stack: list[dict[str, NDArray[np.bool_]]] = field(default_factory=list)
     initial_enabled: bool = True
     terminal_enabled: bool = True
@@ -172,6 +180,68 @@ def cut_calibration_segment(
     return removed
 
 
+def select_calibration_declination(
+    workspace: SurveyWorkspace,
+    dec_min: float,
+    dec_max: float,
+    bracket: str,
+) -> int:
+    """Keep cal samples whose Dec falls in [dec_min, dec_max] for one bracket.
+
+    Mirrors `cut_calibration_segment` but inverts the predicate (removes
+    samples *outside* the selection) and scopes the change to a single
+    bracket. Pre- and post-survey cal brackets typically point at slightly
+    different declinations, so applying one bracket's selection to both would
+    over-cut the other bracket. `bracket` must be either `"initial"` or
+    `"terminal"`. Records the prior masks on the undo stack so `undo_cut` can
+    revert.
+    """
+    if bracket not in ("initial", "terminal"):
+        raise ValueError(f"bracket must be 'initial' or 'terminal', got {bracket!r}")
+    if dec_min > dec_max:
+        dec_min, dec_max = dec_max, dec_min
+
+    snapshot: dict[str, NDArray[np.bool_]] = {
+        "initial_on": workspace.initial.cal_on_mask.copy(),
+        "initial_off": workspace.initial.cal_off_mask.copy(),
+        "terminal_on": workspace.terminal.cal_on_mask.copy(),
+        "terminal_off": workspace.terminal.cal_off_mask.copy(),
+    }
+
+    def _apply(sweep: RawSweep, mask: NDArray[np.bool_]) -> tuple[NDArray[np.bool_], int]:
+        in_range = (sweep.dec >= dec_min) & (sweep.dec <= dec_max)
+        removed_here = int((mask & ~in_range).sum())
+        return mask & in_range, removed_here
+
+    if bracket == "initial":
+        new_on, r1 = _apply(workspace.initial.cal_on, workspace.initial.cal_on_mask)
+        new_off, r2 = _apply(workspace.initial.cal_off, workspace.initial.cal_off_mask)
+        removed = r1 + r2
+        if removed == 0:
+            return 0
+        workspace.initial = CalBracket(
+            cal_on=workspace.initial.cal_on,
+            cal_off=workspace.initial.cal_off,
+            cal_on_mask=new_on,
+            cal_off_mask=new_off,
+        )
+    else:
+        new_on, r1 = _apply(workspace.terminal.cal_on, workspace.terminal.cal_on_mask)
+        new_off, r2 = _apply(workspace.terminal.cal_off, workspace.terminal.cal_off_mask)
+        removed = r1 + r2
+        if removed == 0:
+            return 0
+        workspace.terminal = CalBracket(
+            cal_on=workspace.terminal.cal_on,
+            cal_off=workspace.terminal.cal_off,
+            cal_on_mask=new_on,
+            cal_off_mask=new_off,
+        )
+
+    workspace.undo_stack.append(snapshot)
+    return removed
+
+
 def undo_cut(workspace: SurveyWorkspace) -> bool:
     """Revert the most recent `cut_calibration_segment`. Returns True if undone."""
     if not workspace.undo_stack:
@@ -228,5 +298,82 @@ def apply_gain_calibration(workspace: SurveyWorkspace) -> None:
         cal_i = (1.0 - weights[i]) * cal1 + weights[i] * cal2
         calibrated.append(sweep.flux / cal_i)
     workspace.calibrated_source_flux = tuple(calibrated)
+    # A fresh calibration invalidates any prior pre-image reductions.
+    workspace.reduced_source_flux = None
+    workspace.reduced_source_dec = None
+
+
+def current_source_flux(workspace: SurveyWorkspace) -> tuple[NDArray[np.float64], ...]:
+    """Return the most-recent per-sweep flux arrays.
+
+    Reductions applied on the Pre Image screen win over the calibrated flux,
+    which wins over the raw `.md2` voltages. This is the same precedence
+    `_survey_from_workspace_sources` uses when building the gridded image.
+    """
+    if workspace.reduced_source_flux is not None:
+        return workspace.reduced_source_flux
+    if workspace.calibrated_source_flux is not None:
+        return workspace.calibrated_source_flux
+    return tuple(np.asarray(raw.flux, dtype=np.float64) for raw in workspace.source_sweeps)
+
+
+def current_source_dec(workspace: SurveyWorkspace) -> tuple[NDArray[np.float64], ...]:
+    """Return the most-recent per-sweep declination arrays.
+
+    Align Sweeps shifts dec values; everything else leaves them alone, so
+    the reduced array wins when present and the raw `.md2` dec is the
+    fallback.
+    """
+    if workspace.reduced_source_dec is not None:
+        return workspace.reduced_source_dec
+    return tuple(np.asarray(raw.dec, dtype=np.float64) for raw in workspace.source_sweeps)
+
+
+def apply_workspace_reduction(
+    workspace: SurveyWorkspace, op: str, **kwargs: float | int
+) -> None:
+    """Apply smooth/baseline/align to the workspace's source sweeps.
+
+    Smooth/baseline modify `reduced_source_flux`; align modifies
+    `reduced_source_dec`. Both stack — a second call composes with the
+    first. The next `make_image(workspace_handle=...)` reads from both
+    states.
+    """
+    fluxes = current_source_flux(workspace)
+    decs = current_source_dec(workspace)
+    if op == "align":
+        # Align is survey-wide: it cross-correlates adjacent sweeps and
+        # picks a dec shift for each. Operates on the *current* dec arrays
+        # so successive Align Sweeps further refine the alignment.
+        deltas = align_dec_shifts(
+            list(decs), list(fluxes), max_delta_deg=float(kwargs.get("offset", 0.0))
+        )
+        shifted = tuple(
+            np.asarray(d, dtype=np.float64) + delta for d, delta in zip(decs, deltas)
+        )
+        workspace.reduced_source_dec = shifted
+        return
+    reduced: list[NDArray[np.float64]] = []
+    for sweep_dec, flux in zip(decs, fluxes):
+        sweep_flux = np.asarray(flux, dtype=np.float64)
+        if op == "smooth":
+            reduced.append(smooth_flux(sweep_flux, window=int(kwargs.get("window", 5))))
+        elif op == "baseline":
+            reduced.append(
+                subtract_baseline(
+                    np.asarray(sweep_dec, dtype=np.float64),
+                    sweep_flux,
+                    degree=int(kwargs.get("degree", 1)),
+                )
+            )
+        else:
+            raise ValueError(f"unknown reduction op: {op!r}")
+    workspace.reduced_source_flux = tuple(reduced)
+
+
+def clear_workspace_reductions(workspace: SurveyWorkspace) -> None:
+    """Drop any pre-image reductions, reverting to calibrated/raw flux."""
+    workspace.reduced_source_flux = None
+    workspace.reduced_source_dec = None
 
 

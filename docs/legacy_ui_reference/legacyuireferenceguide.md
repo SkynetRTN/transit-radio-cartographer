@@ -93,7 +93,7 @@ Image smoothing is done, overwrites the image one column at a time so you can se
 **Screenshot:** `docs\legacy_ui_reference\screenshots\baselinesweeps.png`
 
 ### Notes
-Pop up that allows numerical input appears asking for Baseline Length (degrees), default value is 5 (degrees), when a user clicks okay that baseline is applied to the image
+Pop up that allows numerical input appears asking for Baseline Length (degrees), default value is 5 (degrees), when a user clicks okay that baseline is applied to the image. Baseline subtraction is done on the image so that the background value of the image is zero in most places.
 
 ## Align Sweeps
 
@@ -101,4 +101,48 @@ Pop up that allows numerical input appears asking for Baseline Length (degrees),
 **Screenshot:** `docs\legacy_ui_reference\screenshots\alignsweeps.png`
 
 ### Notes
-Pop up that allows numerical input appears asking for Maximum Declination Shift (degrees), default value is 0.5 (degrees), when a user clicks okay that alignment is applied to the image
+Pop up that allows numerical input appears asking for Maximum Declination Shift (degrees), default value is 0.5 (degrees), when a user clicks okay that alignment is applied to the image. Shift is applied in both directions, in order to align the map.
+
+
+# Scan Processing
+
+## Open Scan
+
+**When shown:** Scan -> New Scan -> MD1 file selected
+**Screenshot:** `docs\legacy_ui_reference\screenshots\newscan.png`
+
+### Notes
+Screen that opens up a new scan, very similar to the screen when you open a new survey. Key differences are that instead of the first scan of a survey, this is the full scan, calibration is shown but there are lines for where the calibration on section ends and where the calibration off section ends. RA Dec and Flux are still in the lower right, I would like to carry over the pinning a point functionality already in the survey infastructure. Selecting calibrate scan from here brings you to the same calibration screen as in the survey, after scan has been calibrated select declination button becomes available and the calibration portions of the scan disappear from the plot.
+
+## Select Declination
+
+**When shown:** Select Declination
+
+### Notes
+Same implementation of select declination as in the calibration screen but for the entire scan
+
+## Baseline Source
+
+**When shown:** Baseline Source
+**Screenshot:** `docs\legacy_ui_reference\screenshots\scanbaselinesource.png` 
+                `docs\legacy_ui_reference\screenshots\scanbaselinesourceduring.png`
+
+### Notes
+Similar to baseline segment in terms of ui and feel and what the user does, but functionally very different. Instead of removing what was covered up, it is using this as a background level of the scan. Should bring the flux values of the edges of the source near zero.
+
+
+## Determine peak
+
+**When shown:** Determine peak
+**Screenshot:** `docs\legacy_ui_reference\screenshots\determinepeak.png` 
+
+### Notes
+Button not available until calibrate scan and select declination have been performed. A blue horizontal line appears at the level of a users cursor and after the user has clicked, below the determine peak button "Peak Flux: XXX" appears, in whatever unit the scan is in (either GCU or Jy). The XXX is the highest flux on the line they selected. It is important not to use the max flux of the entire scan, because there could be two sources, one lower than the other and you want the peak flux of whichever you are clicking. 
+
+## Cut Segment
+
+**When shown:** Cut Segment
+
+
+### Notes
+Same implementation as the cut segement function in the calibration screen

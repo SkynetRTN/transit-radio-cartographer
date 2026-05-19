@@ -5,6 +5,7 @@ import { CalibrateSurveyView } from './CalibrateSurveyView';
 import { CalibrationView } from './CalibrationView';
 import { PaletteEditor } from './PaletteEditor';
 import { AboutBox } from './AboutBox';
+import { PreImageView } from './PreImageView';
 import { useSurvey } from '../state/survey-context';
 
 type AuxView = 'cal' | 'pal' | 'about' | null;
@@ -16,7 +17,7 @@ export function MainWindow() {
   const menuRef = useRef<HTMLElement | null>(null);
   const { survey, workspace, viewMode, loading, error, open, close } = useSurvey();
   const hasSurvey = survey !== null;
-  const hasImage = false;
+  const hasImage = viewMode === 'pre-image';
   const hasScan = false;
 
   useEffect(() => {
@@ -255,6 +256,7 @@ export function MainWindow() {
               {workspace.name} loaded · {workspace.source_count} source sweeps ·{' '}
               {workspace.calibrated ? 'gain calibrated (GCU)' : 'raw (volts)'}
               {viewMode === 'calibrate-survey' && ' · Calibrate Survey'}
+              {viewMode === 'pre-image' && ' · Pre Image'}
             </span>
           )}
         </div>
@@ -275,6 +277,8 @@ export function MainWindow() {
           </div>
         ) : viewMode === 'calibrate-survey' ? (
           <CalibrateSurveyView />
+        ) : viewMode === 'pre-image' ? (
+          <PreImageView />
         ) : (
           <SurveyView />
         )}

@@ -81,6 +81,57 @@ def test_cut_calibration_segment_then_undo() -> None:
     assert abs(undone["result"]["overview"]["cal1"] - cal1_pre) < 1e-12
 
 
+def test_select_calibration_declination_only_affects_one_bracket() -> None:
+    server = RpcServer()
+    ws_handle, overview = _open(server)
+
+    view = call(server, "get_calibration_view", {"handle": ws_handle})
+    # The legacy "Select Declination" gesture drags a horizontal band on the
+    # dec-vs-RA plot of ONE bracket panel. Initial and terminal brackets sit
+    # at different declinations, so applying one panel's band to both would
+    # over-cut — we scope to the panel the user dragged on.
+    decs = view["result"]["initial"]["on"]["dec"]
+    lo = min(decs)
+    hi = max(decs)
+    span = hi - lo
+    sel_lo = lo + 0.25 * span
+    sel_hi = hi - 0.25 * span
+
+    selected = call(
+        server,
+        "select_calibration_declination",
+        {
+            "handle": ws_handle,
+            "dec_min": sel_lo,
+            "dec_max": sel_hi,
+            "bracket": "initial",
+        },
+    )
+    assert "error" not in selected
+    assert selected["result"]["removed"] > 0
+    overview_post = selected["result"]["overview"]
+    assert overview_post["can_undo"] is True
+    # Only the initial bracket should have shrunk.
+    assert overview_post["initial_kept"] < overview["initial_kept"]
+    assert overview_post["terminal_kept"] == overview["terminal_kept"]
+
+    undone = call(server, "undo_calibration_cut", {"handle": ws_handle})
+    assert undone["result"]["undone"] is True
+    assert undone["result"]["overview"]["initial_kept"] == overview["initial_kept"]
+
+
+def test_select_calibration_declination_rejects_unknown_bracket() -> None:
+    server = RpcServer()
+    ws_handle, _ = _open(server)
+    resp = call(
+        server,
+        "select_calibration_declination",
+        {"handle": ws_handle, "dec_min": 0, "dec_max": 1, "bracket": "middle"},
+    )
+    assert "error" in resp
+    assert resp["error"]["code"] == -32602
+
+
 def test_undo_when_stack_empty_is_safe() -> None:
     server = RpcServer()
     ws_handle, _ = _open(server)
