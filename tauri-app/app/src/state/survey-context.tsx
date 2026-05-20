@@ -11,12 +11,13 @@ import {
 import {
   rpcClient,
   type ImageMeta,
+  type ImagePixels,
   type ReductionResult,
   type SurveyMeta,
   type WorkspaceOverview,
 } from '../ipc/client';
 
-export type WorkspaceViewMode = 'survey' | 'calibrate-survey' | 'pre-image';
+export type WorkspaceViewMode = 'survey' | 'calibrate-survey' | 'pre-image' | 'image';
 
 export interface SurveyState {
   loading: boolean;
@@ -26,7 +27,11 @@ export interface SurveyState {
   workspaceHandle: number | null;
   viewMode: WorkspaceViewMode;
   image: ImageMeta | null;
+  imagePixels: ImagePixels | null;
   reducing: boolean;
+  savePath: string | null;
+  dirty: boolean;
+  saving: boolean;
   // Per-sweep workflow state. `currentSweepIndex` is the sweep the user is
   // editing; `acceptedSweeps` is the set of sweep indices that have been
   // accepted into the survey. Once every source sweep is accepted the view
@@ -43,6 +48,7 @@ export interface SurveyState {
   applyReduction: (op: (handle: number) => Promise<ReductionResult>) => Promise<void>;
   makeImage: (pix?: number) => Promise<ImageMeta | null>;
   clearImage: () => Promise<void>;
+  save: (path?: string) => Promise<string | null>;
 }
 
 const SurveyContext = createContext<SurveyState | null>(null);
@@ -58,15 +64,20 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   const [workspaceHandle, setWorkspaceHandle] = useState<number | null>(null);
   const [viewMode, setViewMode] = useState<WorkspaceViewMode>('survey');
   const [image, setImage] = useState<ImageMeta | null>(null);
+  const [imagePixels, setImagePixels] = useState<ImagePixels | null>(null);
   const [loading, setLoading] = useState(false);
   const [reducing, setReducing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [currentSweepIndex, setCurrentSweepIndex] = useState(0);
   const [acceptedSweeps, setAcceptedSweeps] = useState<Set<number>>(() => new Set());
+  const [savePath, setSavePath] = useState<string | null>(null);
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const surveyRef = useRef<SurveyMeta | null>(survey);
   const workspaceHandleRef = useRef<number | null>(workspaceHandle);
   const imageRef = useRef<ImageMeta | null>(image);
+  const savePathRef = useRef<string | null>(savePath);
   useEffect(() => {
     surveyRef.current = survey;
   }, [survey]);
@@ -76,6 +87,9 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     imageRef.current = image;
   }, [image]);
+  useEffect(() => {
+    savePathRef.current = savePath;
+  }, [savePath]);
 
   const open = useCallback(async (path: string) => {
     setLoading(true);
@@ -90,8 +104,11 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       setWorkspace(meta.workspace ?? null);
       setViewMode('survey');
       setImage(null);
+      setImagePixels(null);
       setCurrentSweepIndex(0);
       setAcceptedSweeps(new Set());
+      setSavePath(null);
+      setDirty(false);
       closeInBackground(prevSurvey?.handle);
       closeInBackground(prevWorkspaceHandle);
       closeInBackground(prevImage?.handle);
@@ -100,6 +117,8 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       setSurvey(null);
       setWorkspace(null);
       setWorkspaceHandle(null);
+      setSavePath(null);
+      setDirty(false);
     } finally {
       setLoading(false);
     }
@@ -113,9 +132,12 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     setWorkspace(null);
     setWorkspaceHandle(null);
     setImage(null);
+    setImagePixels(null);
     setViewMode('survey');
     setCurrentSweepIndex(0);
     setAcceptedSweeps(new Set());
+    setSavePath(null);
+    setDirty(false);
   }, []);
 
   const acceptCurrentSweep = useCallback(() => {
@@ -149,6 +171,9 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     try {
       const o = await rpcClient.getWorkspaceOverview(h);
       setWorkspace(o);
+      // refreshWorkspace is only called after a mutation, so anything that
+      // reaches here means the workspace state diverged from disk.
+      setDirty(true);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -164,11 +189,16 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       const path = current.metadata.path;
       try {
         const result = await op(prevHandle);
+        // Workspace-aware reductions land on the workspace and omit `handle`
+        // in the response — in that case we keep the existing survey handle
+        // (the workspace already owns the reduced state).
+        const nextHandle = result.handle ?? prevHandle;
         setSurvey({
-          handle: result.handle,
+          handle: nextHandle,
           metadata: { sweep_count: result.sweep_count, path },
         });
-        closeInBackground(prevHandle);
+        setDirty(true);
+        if (result.handle !== undefined) closeInBackground(prevHandle);
       } catch (e) {
         setError((e as Error).message);
       } finally {
@@ -184,9 +214,19 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     setReducing(true);
     setError(null);
     try {
-      const meta = await rpcClient.makeImage(current.handle, pix);
+      // Pass the workspace handle so the engine grids from the workspace's
+      // (possibly reduced/calibrated) source sweeps rather than the raw
+      // survey — same convention PreImageView uses for its in-place preview.
+      const meta = await rpcClient.makeImage(
+        current.handle,
+        pix,
+        workspaceHandleRef.current,
+      );
+      const pixels = await rpcClient.getImagePixels(meta.handle);
       const prevImage = imageRef.current;
       setImage(meta);
+      setImagePixels(pixels);
+      setViewMode('image');
       closeInBackground(prevImage?.handle);
       return meta;
     } catch (e) {
@@ -200,6 +240,27 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   const clearImage = useCallback(async () => {
     closeInBackground(imageRef.current?.handle);
     setImage(null);
+    setImagePixels(null);
+  }, []);
+
+  const save = useCallback(async (path?: string): Promise<string | null> => {
+    const h = workspaceHandleRef.current;
+    if (h === null) return null;
+    const target = path ?? savePathRef.current;
+    if (!target) return null;
+    setSaving(true);
+    setError(null);
+    try {
+      const result = await rpcClient.saveSurvey(h, target);
+      setSavePath(result.path);
+      setDirty(false);
+      return result.path;
+    } catch (e) {
+      setError((e as Error).message);
+      return null;
+    } finally {
+      setSaving(false);
+    }
   }, []);
 
   const value = useMemo<SurveyState>(
@@ -211,7 +272,11 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       workspaceHandle,
       viewMode,
       image,
+      imagePixels,
       reducing,
+      savePath,
+      dirty,
+      saving,
       currentSweepIndex,
       acceptedSweeps,
       open,
@@ -224,6 +289,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       applyReduction,
       makeImage,
       clearImage,
+      save,
     }),
     [
       loading,
@@ -233,7 +299,11 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       workspaceHandle,
       viewMode,
       image,
+      imagePixels,
       reducing,
+      savePath,
+      dirty,
+      saving,
       currentSweepIndex,
       acceptedSweeps,
       open,
@@ -244,6 +314,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       applyReduction,
       makeImage,
       clearImage,
+      save,
     ],
   );
 

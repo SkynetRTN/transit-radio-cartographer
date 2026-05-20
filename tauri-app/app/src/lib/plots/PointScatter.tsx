@@ -151,21 +151,30 @@ export function PointScatter({
     const node = ref.current;
     if (!node) return;
 
-    const traces: Plotly.Data[] = series.map((s) => ({
-      x: s.points.map((p) => p.x),
-      y: s.points.map((p) => p.y),
-      customdata: s.points.map((p) => [p.ra, p.dec, p.flux] as [number, number, number]),
-      type: 'scatter',
-      mode: 'markers',
-      marker: {
-        color: s.color,
-        size: 5,
-        symbol: 'diamond',
-        opacity: s.faded ? 0.25 : 1,
-      },
-      hoverinfo: 'none',
-      name: s.name ?? '',
-    }));
+    // `faded` series (cut / outside-of-Dec-selection samples) render as
+    // light-grey outlined squares so they stay visible without competing
+    // with the kept red/blue series — important for dense scans where a
+    // dimmed-red diamond is hard to tell apart from the kept-red ones.
+    const FADED_COLOR = '#c8c8c8';
+    const traces: Plotly.Data[] = series.map((s) => {
+      const color = s.faded ? FADED_COLOR : s.color;
+      return {
+        x: s.points.map((p) => p.x),
+        y: s.points.map((p) => p.y),
+        customdata: s.points.map((p) => [p.ra, p.dec, p.flux] as [number, number, number]),
+        type: 'scatter',
+        mode: 'markers',
+        marker: {
+          color,
+          size: 5,
+          symbol: 'diamond-open',
+          line: { color, width: 1.2 },
+          opacity: 1,
+        },
+        hoverinfo: 'none',
+        name: s.name ?? '',
+      };
+    });
 
     if (pinnedPoint) {
       // Draw the pinned-point outline as a transparent marker with a thick

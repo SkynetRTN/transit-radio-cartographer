@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from numpy.typing import NDArray
 
-from .models import MD2Document, RawSweep
+from .models import MD2Document, RawSweep, Survey, Sweep
 from .scan import align_dec_shifts, smooth_flux, subtract_baseline
 
 
@@ -76,6 +76,11 @@ class SurveyWorkspace:
     undo_stack: list[dict[str, NDArray[np.bool_]]] = field(default_factory=list)
     initial_enabled: bool = True
     terminal_enabled: bool = True
+    # Flux calibration (.cal slope) state — applied on top of gain calibration.
+    # `flux_slope` is the Jy/GCU multiplier; `flux_calibrated` flips true after
+    # `apply_flux_calibration` scales every flux array in place.
+    flux_calibrated: bool = False
+    flux_slope: float | None = None
 
     @property
     def source_count(self) -> int:
@@ -298,9 +303,12 @@ def apply_gain_calibration(workspace: SurveyWorkspace) -> None:
         cal_i = (1.0 - weights[i]) * cal1 + weights[i] * cal2
         calibrated.append(sweep.flux / cal_i)
     workspace.calibrated_source_flux = tuple(calibrated)
-    # A fresh calibration invalidates any prior pre-image reductions.
+    # A fresh calibration invalidates any prior pre-image reductions and any
+    # previously-applied flux (Jy) scaling — the caller can re-apply the slope.
     workspace.reduced_source_flux = None
     workspace.reduced_source_dec = None
+    workspace.flux_calibrated = False
+    workspace.flux_slope = None
 
 
 def current_source_flux(workspace: SurveyWorkspace) -> tuple[NDArray[np.float64], ...]:
@@ -375,5 +383,133 @@ def clear_workspace_reductions(workspace: SurveyWorkspace) -> None:
     """Drop any pre-image reductions, reverting to calibrated/raw flux."""
     workspace.reduced_source_flux = None
     workspace.reduced_source_dec = None
+
+
+def apply_flux_calibration(workspace: SurveyWorkspace, slope: float) -> None:
+    """Multiply gain-calibrated flux by `slope` (Jy/GCU). Idempotent guard.
+
+    Requires the workspace to already be gain-calibrated — flux calibration
+    converts GCU to Jy, so applying it to raw volts would mix units. If the
+    workspace was already flux-calibrated (possibly with a different slope),
+    this is a no-op; the caller should `revert_flux_calibration` first.
+    """
+    if not workspace.calibrated or workspace.calibrated_source_flux is None:
+        raise ValueError("workspace must be gain-calibrated before flux calibration")
+    if workspace.flux_calibrated:
+        return
+    if slope == 0.0:
+        raise ValueError("flux calibration slope must be nonzero")
+    scaled = tuple(arr * slope for arr in workspace.calibrated_source_flux)
+    workspace.calibrated_source_flux = scaled
+    if workspace.reduced_source_flux is not None:
+        workspace.reduced_source_flux = tuple(
+            arr * slope for arr in workspace.reduced_source_flux
+        )
+    workspace.flux_calibrated = True
+    workspace.flux_slope = float(slope)
+
+
+def revert_flux_calibration(workspace: SurveyWorkspace) -> None:
+    """Undo a previously-applied flux calibration, returning flux to GCU."""
+    if not workspace.flux_calibrated or workspace.flux_slope in (None, 0.0):
+        return
+    slope = workspace.flux_slope
+    assert slope is not None
+    if workspace.calibrated_source_flux is not None:
+        workspace.calibrated_source_flux = tuple(
+            arr / slope for arr in workspace.calibrated_source_flux
+        )
+    if workspace.reduced_source_flux is not None:
+        workspace.reduced_source_flux = tuple(
+            arr / slope for arr in workspace.reduced_source_flux
+        )
+    workspace.flux_calibrated = False
+    workspace.flux_slope = None
+
+
+def workspace_to_survey(workspace: SurveyWorkspace) -> Survey:
+    """Project the workspace's current state into a `Survey` for .srv writing.
+
+    The `.srv` format expects a fixed 240-sample `sweep0` that is the
+    concatenation of the four cal sub-sweeps (initial_on + initial_off +
+    terminal_on + terminal_off, 60 samples each — verified against
+    fixtures/intermediates/and0a.srv vs fixtures/inputs/and0a.md2). Per-sweep
+    `calib` carries Cal1 on sweep0, Cal2 on the last sweep, and 0.0 in
+    between (the legacy writer only stores the bracket voltages, not a
+    Jy/count conversion, until a .cal file is applied — out of scope here).
+
+    Source sweeps use the current pipeline output (reduced > calibrated >
+    raw) for both flux and dec — `current_source_flux` and
+    `current_source_dec` already do that. The survey workflow has no
+    source-side sample cuts (only cal-bracket cuts and full-sweep
+    reductions), so we emit every source sample.
+    """
+    fluxes = current_source_flux(workspace)
+    decs = current_source_dec(workspace)
+    cal1 = workspace.cal1()
+    cal2 = workspace.cal2()
+
+    sweep0_ra = np.concatenate(
+        [
+            workspace.initial.cal_on.ra,
+            workspace.initial.cal_off.ra,
+            workspace.terminal.cal_on.ra,
+            workspace.terminal.cal_off.ra,
+        ]
+    ).astype(np.float64)
+    sweep0_dec = np.concatenate(
+        [
+            workspace.initial.cal_on.dec,
+            workspace.initial.cal_off.dec,
+            workspace.terminal.cal_on.dec,
+            workspace.terminal.cal_off.dec,
+        ]
+    ).astype(np.float64)
+    sweep0_flux = np.concatenate(
+        [
+            workspace.initial.cal_on.flux,
+            workspace.initial.cal_off.flux,
+            workspace.terminal.cal_on.flux,
+            workspace.terminal.cal_off.flux,
+        ]
+    ).astype(np.float64)
+    sweep0 = Sweep(
+        ra=sweep0_ra,
+        dec=sweep0_dec,
+        flux=sweep0_flux,
+        calib=cal1,
+    )
+
+    sweeps: list[Sweep] = []
+    n = workspace.source_count
+    for i, (raw, dec, flux) in enumerate(zip(workspace.source_sweeps, decs, fluxes)):
+        flux_arr = np.asarray(flux, dtype=np.float64)
+        dec_arr = np.asarray(dec, dtype=np.float64)
+        ra_arr = np.asarray(raw.ra, dtype=np.float64)
+        # Per-sweep `calib` is 0.0 except for the terminal source sweep,
+        # which carries Cal2 (mirrors the and0a.srv fixture pattern).
+        calib = cal2 if i == n - 1 else 0.0
+        sweeps.append(
+            Sweep(
+                ra=ra_arr,
+                dec=dec_arr,
+                flux=flux_arr,
+                min_dec=float(dec_arr.min()),
+                max_dec=float(dec_arr.max()),
+                min_flux=float(flux_arr.min()),
+                max_flux=float(flux_arr.max()),
+                calib=calib,
+            )
+        )
+
+    return Survey(
+        label1=workspace.path,
+        label2=workspace.name,
+        sweep_count=n + 1,
+        swp=n,
+        sweep0=sweep0,
+        sweeps=tuple(sweeps),
+        raw_bytes=None,
+    )
 
 

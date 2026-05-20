@@ -43,9 +43,17 @@ def test_metadata_preserved(inputs_dir: Path) -> None:
     assert any("TELESCOPE" in line for line in doc.trailing_metadata)
 
 
-def test_rejects_b_channel_filename(inputs_dir: Path) -> None:
-    with pytest.raises(ValueError, match="Channel-B"):
-        read_md2(inputs_dir / "morningb.md2")
+def test_b_channel_md2_loads(inputs_dir: Path) -> None:
+    """B-channel `.md2` files load through the same path as A-channel ones.
+
+    The earlier `reject_b_channel` gate has been removed — the legacy app
+    accepted these files and the `SurveyWorkspace` pipeline is channel-
+    agnostic, so blocking them was stricter than the original.
+    """
+    doc = read_md2(inputs_dir / "morningb.md2")
+    assert len(doc.sweeps) >= 1
+    for sweep in doc.sweeps:
+        assert sweep.ra.shape == sweep.dec.shape == sweep.flux.shape
 
 
 @pytest.mark.parametrize(

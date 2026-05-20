@@ -242,15 +242,17 @@ One file per legacy format. Each must include the listed cases.
     assert sample count, RA/Dec/flux of first and last samples.
   - `test_read_full_md1_fixture` — parse a real tutorial `.md1`, assert
     array shape and a checksum of the flux column.
-  - `test_rejects_b_channel` — a `…b.md1` filename should not be openable
-    via "New Scan" (matching the tutorial's "do not use Channel-B" rule).
+  - `test_b_channel_files_load` — `…b.md1` filenames load through the
+    same path as `…a.md1`; the legacy app accepted them and the pipeline
+    is channel-agnostic.
   - `test_malformed_truncated_file` — graceful error, no crash.
 
 - **`test_md2_io.py`** — raw multi-sweep survey input
   - `test_read_minimal_md2` — sweep count, samples per sweep.
   - `test_read_full_tutorial_md2` — assert the Ra/Dec/Flux cube shape and
     a per-sweep flux checksum against a precomputed reference.
-  - `test_rejects_b_channel_filename` — `…b.md2` is refused by `read_md2`.
+  - `test_b_channel_md2_loads` — `…b.md2` parses through `read_md2`
+    unconditionally (channel-agnostic pipeline).
   - `test_cube_dtype_is_float64` — guards against silent precision loss.
 
 - **`test_scn_io.py`** — reduced scan

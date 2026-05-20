@@ -9,6 +9,7 @@ vi.mock('../lib/plots/PointScatter', () => ({ PointScatter: () => null }));
 vi.mock('../ipc/client', () => ({
   rpcClient: {
     openSurvey: vi.fn(),
+    openScan: vi.fn(),
     closeHandle: vi.fn().mockResolvedValue({ closed: 1 }),
     getSweepInline: vi
       .fn()
@@ -37,13 +38,43 @@ vi.mock('../ipc/client', () => ({
     align: vi.fn(),
     makeImage: vi.fn(),
     getImagePixels: vi.fn(),
+    getScanOverview: vi.fn(),
+    getScanView: vi.fn(),
+    getScanCalibrationView: vi.fn(),
+    cutScanCalibrationSegment: vi.fn(),
+    selectScanCalibrationDeclination: vi.fn(),
+    applyScanCalibration: vi.fn(),
+    setScanBracketEnabled: vi.fn(),
+    selectScanDeclination: vi.fn(),
+    cutScanSegment: vi.fn(),
+    baselineScanSource: vi.fn(),
+    determineScanPeak: vi.fn(),
+    undoScan: vi.fn(),
+    saveScan: vi.fn(),
+    saveSurvey: vi.fn(),
+    fluxCalReadFile: vi.fn(),
+    fluxCalWriteFile: vi.fn(),
+    fluxCalFit: vi.fn(),
+    fluxCalReadScnPeak: vi.fn(),
+    fluxCalDefaultKnownJy: vi.fn(),
+    fluxCalApplyToSurvey: vi.fn(),
+    fluxCalRevertFromSurvey: vi.fn(),
+    fluxCalApplyToScan: vi.fn(),
+    fluxCalRevertFromScan: vi.fn(),
   },
 }));
+
+import { ScanProvider } from '../state/scan-context';
+import { FluxCalibrationProvider } from '../state/flux-cal-context';
 
 function renderApp() {
   return render(
     <SurveyProvider>
-      <MainWindow />
+      <ScanProvider>
+        <FluxCalibrationProvider>
+          <MainWindow />
+        </FluxCalibrationProvider>
+      </ScanProvider>
     </SurveyProvider>,
   );
 }
@@ -51,7 +82,7 @@ function renderApp() {
 test('top-level menus appear in legacy order with no FITS item', () => {
   renderApp();
   expect(screen.getByRole('navigation', { name: /main menu/i })).toBeInTheDocument();
-  const expected = ['File', 'Image', 'Survey', 'Scan', 'Calibration'];
+  const expected = ['File', 'Image', 'Survey', 'Scan', 'Flux Calibration'];
   const rootMenuButtons = screen
     .getAllByRole('button')
     .filter((btn) => expected.includes((btn.textContent ?? '').trim()));
@@ -65,6 +96,78 @@ test('image submenu items are disabled before an image exists', () => {
   expect(screen.getByRole('menuitem', { name: 'Save Image As…' })).toBeDisabled();
   expect(screen.getByRole('menuitem', { name: 'Save Bitmap As…' })).toBeDisabled();
   expect(screen.getByRole('menuitem', { name: 'Show Palette…' })).toBeDisabled();
+});
+
+test('save scan menu items respect hasScan and savePath state', () => {
+  renderApp();
+  fireEvent.click(screen.getByText('Scan'));
+  // No scan loaded → both Save items are disabled.
+  expect(screen.getByRole('menuitem', { name: 'Save Scan' })).toBeDisabled();
+  expect(screen.getByRole('menuitem', { name: 'Save Scan As…' })).toBeDisabled();
+});
+
+test('save survey menu items respect hasSurvey and savePath state', () => {
+  renderApp();
+  fireEvent.click(screen.getByText('Survey'));
+  expect(screen.getByRole('menuitem', { name: 'Save Survey' })).toBeDisabled();
+  expect(screen.getByRole('menuitem', { name: 'Save Survey As…' })).toBeDisabled();
+});
+
+test('save scan as opens save dialog and invokes saveScan rpc', async () => {
+  const dialog = await import('@tauri-apps/plugin-dialog');
+  const client = await import('../ipc/client');
+  (dialog.open as unknown as ReturnType<typeof vi.fn>).mockResolvedValue('/tmp/cyg0a.md1');
+  (client.rpcClient.openScan as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+    handle: 9,
+    metadata: { path: '/tmp/cyg0a.md1', source_count: 200 },
+    overview: {
+      name: 'CYG0A',
+      path: '/tmp/cyg0a.md1',
+      source_count: 200,
+      source_kept: 200,
+      initial_cal_samples: 120,
+      terminal_cal_samples: 120,
+      initial_kept: 120,
+      terminal_kept: 120,
+      cal1: 0.34,
+      cal2: 0.36,
+      calibrated: false,
+      initial_enabled: true,
+      terminal_enabled: true,
+      can_undo: false,
+      peak_flux: null,
+    },
+  });
+  (dialog.save as unknown as ReturnType<typeof vi.fn>).mockResolvedValue('/tmp/cyg0a.scn');
+  (client.rpcClient.saveScan as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+    path: '/tmp/cyg0a.scn',
+    bytes_written: 1234,
+  });
+
+  renderApp();
+  // Open a scan so hasScan flips true.
+  fireEvent.click(screen.getByText('Scan'));
+  fireEvent.click(screen.getByRole('menuitem', { name: 'New Scan…' }));
+  await vi.waitFor(() => {
+    expect(client.rpcClient.openScan).toHaveBeenCalledWith('/tmp/cyg0a.md1');
+  });
+
+  fireEvent.click(screen.getByText('Scan'));
+  await vi.waitFor(() => {
+    expect(screen.getByRole('menuitem', { name: 'Save Scan As…' })).not.toBeDisabled();
+  });
+  // Save (no path yet) is still disabled.
+  expect(screen.getByRole('menuitem', { name: 'Save Scan' })).toBeDisabled();
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Save Scan As…' }));
+  await vi.waitFor(() => {
+    expect(dialog.save).toHaveBeenCalled();
+    expect(client.rpcClient.saveScan).toHaveBeenCalledWith(9, '/tmp/cyg0a.scn');
+  });
+  // After a successful Save As, savePath is remembered → Save enables.
+  fireEvent.click(screen.getByText('Scan'));
+  await vi.waitFor(() => {
+    expect(screen.getByRole('menuitem', { name: 'Save Scan' })).not.toBeDisabled();
+  });
 });
 
 test('survey > new survey opens dialog and triggers open_survey rpc', async () => {

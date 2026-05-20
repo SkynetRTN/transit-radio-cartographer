@@ -1,5 +1,5 @@
 
-## Opening
+# Opening
 
 **When shown:** When application is opened
 **Screenshot:** `docs\legacy_ui_reference\screenshots\Openingscreen.png`
@@ -18,6 +18,15 @@ Blank screen shown upon opening the application. I prefer the current implementa
 
 ### Notes
 Calibration menu item should be renamed to flux calibration to avoid confusion with the gain calibration that is performed on the file. The "About KaraLeah" option under the file menu should be refactored to "About" 
+
+## About Karaleah
+
+**When shown:** About karaleah
+**Screenshots:** `docs\legacy_ui_reference\screenshots\aboutkaraleah.png`
+
+### Notes
+About karaleah screen, button should be changed to about OG Radio Cartographer, and instead of Karaleah in the version option, it should be OG Radio Cartographer, I want to keep the 2000s type look of the screen though, in regards to the font
+
 
 ## New survey opened
 
@@ -146,3 +155,36 @@ Button not available until calibrate scan and select declination have been perfo
 
 ### Notes
 Same implementation as the cut segement function in the calibration screen
+
+# Calibration
+
+## Select Calibration
+**When shown:** Calibration -> Select Calibration
+
+### Notes
+a .cal file can be selected, it should have a conversion factor that can move from gain cal units to janskies
+
+## New Calibration
+**When shown:** Calibration -> New Calibration
+**Screenshot:** `docs\legacy_ui_reference\screenshots\newcalibration.png` 
+
+### Notes
+Used to create a new .cal file
+
+## Add Source
+**When shown:** Add Source
+**Screenshot:** `docs\legacy_ui_reference\screenshots\addsource.png` 
+
+### Notes
+Select a .scn file and a ui pops up asking for the known flux of the source (in janskies), for a cas a source, it defaults to 1581. It should plot something but the plotting doesn't seem to work, dive into the legacy code to see what it is supposed to do.
+
+## Fit Calibration
+**When shown:** Fit Calibration
+
+
+### Notes
+Currently brings a pink line that you move around to fit the slope of known vs measured flux, but in the new version instead of manually fitting it should just create a best fit line and add it to the plot when the button is pressed
+
+
+# Image
+

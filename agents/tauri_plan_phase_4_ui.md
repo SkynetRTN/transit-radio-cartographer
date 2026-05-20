@@ -227,6 +227,186 @@ halves the residual mis-alignment (correlation-strength weighting damps
 the interior shifts). A second click further tightens — both the legacy
 app and this port behave the same way.
 
+### 9. Flux Calibration menu wired end-to-end
+
+The Calibration menu was renamed and every previously-disabled item is now
+live. The legacy "two calibrations" naming collision (gain calibration done
+on the survey vs. flux calibration from a `.cal` file) is resolved in the
+menu bar — see the reference guide's
+[Main Menu Screens](../docs/legacy_ui_reference/legacyuireferenceguide.md)
+notes calling for the rename.
+
+- **Menu rename `Calibration` → `Flux Calibration`** in
+  [MainWindow.tsx](../tauri-app/app/src/views/MainWindow.tsx). Items wired:
+  `Select Calibration…` (file picker → load `.cal`), `New Calibration…`
+  (opens the empty editor), `Open Calibration…`, `Save Calibration` /
+  `Save Calibration As…`, `Change Calibration Name…`. Print Calibration
+  was removed entirely (see §10).
+- **Engine:** new
+  [flux_calibration.py](../tauri-app/engine/src/radio_cartographer/flux_calibration.py)
+  module — `read_scn_peak` (parses `Peak Flux: …` from a `.scn` header),
+  `default_known_jy` (legacy three-letter prefix table: `VIR`→213,
+  `TAU`→942, `CYG`→1581, else 0 — matches `vb/calform.frm:156-164`),
+  `fit_error` (RMS error, formula from `vb/calform.frm:554-559`).
+  Re-exports the existing least-squares-through-origin
+  `fit_counts_to_jy` from
+  [calibration.py](../tauri-app/engine/src/radio_cartographer/calibration.py).
+  The legacy mouse-drag pink-line slope (`vb/calform.frm:553`) is
+  replaced with the natural automatic equivalent: fit forced through the
+  origin since 0 GCU must map to 0 Jy.
+- **Workspace state:** `flux_calibrated`/`flux_slope` fields on
+  `SurveyWorkspace`
+  ([workspace.py](../tauri-app/engine/src/radio_cartographer/workspace.py))
+  and `ScanWorkspace`
+  ([scan_workspace.py](../tauri-app/engine/src/radio_cartographer/scan_workspace.py));
+  `apply_flux_calibration` / `revert_flux_calibration` helpers multiply
+  or divide gain-calibrated flux (and `peak_flux` on scans). Re-running
+  `apply_gain_calibration` clears the flux-cal state — a fresh gain
+  calibration invalidates any prior Jy scaling.
+- **RPC:** nine new methods on
+  [rpc.py](../tauri-app/engine/src/radio_cartographer/rpc.py) —
+  `flux_cal_read_file`, `flux_cal_write_file`, `flux_cal_fit`,
+  `flux_cal_read_scn_peak`, `flux_cal_default_known_jy`,
+  `flux_cal_apply_to_survey`, `flux_cal_revert_from_survey`,
+  `flux_cal_apply_to_scan`, `flux_cal_revert_from_scan`. Workspace and
+  scan overviews now carry `flux_calibrated` and `flux_slope`; the
+  `unit` field on `get_source_sweep` / `get_scan_view` reports `"jy"`
+  once flux-calibrated.
+- **Frontend state:** new
+  [flux-cal-context.tsx](../tauri-app/app/src/state/flux-cal-context.tsx)
+  app-level provider holding the editable table, slope/error, file
+  path, and dirty flag. An auto-apply effect fires
+  `fluxCalApplyToSurvey` / `fluxCalApplyToScan` the moment a workspace
+  transitions to `calibrated && !flux_calibrated` — so the user can
+  load a `.cal` *before* opening a survey and have it apply on the
+  first gain calibration. Wrapped into the provider tree in
+  [App.tsx](../tauri-app/app/src/App.tsx) inside the survey + scan
+  providers (it depends on both).
+- **View:** new
+  [FluxCalibrationView](../tauri-app/app/src/views/CalibrationView.tsx)
+  (the old stub file kept for import stability). Editable caption,
+  live slope and RMS-error readouts, entries table with per-row
+  delete, three actions: `Add Source from File…` opens a `.scn` and
+  reads the peak from its header, prompting for known Jy seeded with
+  the legacy default; `Add Current Scan as Source` uses the open
+  scan's `peak_flux`; `Fit Calibration` re-runs the fit. The plot
+  reuses [PointScatter](../tauri-app/app/src/lib/plots/PointScatter.tsx)
+  with measured (GCU) vs known (Jy) points and a magenta best-fit
+  line drawn from (0, 0) to (maxMF, maxMF × slope).
+- **IPC client:** [client.ts](../tauri-app/app/src/ipc/client.ts) extended
+  with `FluxCalEntry` / `FluxCalTable` / `FluxCalReadResult` /
+  `FluxCalFitResult` / `FluxCalWriteResult` / `FluxCalScnPeakResult`
+  types and nine method wrappers. `WorkspaceOverview` and
+  `ScanOverview` gained `flux_calibrated: boolean` / `flux_slope:
+  number | null`; `SourceSweep` and `ScanViewCalibrated` accept the
+  new `'jy'` unit literal.
+- **Unit labels:** status bar appends `flux calibrated (Jy)` on top of
+  the existing gain/raw labels; the `formatFlux` helpers in
+  [SurveyView](../tauri-app/app/src/views/SurveyView.tsx) and
+  [ScanView](../tauri-app/app/src/views/ScanView.tsx) render `Jy` once
+  flux-calibrated.
+
+**Tests added:**
+
+| File | Coverage |
+|---|---|
+| `engine/tests/numerics/test_flux_calibration.py` | (new) 12 cases — legacy known-Jy table, closed-form fit, RMS error formula, `.scn` peak round-trip, apply/revert symmetry on survey + scan, requires-gain-cal guard, zero-slope rejection, idempotent guard, gain-recal clears flux state. |
+| `engine/tests/rpc/test_rpc_flux_cal.py` | (new) 7 cases — `.cal` read returns table+slope+error, live fit recomputes from payload, write round-trips through the codec, `.scn` peak via RPC, apply-to-survey marks workspace and revert clears, uncalibrated-survey rejection, apply-to-scan also rescales `peak_flux`. |
+| `app/src/__tests__/MainWindow.menu.test.tsx` | Expected label updated from `Calibration` to `Flux Calibration`; the test wraps with `FluxCalibrationProvider`. |
+| `app/src/__tests__/CalibrateSurveyView.test.tsx`, `…/PreImageView.test.tsx`, `…/SurveyView.workflow.test.tsx`, `…/ScanView.workflow.test.tsx` | Fixture objects gained `flux_calibrated: false`, `flux_slope: null` to satisfy the new required fields on `WorkspaceOverview` / `ScanOverview`. |
+
+### 10. Print menu items removed
+
+`Print Image`, `Print Scan`, and `Print Calibration` buttons removed from
+[MainWindow.tsx](../tauri-app/app/src/views/MainWindow.tsx) along with the
+adjacent separators. Per user feedback ("no one will be using them
+anymore") and consistent with the modern Tauri/web stack having no native
+print path tied to those legacy `.frm` Printer.Print routines.
+
+### 11. About "OG Radio Cartographer"
+
+Per the legacy reference guide §"About Karaleah" — the dialog branding
+needed to swap to the new project name while keeping the 2000s VB6
+typography intact.
+
+- **Menu label** `About "Karaleah"…` → `About OG Radio Cartographer` in
+  [MainWindow.tsx](../tauri-app/app/src/views/MainWindow.tsx). This
+  deliberately diverges from the existing TODO's "rename to *About*" —
+  the reference guide calls for the full project name, so the rename
+  landed there.
+- **[AboutBox.tsx](../tauri-app/app/src/views/AboutBox.tsx)** rebuilt
+  to mirror the legacy KaraLeah dialog: italic-serif title (Times New
+  Roman) reading **"OG Radio Cartographer"** with **Copyright 2026**
+  underneath, then bold MS Sans Serif body — "Created By / Daniel E.
+  Reichart / For / Educational Research In Radio Astronomy / National
+  Radio Astronomy Observatory / Green Bank, West Virginia" — on a
+  light-grey panel with the legacy inset highlight (white top-left,
+  drop shadow). 2000s typography preserved per the reference guide.
+  No OK button — the existing aux-view "Back to workspace" control
+  handles dismissal.
+
+### 12. Make Image transitions to a dedicated Image screen
+
+**User-reported symptom.** Clicking *Make Image* in Pre Image opened the
+"Input Pixel Resolution" dialog but the heatmap didn't redraw on OK.
+
+**Root cause was structural, not a render bug.**
+[PreImageView.tsx](../tauri-app/app/src/views/PreImageView.tsx)'s local
+`generateImage` stored meta + pixels in component-local `useState` that
+nothing else could see. The
+[survey-context](../tauri-app/app/src/state/survey-context.tsx)'s
+`image: ImageMeta | null` field and `makeImage` method existed but were
+never called from anywhere — dead plumbing. Result: the dialog *was*
+triggering a regeneration on the engine side, but the user-visible
+heatmap was still being driven by the on-mount auto-generation and
+never refreshed (Plotly was re-running but on identical data when the
+user re-entered the same pix).
+
+**Fix is a separation of intent.** Pre Image keeps its in-place preview
+for the Smooth / Baseline / Align iteration loop. *Make Image* now
+*commits* the result and transitions to a new screen — clearer mental
+model and lets the rest of the app (Image menu, status bar, future
+image-level controls) actually observe that an image exists.
+
+- **New `'image'` value** added to `WorkspaceViewMode` in
+  [survey-context.tsx](../tauri-app/app/src/state/survey-context.tsx);
+  new `imagePixels: ImagePixels | null` field on the context next to
+  the existing `image: ImageMeta | null`. `makeImage(pix)` rewritten to
+  call both `rpcClient.makeImage(...)` and `rpcClient.getImagePixels(...)`,
+  store both, close the prior image handle, and flip `viewMode` to
+  `'image'`. The workspace handle is read from `workspaceHandleRef` so
+  the engine grids from the reduced workspace sweeps — same convention
+  §6 introduced for the in-place preview.
+- **New
+  [ImageView.tsx](../tauri-app/app/src/views/ImageView.tsx)** — workspace-
+  frame layout matching the Pre Image screen; renders
+  [ImagePlot](../tauri-app/app/src/lib/plots/ImagePlot.tsx) from the
+  context's `imagePixels`/`image`; side panel currently holds a
+  `Back to Pre Image` button and a placeholder for the future image-
+  level controls (Save Image, Save Bitmap As, Show Palette,
+  Append/Superimpose, Make Bi-/Tri-Color, Change Magnifier Size,
+  Change Image Name).
+- **[MainWindow.tsx](../tauri-app/app/src/views/MainWindow.tsx)**: added
+  the `viewMode === 'image' ? <ImageView /> : …` branch in the view-
+  area routing. `hasImage` is now `image !== null` (was
+  `viewMode === 'pre-image'`, which was *the wrong predicate* — it
+  enabled the Image submenu while still on the Pre Image screen and
+  disabled it after transition). Status bar shows `· Image` for the
+  new mode.
+- **[PreImageView.tsx](../tauri-app/app/src/views/PreImageView.tsx)**:
+  the Make Image dialog's OK handler now `await`s the survey-context's
+  `makeImage(intPix)` (which transitions the view) instead of calling
+  the local `generateImage`. Smooth / Baseline / Align continue to use
+  the local preview path — they're for iterative tweaking before
+  committing.
+
+Existing test suite picked up the change without modification — the
+`PreImageView` test's `(handle, pix, workspaceHandle)` assertion still
+holds because the context's `makeImage` calls the RPC with the same
+signature.
+
+All passing: engine **196/196**, front-end **30/30**.
+
 ---
 
 ## What is left to do
@@ -280,11 +460,17 @@ backing before the workflow round-trips to disk:
 
 ### Menu and About polish (legacy reference guide)
 
-- [ ] Rename **Calibration** → **Flux Calibration** in the menu bar to avoid
-      confusion with gain calibration.
-- [ ] Rename **About "Karaleah"…** → **About**.
-- [ ] Calibration submenu currently has every item disabled — Phase 6 will
-      wire `.cal` load/save once a fixture is captured.
+- [x] ~~Rename **Calibration** → **Flux Calibration** in the menu bar to
+      avoid confusion with gain calibration.~~ Done in §9.
+- [x] ~~Rename **About "Karaleah"…** → **About**.~~ Landed as
+      **About OG Radio Cartographer** per the reference guide §"About
+      Karaleah" (the guide calls for the full project name, not the bare
+      "About"). See §11.
+- [x] ~~Calibration submenu currently has every item disabled — Phase 6
+      will wire `.cal` load/save once a fixture is captured.~~ Done in
+      §9 (the `cal25a.cal` fixture is in the test set; the codec was
+      already present from Phase 1). Print Calibration was removed
+      entirely in §10 rather than wired.
 
 ### Scan Processing
 - [ ] Add in the scan pipeline.
@@ -292,6 +478,14 @@ backing before the workflow round-trips to disk:
 ### Image Processing
 - [ ] Add in the image pipeline.
 - [ ] Ensure all palettes and functionality can be mirrored.
+- [ ] Wire image-level controls into the
+      [ImageView](../tauri-app/app/src/views/ImageView.tsx) side panel.
+      The view itself was added in §12 with only a `Back to Pre Image`
+      button; Save Image, Save Bitmap As…, Show Palette, Append /
+      Superimpose, Make Bi-Color / Tri-Color, Change Magnifier Size,
+      and Change Image Name still need handlers. The existing
+      `Image save paths` bullet under "Pre Image gaps" above belongs
+      here too — the `.img`/`.bmp` codecs are ready, just unwired.
 
 
 ### Phase 6 carryovers (already tracked in tauri_plan_phase_4.md)

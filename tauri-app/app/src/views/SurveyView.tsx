@@ -23,10 +23,11 @@ function formatDec(deg: number): string {
   return `${sign}${String(d).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-function formatFlux(v: number, unit: 'volts' | 'gain'): string {
-  // 'gain' is the dimensionless ratio after noise-injection bracket calibration.
-  // A `.cal` file (flux calibration) converts it to janskies later.
-  return `${v.toFixed(3)} ${unit === 'volts' ? 'V' : 'GCU'}`;
+function formatFlux(v: number, unit: 'volts' | 'gain' | 'jy'): string {
+  // 'gain' is the dimensionless ratio after noise-injection bracket calibration;
+  // a `.cal` file (flux calibration) then converts that to janskies.
+  const label = unit === 'volts' ? 'V' : unit === 'jy' ? 'Jy' : 'GCU';
+  return `${v.toFixed(3)} ${label}`;
 }
 
 interface BaselineSegment {
@@ -242,7 +243,7 @@ export function SurveyView() {
   }, [acceptCurrentSweep]);
 
   const readoutPoint = stickyPoint ?? hoverPoint;
-  const unit: 'volts' | 'gain' = sweep?.unit ?? 'volts';
+  const unit: 'volts' | 'gain' | 'jy' = sweep?.unit ?? 'volts';
 
   if (!survey || !workspace || workspaceHandle === null) {
     return (

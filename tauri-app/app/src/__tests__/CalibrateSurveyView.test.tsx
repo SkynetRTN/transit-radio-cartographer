@@ -67,6 +67,8 @@ const workspaceOverview: WorkspaceOverview = {
   initial_enabled: true,
   terminal_enabled: true,
   can_undo: false,
+  flux_calibrated: false,
+  flux_slope: null,
 };
 
 function HydrateSurvey({ meta }: { meta: SurveyMeta }) {

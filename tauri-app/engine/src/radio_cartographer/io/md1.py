@@ -14,11 +14,10 @@ from pathlib import Path
 import numpy as np
 
 from ..models import MD1Document, RawSweep
-from .common import reject_b_channel, split_crlf_lines
+from .common import split_crlf_lines
 
 
 def read_md1(path: str | Path) -> MD1Document:
-    reject_b_channel(path)
     raw = Path(path).read_bytes()
     return _parse_md1(raw)
 

@@ -65,7 +65,14 @@ function NumericInputDialog({
 const DEFAULT_PIX = 2;
 
 export function PreImageView() {
-  const { survey, workspace, workspaceHandle, setViewMode, resetSweepReview } = useSurvey();
+  const {
+    survey,
+    workspace,
+    workspaceHandle,
+    setViewMode,
+    resetSweepReview,
+    makeImage,
+  } = useSurvey();
   const [imagePixels, setImagePixels] = useState<ImagePixels | null>(null);
   const [imageMeta, setImageMeta] = useState<ImageMeta | null>(null);
   const [pix, setPix] = useState<number>(DEFAULT_PIX);
@@ -106,7 +113,7 @@ export function PreImageView() {
       title: 'Input Pixel Resolution',
       label: 'Pixel Resolution (Pixels):',
       defaultValue: pix,
-      onSubmit: (value) => {
+      onSubmit: async (value) => {
         const intPix = Math.trunc(value);
         if (intPix <= 0 || intPix !== value) {
           setError('Invalid Pixel Resolution');
@@ -115,10 +122,23 @@ export function PreImageView() {
         }
         setPrompt(null);
         setPix(intPix);
-        void generateImage(intPix);
+        // Commit: build the final gridded image and switch to the Image view.
+        // `makeImage` on the survey context stores meta+pixels and flips
+        // `viewMode` to 'image' so MainWindow unmounts PreImageView.
+        setBusy(true);
+        setError(null);
+        setStatus('Building image…');
+        try {
+          await makeImage(intPix);
+        } catch (e) {
+          setError((e as Error).message);
+        } finally {
+          setBusy(false);
+          setStatus(null);
+        }
       },
     });
-  }, [survey, pix, generateImage]);
+  }, [survey, pix, makeImage]);
 
   const handleSmooth = useCallback(async () => {
     if (!survey) return;
