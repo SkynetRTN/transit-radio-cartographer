@@ -68,6 +68,7 @@ class Survey:
     sweep0: Sweep
     sweeps: tuple[Sweep, ...]
     raw_bytes: bytes | None = None
+    accepted: tuple[bool, ...] | None = None
 
 
 @dataclass(frozen=True)

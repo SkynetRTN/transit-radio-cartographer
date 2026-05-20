@@ -22,12 +22,14 @@ from radio_cartographer.scan_workspace import (
     build_scan_workspace,
     cut_scan_segment,
     determine_peak,
+    scan_from_scn,
     workspace_to_scan,
 )
 from radio_cartographer.workspace import (
     apply_gain_calibration,
     apply_workspace_reduction,
     build_workspace,
+    survey_from_srv,
     workspace_to_survey,
 )
 
@@ -142,3 +144,123 @@ def test_workspace_to_survey_after_calibration_and_smooth(
     out = tmp_path / "and0a_reduced.srv"
     write_srv(survey, out)
     assert out.read_bytes()  # non-empty file on disk
+
+
+def test_survey_from_srv_round_trip_after_calibration(
+    inputs_dir: Path, tmp_path: Path
+) -> None:
+    """Calibrate → save .srv (no accepted set) → load → all-accepted fallback."""
+    md2 = read_md2(inputs_dir / "and0a.md2")
+    ws = build_workspace(str(inputs_dir / "and0a.md2"), md2)
+    apply_gain_calibration(ws)
+    saved_flux = tuple(arr.copy() for arr in ws.calibrated_source_flux)  # type: ignore[union-attr]
+    out = tmp_path / "and0a_calibrated.srv"
+    write_srv(workspace_to_survey(ws), out)
+
+    survey = read_srv(out)
+    loaded, accepted_indices = survey_from_srv(survey, str(out))
+
+    # No `accepted_sweeps` passed → no trailer → legacy header path with
+    # SwpCnt% = Swp% + 1 → all accepted.
+    assert accepted_indices == list(range(ws.source_count))
+    assert loaded.calibrated is True
+    assert loaded.source_count == ws.source_count
+    # Brackets reconstructed: cal1/cal2 reproduce the original values.
+    assert loaded.cal1() == pytest.approx(ws.cal1(), rel=1e-3)
+    assert loaded.cal2() == pytest.approx(ws.cal2(), rel=1e-3)
+    # Calibrated flux survives the round-trip (modulo the .srv format's
+    # `#.####` 4-decimal truncation).
+    assert loaded.calibrated_source_flux is not None
+    for original, reloaded in zip(saved_flux, loaded.calibrated_source_flux):
+        np.testing.assert_allclose(reloaded, original, atol=5e-4)
+
+
+def test_workspace_to_survey_round_trips_accepted_set(
+    inputs_dir: Path, tmp_path: Path
+) -> None:
+    """Non-contiguous accepted set survives save + reload via #OGRC_ACCEPTED."""
+    md2 = read_md2(inputs_dir / "and0a.md2")
+    ws = build_workspace(str(inputs_dir / "and0a.md2"), md2)
+    apply_gain_calibration(ws)
+    n = ws.source_count
+    accepted = [0, 2, 5]
+    out = tmp_path / "and0a_partial.srv"
+    written = workspace_to_survey(ws, accepted_sweeps=accepted)
+    # Header sweep_count = first_unaccepted + 1 = 1 + 1 = 2 (sweep index 1
+    # is the first un-accepted). Legacy readers using SwpCnt% land on sweep 2.
+    assert written.sweep_count == 2
+    expected_flags = tuple(i in {0, 2, 5} for i in range(n))
+    assert written.accepted == expected_flags
+    write_srv(written, out)
+
+    survey = read_srv(out)
+    assert survey.accepted == expected_flags
+    _ws, accepted_indices = survey_from_srv(survey, str(out))
+    assert accepted_indices == accepted
+
+
+def test_legacy_srv_without_trailer_defaults_to_all_accepted(
+    intermediates_dir: Path,
+) -> None:
+    """A legacy fixture (no trailer, SwpCnt% > Swp%) → all sweeps accepted."""
+    path = intermediates_dir / "and0a.srv"
+    survey = read_srv(path)
+    assert survey.accepted is None  # no trailer present
+    assert survey.sweep_count > survey.swp
+    _ws, accepted_indices = survey_from_srv(survey, str(path))
+    assert accepted_indices == list(range(survey.swp))
+
+
+def test_legacy_srv_with_partial_swpcnt_returns_prefix(
+    inputs_dir: Path,
+) -> None:
+    """Legacy fixture with SwpCnt% <= Swp% → only sweeps before that index accepted."""
+    survey = read_srv(inputs_dir / "cygnus1atest.srv")
+    assert survey.accepted is None
+    # cygnus1atest.srv has SwpCnt% = 1, Swp% = 56 → no source sweeps accepted.
+    assert survey.sweep_count == 1
+    _ws, accepted_indices = survey_from_srv(
+        survey, str(inputs_dir / "cygnus1atest.srv")
+    )
+    assert accepted_indices == []
+
+
+def test_scan_from_scn_round_trip_with_cuts_and_peak(
+    inputs_dir: Path, tmp_path: Path
+) -> None:
+    """Calibrate + cut + baseline + peak → save .scn → load → state restored."""
+    md1 = read_md1(inputs_dir / "cyg0a.md1")
+    ws = build_scan_workspace(str(inputs_dir / "cyg0a.md1"), md1)
+    apply_scan_calibration(ws)
+    ra_min = float(ws.source_ra[10])
+    ra_max = float(ws.source_ra[30])
+    removed = cut_scan_segment(ws, ra_min, ra_max)
+    assert removed > 0
+    determine_peak(ws, 2.5)
+    out = tmp_path / "cyg0a_round.scn"
+    write_scn(workspace_to_scan(ws), out)
+
+    scan = read_scn(out)
+    loaded = scan_from_scn(scan, str(out))
+
+    assert loaded.calibrated is True
+    assert loaded.source_count == ws.source_count
+    assert loaded.kept_count() == ws.kept_count()
+    assert loaded.peak_flux == pytest.approx(2.5, abs=1e-3)
+    # Cut samples are masked, kept samples are not.
+    assert int(loaded.source_mask.sum()) == int(ws.source_mask.sum())
+    np.testing.assert_array_equal(loaded.source_mask, ws.source_mask)
+
+
+def test_scan_from_scn_raw_channel_a(inputs_dir: Path, tmp_path: Path) -> None:
+    """Raw `.scn` (channel='A') reloads as uncalibrated workspace."""
+    md1 = read_md1(inputs_dir / "cyg0a.md1")
+    ws = build_scan_workspace(str(inputs_dir / "cyg0a.md1"), md1)
+    out = tmp_path / "cyg0a_raw.scn"
+    write_scn(workspace_to_scan(ws), out)
+
+    scan = read_scn(out)
+    assert scan.channel == "A"
+    loaded = scan_from_scn(scan, str(out))
+    assert loaded.calibrated is False
+    assert loaded.peak_flux is None

@@ -28,6 +28,7 @@ export interface SurveyMeta {
   metadata: { sweep_count: number; path: string };
   workspace_handle?: number;
   workspace?: WorkspaceOverview;
+  accepted_sweeps?: number[];
 }
 
 export interface SourceSweep {
@@ -233,6 +234,9 @@ export class RpcClient {
   openSurvey(path: string) {
     return this.request<SurveyMeta>('open_survey', { path });
   }
+  openSavedSurvey(path: string) {
+    return this.request<SurveyMeta>('open_saved_survey', { path });
+  }
   getSweepInline(handle: number, index: number, maxPoints = 2000) {
     return this.request<SweepInline>('get_sweep_inline', {
       handle,
@@ -251,6 +255,13 @@ export class RpcClient {
       handle,
       index,
       max_points: maxPoints,
+    });
+  }
+  setSourceSweepFlux(handle: number, index: number, flux: number[]) {
+    return this.request<{ overview: WorkspaceOverview }>('set_source_sweep_flux', {
+      handle,
+      index,
+      flux,
     });
   }
   getCalibrationView(handle: number) {
@@ -348,6 +359,9 @@ export class RpcClient {
   openScan(path: string) {
     return this.request<ScanMeta>('open_scan', { path });
   }
+  openSavedScan(path: string) {
+    return this.request<ScanMeta>('open_saved_scan', { path });
+  }
   getScanOverview(handle: number) {
     return this.request<ScanOverview>('get_scan_overview', { handle });
   }
@@ -424,8 +438,10 @@ export class RpcClient {
   saveScan(handle: number, path: string) {
     return this.request<{ path: string; bytes_written: number }>('save_scan', { handle, path });
   }
-  saveSurvey(handle: number, path: string) {
-    return this.request<{ path: string; bytes_written: number }>('save_survey', { handle, path });
+  saveSurvey(handle: number, path: string, acceptedSweeps?: number[]) {
+    const params: Record<string, unknown> = { handle, path };
+    if (acceptedSweeps !== undefined) params.accepted_sweeps = acceptedSweeps;
+    return this.request<{ path: string; bytes_written: number }>('save_survey', params);
   }
   // ─── Flux calibration (Calibration menu in the legacy UI)
   fluxCalReadFile(path: string) {

@@ -39,7 +39,9 @@ Pipeline-relevant state transitions:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
@@ -533,3 +535,65 @@ def workspace_to_scan(workspace: ScanWorkspace) -> Scan:
         flux=np.asarray(flux, dtype=np.float64),
         raw_bytes=None,
     )
+
+
+_PEAK_RE = re.compile(r"Peak Flux:\s*(-?\d+(?:\.\d+)?)", re.IGNORECASE)
+
+
+def _parse_scn_peak(peak: str) -> float | None:
+    match = _PEAK_RE.search(peak or "")
+    return float(match.group(1)) if match else None
+
+
+def scan_from_scn(scan: Scan, path: str) -> ScanWorkspace:
+    """Reconstruct a `ScanWorkspace` from a parsed `.scn` file.
+
+    Inverts `workspace_to_scan`. The `.scn` format does not carry the 240
+    cal-bracket samples, so the workspace gets empty `ScanCalBracket`
+    instances — `cal_value()` returns 0.0 for empty inputs and the UI keeps
+    "Calibrate Scan" disabled while `workspace.calibrated == True`.
+
+    `channel == "B"` is the legacy gain-calibrated flag (see
+    `workspace_to_scan` at line 526); the file's flux arrays are seeded into
+    `calibrated_source_flux` so the workspace presents itself as already
+    calibrated. `channel == "A"` is the raw case (uncommon) — we leave
+    `calibrated_source_flux = None`.
+
+    Cut samples (`check == -1`) become `source_mask = False`; `source_flux`
+    stores the same flux values for both kept and cut rows (matching what's
+    on disk).
+    """
+    n = int(scan.ra.shape[0])
+    empty_bracket = ScanCalBracket(
+        on_flux=np.zeros(0, dtype=np.float64),
+        off_flux=np.zeros(0, dtype=np.float64),
+        on_ra=np.zeros(0, dtype=np.float64),
+        off_ra=np.zeros(0, dtype=np.float64),
+        on_dec=np.zeros(0, dtype=np.float64),
+        off_dec=np.zeros(0, dtype=np.float64),
+        on_mask=np.zeros(0, dtype=bool),
+        off_mask=np.zeros(0, dtype=bool),
+    )
+    source_flux = np.asarray(scan.flux, dtype=np.float64).copy()
+    workspace = ScanWorkspace(
+        name=scan.name or Path(path).stem.upper(),
+        path=path,
+        md1=MD1Document(
+            samples=RawSweep(
+                ra=np.zeros(0, dtype=np.float64),
+                dec=np.zeros(0, dtype=np.float64),
+                flux=np.zeros(0, dtype=np.float64),
+            ),
+            raw_bytes=scan.raw_bytes or b"",
+        ),
+        initial=empty_bracket,
+        terminal=empty_bracket,
+        source_ra=np.asarray(scan.ra, dtype=np.float64).copy(),
+        source_dec=np.asarray(scan.dec, dtype=np.float64).copy(),
+        source_flux=source_flux,
+        source_mask=(np.asarray(scan.check, dtype=np.int_) == 0),
+    )
+    if scan.channel == "B":
+        workspace.calibrated_source_flux = source_flux.copy()
+    workspace.peak_flux = _parse_scn_peak(scan.peak)
+    return workspace

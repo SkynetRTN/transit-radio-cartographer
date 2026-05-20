@@ -17,8 +17,8 @@ from .image import GriddedImage, make_image
 from .io.cal import read_cal, write_cal
 from .io.md1 import read_md1
 from .io.md2 import read_md2
-from .io.scn import write_scn
-from .io.srv import write_srv
+from .io.scn import read_scn, write_scn
+from .io.srv import read_srv, write_srv
 from .models import CalibrationEntry, CalibrationTable, Survey, Sweep
 from .scan_workspace import (
     ScanWorkspace,
@@ -31,6 +31,7 @@ from .scan_workspace import (
     cut_scan_segment,
     determine_peak,
     revert_flux_calibration_scan,
+    scan_from_scn,
     select_calibration_declination_scan,
     select_scan_declination,
     set_bracket_enabled_scan,
@@ -47,6 +48,7 @@ from .workspace import (
     cut_calibration_segment,
     revert_flux_calibration,
     select_calibration_declination,
+    survey_from_srv,
     undo_cut,
     workspace_to_survey,
 )
@@ -161,6 +163,8 @@ class RpcServer:
                 result = {"ok": True}
             elif method == "open_survey":
                 result = self._open_survey(params)
+            elif method == "open_saved_survey":
+                result = self._open_saved_survey(params)
             elif method == "get_sweep":
                 result = self._get_sweep(params)
             elif method == "get_sweep_inline":
@@ -179,6 +183,8 @@ class RpcServer:
                 result = self._get_workspace_overview(params)
             elif method == "get_source_sweep":
                 result = self._get_source_sweep(params)
+            elif method == "set_source_sweep_flux":
+                result = self._set_source_sweep_flux(params)
             elif method == "get_calibration_view":
                 result = self._get_calibration_view(params)
             elif method == "cut_calibration_segment":
@@ -193,6 +199,8 @@ class RpcServer:
                 result = self._set_bracket_enabled(params)
             elif method == "open_scan":
                 result = self._open_scan(params)
+            elif method == "open_saved_scan":
+                result = self._open_saved_scan(params)
             elif method == "get_scan_overview":
                 result = self._get_scan_overview(params)
             elif method == "get_scan_view":
@@ -296,6 +304,28 @@ class RpcServer:
         result["workspace_handle"] = ws_handle
         result["workspace"] = self._workspace_overview(workspace)
         return result
+
+    def _open_saved_survey(self, params: dict[str, Any]) -> dict[str, Any]:
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        try:
+            survey = read_srv(Path(path))
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to open survey: {exc}") from exc
+        try:
+            workspace, accepted_indices = survey_from_srv(survey, str(path))
+        except ValueError as exc:
+            raise RpcError(ERR_IO, f"failed to open survey: {exc}") from exc
+        survey_handle = self._handles.create(survey)
+        ws_handle = self._handles.create(workspace)
+        return {
+            "handle": survey_handle,
+            "metadata": {"sweep_count": survey.swp, "path": str(path)},
+            "workspace_handle": ws_handle,
+            "workspace": self._workspace_overview(workspace),
+            "accepted_sweeps": [int(i) for i in accepted_indices],
+        }
 
     def _get_sweep(self, params: dict[str, Any]) -> dict[str, Any]:
         handle = int(params.get("handle", -1))
@@ -525,6 +555,43 @@ class RpcServer:
             "calibrated": bool(ws.calibrated),
         }
 
+    def _set_source_sweep_flux(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_workspace(int(params.get("handle", -1)))
+        index = int(params.get("index", -1))
+        if index < 0 or index >= ws.source_count:
+            raise RpcError(
+                ERR_INVALID_PARAMS,
+                f"source sweep index out of range: {index} (0..{ws.source_count - 1})",
+            )
+        raw_flux = params.get("flux")
+        if not isinstance(raw_flux, list):
+            raise RpcError(ERR_INVALID_PARAMS, "flux must be a list of numbers")
+        try:
+            flux_arr = np.asarray(raw_flux, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, "flux must be numeric") from exc
+        expected = int(ws.source_sweeps[index].ra.shape[0])
+        if flux_arr.shape[0] != expected:
+            raise RpcError(
+                ERR_INVALID_PARAMS,
+                f"flux length {flux_arr.shape[0]} does not match sweep sample count {expected}",
+            )
+        # Write into whichever layer current_source_flux reads from so the
+        # next get_source_sweep / save_survey sees the update.
+        if ws.reduced_source_flux is not None:
+            as_list = list(ws.reduced_source_flux)
+            as_list[index] = flux_arr
+            ws.reduced_source_flux = tuple(as_list)
+        elif ws.calibrated_source_flux is not None:
+            as_list = list(ws.calibrated_source_flux)
+            as_list[index] = flux_arr
+            ws.calibrated_source_flux = tuple(as_list)
+        else:
+            raise RpcError(
+                ERR_INVALID_PARAMS, "sweep must be calibrated before flux edits"
+            )
+        return {"overview": self._workspace_overview(ws)}
+
     def _get_calibration_view(self, params: dict[str, Any]) -> dict[str, Any]:
         ws = self._resolve_workspace(int(params.get("handle", -1)))
 
@@ -665,6 +732,28 @@ class RpcServer:
             raise RpcError(ERR_IO, f"failed to open scan: {exc}") from exc
         try:
             workspace = build_scan_workspace(str(path), md1)
+        except ValueError as exc:
+            raise RpcError(ERR_IO, f"failed to open scan: {exc}") from exc
+        handle = self._handles.create(workspace)
+        return {
+            "handle": handle,
+            "metadata": {
+                "path": str(path),
+                "source_count": int(workspace.source_count),
+            },
+            "overview": self._scan_overview(workspace),
+        }
+
+    def _open_saved_scan(self, params: dict[str, Any]) -> dict[str, Any]:
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        try:
+            scan = read_scn(Path(path))
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to open scan: {exc}") from exc
+        try:
+            workspace = scan_from_scn(scan, str(path))
         except ValueError as exc:
             raise RpcError(ERR_IO, f"failed to open scan: {exc}") from exc
         handle = self._handles.create(workspace)
@@ -897,7 +986,18 @@ class RpcServer:
         path = Path(str(path_str))
         if not path.parent.exists():
             raise RpcError(ERR_IO, f"directory does not exist: {path.parent}")
-        survey = workspace_to_survey(ws)
+        raw_accepted = params.get("accepted_sweeps")
+        accepted_sweeps: list[int] | None
+        if raw_accepted is None:
+            accepted_sweeps = None
+        else:
+            try:
+                accepted_sweeps = [int(i) for i in raw_accepted]
+            except (TypeError, ValueError) as exc:
+                raise RpcError(
+                    ERR_INVALID_PARAMS, "accepted_sweeps must be a list of ints"
+                ) from exc
+        survey = workspace_to_survey(ws, accepted_sweeps=accepted_sweeps)
         try:
             write_srv(survey, path)
         except Exception as exc:  # noqa: BLE001

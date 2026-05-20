@@ -23,7 +23,9 @@ each source sweep's flux by a linearly-interpolated cal voltage between
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
@@ -427,7 +429,10 @@ def revert_flux_calibration(workspace: SurveyWorkspace) -> None:
     workspace.flux_slope = None
 
 
-def workspace_to_survey(workspace: SurveyWorkspace) -> Survey:
+def workspace_to_survey(
+    workspace: SurveyWorkspace,
+    accepted_sweeps: Sequence[int] | None = None,
+) -> Survey:
     """Project the workspace's current state into a `Survey` for .srv writing.
 
     The `.srv` format expects a fixed 240-sample `sweep0` that is the
@@ -443,6 +448,12 @@ def workspace_to_survey(workspace: SurveyWorkspace) -> Survey:
     `current_source_dec` already do that. The survey workflow has no
     source-side sample cuts (only cal-bracket cuts and full-sweep
     reductions), so we emit every source sample.
+
+    When `accepted_sweeps` is provided, encodes the per-sweep accepted state
+    in the `#OGRC_ACCEPTED` trailer (via `Survey.accepted`) and writes the
+    header `SwpCnt%` as `first_unaccepted + 1` so legacy readers also see the
+    right starting sweep. `None` preserves the legacy header (`SwpCnt% = Swp%
+    + 1` → "all accepted, jump to Pre-Image") and skips the trailer.
     """
     fluxes = current_source_flux(workspace)
     decs = current_source_dec(workspace)
@@ -502,14 +513,109 @@ def workspace_to_survey(workspace: SurveyWorkspace) -> Survey:
             )
         )
 
+    if accepted_sweeps is None:
+        sweep_count_header = n + 1
+        accepted_tuple: tuple[bool, ...] | None = None
+    else:
+        accepted_set = set(int(i) for i in accepted_sweeps)
+        first_unaccepted = next((i for i in range(n) if i not in accepted_set), n)
+        sweep_count_header = first_unaccepted + 1
+        accepted_tuple = tuple(i in accepted_set for i in range(n))
+
     return Survey(
         label1=workspace.path,
         label2=workspace.name,
-        sweep_count=n + 1,
+        sweep_count=sweep_count_header,
         swp=n,
         sweep0=sweep0,
         sweeps=tuple(sweeps),
         raw_bytes=None,
+        accepted=accepted_tuple,
     )
+
+
+def survey_from_srv(survey: Survey, path: str) -> tuple[SurveyWorkspace, list[int]]:
+    """Reconstruct a `SurveyWorkspace` from a parsed `.srv` file.
+
+    Inverts `workspace_to_survey`. The `.srv` format has no calibration flag,
+    so we assume every reload is gain-calibrated (legacy workflow only writes
+    `.srv` after Calibrate Survey) — `calibrated_source_flux` is seeded from
+    the file's flux arrays. The original `.md2` is not reachable, so the
+    "raw" `source_sweeps` carry the same flux arrays; reverting calibration
+    would be a no-op (the UI disables that path while `calibrated == True`).
+
+    Returns `(workspace, accepted_indices)` — the list of source-sweep
+    indices that were marked accepted. When the file has an `#OGRC_ACCEPTED`
+    trailer, those flags are authoritative; otherwise we fall back to the
+    legacy `SwpCnt%` header: `SwpCnt% > Swp%` means all accepted (→ Pre-Image),
+    `SwpCnt% <= Swp%` means sweeps `0..SwpCnt% - 2` were accepted (this
+    captures the legacy convention from `vb/survform.frm:4432-4475`).
+    """
+    sweep0 = survey.sweep0
+    if sweep0.ra.size != 240:
+        raise ValueError(
+            f".srv sweep0 must be 240 cal samples, got {sweep0.ra.size}"
+        )
+
+    def _bracket(lo: int, hi: int) -> CalBracket:
+        on_lo, on_hi = lo, lo + 60
+        off_lo, off_hi = lo + 60, hi
+        cal_on = RawSweep(
+            ra=np.asarray(sweep0.ra[on_lo:on_hi], dtype=np.float64).copy(),
+            dec=np.asarray(sweep0.dec[on_lo:on_hi], dtype=np.float64).copy(),
+            flux=np.asarray(sweep0.flux[on_lo:on_hi], dtype=np.float64).copy(),
+        )
+        cal_off = RawSweep(
+            ra=np.asarray(sweep0.ra[off_lo:off_hi], dtype=np.float64).copy(),
+            dec=np.asarray(sweep0.dec[off_lo:off_hi], dtype=np.float64).copy(),
+            flux=np.asarray(sweep0.flux[off_lo:off_hi], dtype=np.float64).copy(),
+        )
+        return CalBracket(
+            cal_on=cal_on,
+            cal_off=cal_off,
+            cal_on_mask=np.ones(60, dtype=bool),
+            cal_off_mask=np.ones(60, dtype=bool),
+        )
+
+    initial = _bracket(0, 120)
+    terminal = _bracket(120, 240)
+
+    source_sweeps = tuple(
+        RawSweep(
+            ra=np.asarray(s.ra, dtype=np.float64).copy(),
+            dec=np.asarray(s.dec, dtype=np.float64).copy(),
+            flux=np.asarray(s.flux, dtype=np.float64).copy(),
+        )
+        for s in survey.sweeps
+    )
+    calibrated = tuple(
+        np.asarray(s.flux, dtype=np.float64).copy() for s in survey.sweeps
+    )
+
+    name = survey.label2 or Path(path).stem.upper()
+    md2 = MD2Document(
+        sweeps=(initial.cal_on, initial.cal_off)
+        + source_sweeps
+        + (terminal.cal_on, terminal.cal_off),
+        raw_bytes=survey.raw_bytes or b"",
+    )
+    workspace = SurveyWorkspace(
+        name=name,
+        path=path,
+        md2=md2,
+        initial=initial,
+        terminal=terminal,
+        source_sweeps=source_sweeps,
+        calibrated_source_flux=calibrated,
+    )
+    if survey.accepted is not None:
+        accepted_indices = [i for i, flag in enumerate(survey.accepted) if flag]
+    elif survey.sweep_count > survey.swp:
+        accepted_indices = list(range(survey.swp))
+    else:
+        # Legacy convention: SwpCnt% (1-indexed) is the next-to-process sweep.
+        # Everything before it was accepted.
+        accepted_indices = list(range(max(0, survey.sweep_count - 1)))
+    return workspace, accepted_indices
 
 

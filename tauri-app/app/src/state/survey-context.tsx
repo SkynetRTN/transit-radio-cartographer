@@ -49,6 +49,7 @@ export interface SurveyState {
   makeImage: (pix?: number) => Promise<ImageMeta | null>;
   clearImage: () => Promise<void>;
   save: (path?: string) => Promise<string | null>;
+  markDirty: () => void;
 }
 
 const SurveyContext = createContext<SurveyState | null>(null);
@@ -78,6 +79,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   const workspaceHandleRef = useRef<number | null>(workspaceHandle);
   const imageRef = useRef<ImageMeta | null>(image);
   const savePathRef = useRef<string | null>(savePath);
+  const acceptedSweepsRef = useRef<Set<number>>(acceptedSweeps);
   useEffect(() => {
     surveyRef.current = survey;
   }, [survey]);
@@ -90,24 +92,53 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     savePathRef.current = savePath;
   }, [savePath]);
+  useEffect(() => {
+    acceptedSweepsRef.current = acceptedSweeps;
+  }, [acceptedSweeps]);
 
   const open = useCallback(async (path: string) => {
     setLoading(true);
     setError(null);
     try {
-      const meta = await rpcClient.openSurvey(path);
+      const isSaved = path.toLowerCase().endsWith('.srv');
+      const meta = isSaved
+        ? await rpcClient.openSavedSurvey(path)
+        : await rpcClient.openSurvey(path);
       const prevSurvey = surveyRef.current;
       const prevImage = imageRef.current;
       const prevWorkspaceHandle = workspaceHandleRef.current;
       setSurvey(meta);
       setWorkspaceHandle(meta.workspace_handle ?? null);
       setWorkspace(meta.workspace ?? null);
-      setViewMode('survey');
       setImage(null);
       setImagePixels(null);
-      setCurrentSweepIndex(0);
-      setAcceptedSweeps(new Set());
-      setSavePath(null);
+      if (isSaved) {
+        const sweepCount = meta.workspace?.source_count ?? 0;
+        const acceptedList =
+          meta.accepted_sweeps ?? Array.from({ length: sweepCount }, (_, i) => i);
+        const acceptedSet = new Set(acceptedList);
+        setAcceptedSweeps(acceptedSet);
+        if (acceptedSet.size >= sweepCount && sweepCount > 0) {
+          setViewMode('pre-image');
+          setCurrentSweepIndex(Math.max(0, sweepCount - 1));
+        } else {
+          let firstUnaccepted = 0;
+          for (let i = 0; i < sweepCount; i++) {
+            if (!acceptedSet.has(i)) {
+              firstUnaccepted = i;
+              break;
+            }
+          }
+          setViewMode('survey');
+          setCurrentSweepIndex(firstUnaccepted);
+        }
+        setSavePath(path);
+      } else {
+        setViewMode('survey');
+        setCurrentSweepIndex(0);
+        setAcceptedSweeps(new Set());
+        setSavePath(null);
+      }
       setDirty(false);
       closeInBackground(prevSurvey?.handle);
       closeInBackground(prevWorkspaceHandle);
@@ -243,6 +274,10 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     setImagePixels(null);
   }, []);
 
+  const markDirty = useCallback(() => {
+    setDirty(true);
+  }, []);
+
   const save = useCallback(async (path?: string): Promise<string | null> => {
     const h = workspaceHandleRef.current;
     if (h === null) return null;
@@ -251,7 +286,8 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     setSaving(true);
     setError(null);
     try {
-      const result = await rpcClient.saveSurvey(h, target);
+      const accepted = Array.from(acceptedSweepsRef.current).sort((a, b) => a - b);
+      const result = await rpcClient.saveSurvey(h, target, accepted);
       setSavePath(result.path);
       setDirty(false);
       return result.path;
@@ -290,6 +326,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       makeImage,
       clearImage,
       save,
+      markDirty,
     }),
     [
       loading,
@@ -315,6 +352,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       makeImage,
       clearImage,
       save,
+      markDirty,
     ],
   );
 

@@ -7,6 +7,7 @@ export interface Point {
   ra: number;
   dec: number;
   flux: number;
+  sampleIndex?: number;
 }
 
 export interface PointSeries {
@@ -161,7 +162,10 @@ export function PointScatter({
       return {
         x: s.points.map((p) => p.x),
         y: s.points.map((p) => p.y),
-        customdata: s.points.map((p) => [p.ra, p.dec, p.flux] as [number, number, number]),
+        customdata: s.points.map(
+          (p) =>
+            [p.ra, p.dec, p.flux, p.sampleIndex ?? -1] as [number, number, number, number],
+        ),
         type: 'scatter',
         mode: 'markers',
         marker: {
@@ -248,12 +252,20 @@ export function PointScatter({
     });
 
     // Plotly hover/click → callbacks
-    type HoverEvent = { points?: Array<{ customdata?: [number, number, number] }> };
+    type HoverEvent = { points?: Array<{ customdata?: [number, number, number, number] }> };
+    const toPoint = (cd: [number, number, number, number]): Point => ({
+      x: 0,
+      y: 0,
+      ra: cd[0],
+      dec: cd[1],
+      flux: cd[2],
+      sampleIndex: cd[3] >= 0 ? cd[3] : undefined,
+    });
     const onHoverEvt = (data: HoverEvent) => {
       const pt = data.points?.[0];
       const cd = pt?.customdata;
       if (cd && hoverRef.current) {
-        hoverRef.current({ x: 0, y: 0, ra: cd[0], dec: cd[1], flux: cd[2] });
+        hoverRef.current(toPoint(cd));
       }
     };
     const onUnhoverEvt = () => {
@@ -263,7 +275,7 @@ export function PointScatter({
       const cd = data.points?.[0]?.customdata;
       if (cd && clickRef.current) {
         lastPointClickAt.current = Date.now();
-        clickRef.current({ x: 0, y: 0, ra: cd[0], dec: cd[1], flux: cd[2] });
+        clickRef.current(toPoint(cd));
       }
     };
     // DOM-level click on the plot div fires AFTER plotly_click. If plotly_click

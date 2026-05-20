@@ -317,6 +317,14 @@ body {
   padding: 4px 8px;
 }
 
+.sweep-nav-input {
+  width: 3.5em;
+  padding: 2px 4px;
+  text-align: center;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
 .survey-view.empty {
   text-align: center;
   padding: 32px 16px;

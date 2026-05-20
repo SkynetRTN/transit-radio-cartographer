@@ -88,6 +88,29 @@ export function MainWindow() {
     await open(path);
   }, [open]);
 
+  const pickAndOpenSavedSurvey = useCallback(async () => {
+    setOpenMenu(null);
+    let path: string | null = null;
+    try {
+      const selected = await openDialog({
+        multiple: false,
+        directory: false,
+        title: 'Open Survey',
+        filters: [
+          { name: 'Survey (.srv)', extensions: ['srv'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      });
+      path = typeof selected === 'string' ? selected : null;
+    } catch (err) {
+      console.error('file dialog failed', err);
+      return;
+    }
+    if (!path) return;
+    setAuxView(null);
+    await open(path);
+  }, [open]);
+
   const pickSavePath = useCallback(
     async (kind: 'scan' | 'survey', defaultPath: string | null) => {
       try {
@@ -159,6 +182,29 @@ export function MainWindow() {
         title: 'New Scan',
         filters: [
           { name: 'Scan (.md1)', extensions: ['md1'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      });
+      path = typeof selected === 'string' ? selected : null;
+    } catch (err) {
+      console.error('file dialog failed', err);
+      return;
+    }
+    if (!path) return;
+    setAuxView(null);
+    await openScan(path);
+  }, [openScan]);
+
+  const pickAndOpenSavedScan = useCallback(async () => {
+    setOpenMenu(null);
+    let path: string | null = null;
+    try {
+      const selected = await openDialog({
+        multiple: false,
+        directory: false,
+        title: 'Open Scan',
+        filters: [
+          { name: 'Scan (.scn)', extensions: ['scn'] },
           { name: 'All files', extensions: ['*'] },
         ],
       });
@@ -353,7 +399,7 @@ export function MainWindow() {
               <button role="menuitem" onClick={pickAndOpenSurvey}>
                 New Survey…
               </button>
-              <button role="menuitem" disabled>
+              <button role="menuitem" onClick={pickAndOpenSavedSurvey}>
                 Open Survey…
               </button>
               <button
@@ -372,10 +418,6 @@ export function MainWindow() {
               </button>
               <div className="menu-sep" />
               <button role="menuitem" disabled={!hasSurvey}>
-                Goto Sweep…
-              </button>
-              <div className="menu-sep" />
-              <button role="menuitem" disabled={!hasSurvey}>
                 Change Survey Name…
               </button>
             </div>
@@ -389,7 +431,7 @@ export function MainWindow() {
               <button role="menuitem" onClick={pickAndOpenScan}>
                 New Scan…
               </button>
-              <button role="menuitem" disabled>
+              <button role="menuitem" onClick={pickAndOpenSavedScan}>
                 Open Scan…
               </button>
               <button

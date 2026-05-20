@@ -132,6 +132,17 @@ def _parse_srv(raw: bytes) -> Survey:
             )
         )
 
+    accepted: tuple[bool, ...] | None = None
+    if cursor < len(lines) and lines[cursor].strip() == "#OGRC_ACCEPTED":
+        cursor += 1
+        flags: list[bool] = []
+        for _ in range(swp):
+            if cursor >= len(lines):
+                raise ValueError("#OGRC_ACCEPTED trailer truncated")
+            flags.append(int(lines[cursor].strip()) != 0)
+            cursor += 1
+        accepted = tuple(flags)
+
     return Survey(
         label1=label1,
         label2=label2,
@@ -140,6 +151,7 @@ def _parse_srv(raw: bytes) -> Survey:
         sweep0=sweep0,
         sweeps=tuple(sweeps),
         raw_bytes=raw,
+        accepted=accepted,
     )
 
 
@@ -170,6 +182,14 @@ def _serialize_srv(survey: Survey) -> bytes:
             out += vb_print_number(_compact(float(sweep.ra[i])))
             out += vb_print_formatted(vb_format_fixed(float(sweep.dec[i]), 2))
             out += vb_print_formatted(vb_format_fixed(float(sweep.flux[i]), 4))
+    if survey.accepted is not None:
+        if len(survey.accepted) != survey.swp:
+            raise ValueError(
+                f"accepted length {len(survey.accepted)} must equal swp {survey.swp}"
+            )
+        out += vb_print_string("#OGRC_ACCEPTED")
+        for flag in survey.accepted:
+            out += vb_print_number(-1 if flag else 0)
     return bytes(out)
 
 

@@ -62,13 +62,16 @@ export function ScanProvider({ children }: { children: ReactNode }) {
     setLoading(true);
     setError(null);
     try {
-      const meta = await rpcClient.openScan(path);
+      const isSaved = path.toLowerCase().endsWith('.scn');
+      const meta = isSaved
+        ? await rpcClient.openSavedScan(path)
+        : await rpcClient.openScan(path);
       const prev = handleRef.current;
       setScan(meta);
       setHandle(meta.handle);
       setOverview(meta.overview);
       setViewMode('scan');
-      setSavePath(null);
+      setSavePath(isSaved ? path : null);
       setDirty(false);
       closeInBackground(prev);
     } catch (e) {

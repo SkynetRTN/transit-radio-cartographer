@@ -407,6 +407,229 @@ signature.
 
 All passing: engine **196/196**, front-end **30/30**.
 
+### 13. Open `.srv` / `.scn`, editable sweep counter, Back to Sweeps
+
+The Save Survey / Save Scan plumbing from earlier rounds wrote `.srv` /
+`.scn` files but **Open Survey…** and **Open Scan…** were still disabled
+stubs. This pass closed the round-trip and tightened the sweep nav UX.
+
+- **Two new backend RPCs** in
+  [rpc.py](../tauri-app/engine/src/radio_cartographer/rpc.py):
+  - `open_saved_survey` — `read_srv` → `survey_from_srv` →
+    `SurveyWorkspace`, returns the same handle/metadata/workspace shape as
+    `open_survey` so the front-end can dispatch by extension without
+    diverging downstream code paths.
+  - `open_saved_scan` — `read_scn` → `scan_from_scn` → `ScanWorkspace`,
+    parallels `open_scan`.
+- **New helpers** that invert the existing
+  `workspace_to_survey`/`workspace_to_scan` writers:
+  - [`survey_from_srv`](../tauri-app/engine/src/radio_cartographer/workspace.py)
+    splits the file's 240-sample `sweep0` back into the four 60-sample
+    cal sub-sweeps, rebuilds `source_sweeps`, and seeds
+    `calibrated_source_flux` so reloaded surveys self-report as
+    gain-calibrated (per user direction: every `.srv` is assumed
+    calibrated — legacy convention only writes after Calibrate Survey).
+  - [`scan_from_scn`](../tauri-app/engine/src/radio_cartographer/scan_workspace.py)
+    builds synthetic empty `ScanCalBracket` instances (the `.scn` format
+    doesn't store the 240 cal samples), copies `source_ra/dec/flux` from
+    the file, derives `source_mask` from the `check` column (`check==0`
+    kept, `check==-1` cut — matches the mask round-trip), and seeds
+    `calibrated_source_flux` when `channel == "B"`. The `Peak Flux:
+    X.XXX` string from line 3 of the `.scn` is parsed back into
+    `workspace.peak_flux`.
+- **Frontend dispatch by extension** in
+  [survey-context.tsx](../tauri-app/app/src/state/survey-context.tsx) and
+  [scan-context.tsx](../tauri-app/app/src/state/scan-context.tsx):
+  `open(path)` now branches on `.srv` / `.scn` suffix and routes to the
+  saved-file RPC. After a `.srv` load, every sweep is initially marked
+  accepted (refined in §14) and `savePath` is seeded to the picked file
+  so Save Survey is enabled immediately.
+- **`.srv` workflow re-entry.** A re-opened survey lands on **Pre-Image**
+  by default (the legacy `SwpCnt% > Swp%` signal in
+  `vb/survform.frm:4432-4475` reads as "all sweeps accepted → Pre
+  Image"). The previous `Pre Image → Cancel` button reset the accepted
+  set, which would lose state the moment the user wanted to re-edit a
+  sweep — that button is now **Back to Sweeps** in
+  [PreImageView.tsx](../tauri-app/app/src/views/PreImageView.tsx),
+  preserving acceptances; a new **Create Pre-Image** button on the side
+  panel in [SurveyView.tsx](../tauri-app/app/src/views/SurveyView.tsx)
+  re-enters Pre Image (enabled when every sweep is accepted).
+- **Editable sweep counter** in
+  [SurveyView.tsx](../tauri-app/app/src/views/SurveyView.tsx). The
+  status-side `N / total` span became a `<input type="number">` that
+  commits on Enter or blur and clamps to `[1, sweepCount]`. The disabled
+  `Survey → Goto Sweep…` menu item was removed —
+  [MainWindow.tsx](../tauri-app/app/src/views/MainWindow.tsx) is the
+  single source of truth for that nav action now. New
+  `.sweep-nav-input` CSS in [App.css](../tauri-app/app/src/App.css).
+- **Menu wiring.** Two new file pickers in
+  [MainWindow.tsx](../tauri-app/app/src/views/MainWindow.tsx)
+  (`pickAndOpenSavedSurvey` / `pickAndOpenSavedScan`) filter `.srv` /
+  `.scn`. The disabled stubs are gone.
+
+**Tests added** (extending
+[test_workspace_save.py](../tauri-app/engine/tests/numerics/test_workspace_save.py)):
+| Coverage |
+|---|
+| Calibrate → save `.srv` → load → workspace reports calibrated (gain) and round-trips cal1/cal2 to within 1e-3, flux to within 5e-4 (the `#.####` format truncation). |
+| Calibrate scan + cut + Baseline Source + Determine Peak → save `.scn` → reload → mask preserved, peak readout restored, workspace reports calibrated. |
+| Raw `.scn` (channel `A`) reload returns an uncalibrated workspace with `peak_flux is None`. |
+
+All passing: engine **199/199**, front-end **30/30**.
+
+### 14. Per-sweep accepted state in the `.srv` file
+
+§13 always landed on Pre-Image after a `.srv` open because
+`workspace_to_survey` unconditionally wrote `sweep_count = swp + 1` (the
+legacy "all accepted" signal). This pass added per-sweep accepted
+tracking so a reload opens to the **first unaccepted sweep** instead.
+
+**File format extension.** After the existing body,
+[srv.py](../tauri-app/engine/src/radio_cartographer/io/srv.py)'s
+`_serialize_srv` appends a trailer when `Survey.accepted` is set:
+
+```
+...last sweep data...
+#OGRC_ACCEPTED
+-1     ← sweep 0 (-1 = accepted, 0 = not)
+0
+-1
+...
+```
+
+`_parse_srv` checks for the `#OGRC_ACCEPTED` marker line after the main
+body and parses `swp` ints. Legacy `.srv` files without the trailer
+(`Survey.accepted = None`) fall back to the `SwpCnt%` header:
+`SwpCnt > Swp` → all accepted, otherwise the first `SwpCnt - 1` sweeps
+are accepted (preserves the legacy convention).
+
+- **Model:** new `accepted: tuple[bool, ...] | None` field on
+  [`Survey`](../tauri-app/engine/src/radio_cartographer/models.py). `None`
+  means "no trailer — use header fallback".
+- **Writer:**
+  [`workspace_to_survey(ws, accepted_sweeps=…)`](../tauri-app/engine/src/radio_cartographer/workspace.py)
+  takes an optional sweep-index sequence; when provided it emits the
+  trailer and sets the header `sweep_count = first_unaccepted + 1` so
+  legacy readers (and our own fallback) land on the right sweep.
+- **Reader:**
+  [`survey_from_srv`](../tauri-app/engine/src/radio_cartographer/workspace.py)
+  now returns `(workspace, accepted_indices)` instead of a `was_pre_image`
+  bool. Trailer wins when present; otherwise it derives indices from
+  `sweep_count` + `swp`.
+- **RPC plumbing:**
+  - `save_survey` accepts an optional `accepted_sweeps: list[int]` param
+    and forwards it.
+  - `open_saved_survey` returns `accepted_sweeps: list[int]` (replacing
+    the old nested `saved: { was_pre_image }` shape).
+- **Frontend:**
+  - [`saveSurvey(handle, path, acceptedSweeps?)`](../tauri-app/app/src/ipc/client.ts)
+    now takes an optional indices array; `SurveyMeta` gained
+    `accepted_sweeps?: number[]`.
+  - [survey-context.tsx](../tauri-app/app/src/state/survey-context.tsx)
+    added an `acceptedSweepsRef` (mirroring the other refs) so `save`
+    can hand the latest set to the RPC without stale-closure issues.
+    On `.srv` open, it seeds `acceptedSweeps` from
+    `meta.accepted_sweeps`, then routes to Pre-Image if every sweep is
+    accepted, otherwise to the **first unaccepted** sweep (`for i in
+    0..n: if !accepted.has(i) → currentSweepIndex = i`).
+
+**Tests added** (extending
+[test_workspace_save.py](../tauri-app/engine/tests/numerics/test_workspace_save.py)):
+| Coverage |
+|---|
+| Calibrate → save without `accepted_sweeps` → load → header fallback returns `list(range(source_count))` (all accepted). |
+| Calibrate → save with `accepted_sweeps=[0, 2, 5]` → load → trailer round-trips the non-contiguous set verbatim; header `SwpCnt = first_unaccepted + 1 = 2` so legacy readers also land on sweep 2. |
+| Legacy fixture `intermediates/and0a.srv` (no trailer, `SwpCnt > Swp`) → all sweeps accepted. |
+| Legacy fixture `inputs/cygnus1atest.srv` (`SwpCnt=1`, `Swp=56`) → empty accepted list (no source sweeps accepted yet — preserves the legacy partial-prefix convention). |
+
+All passing: engine **202/202**, front-end **30/30**.
+
+### 15. Baseline-segment edits persist via Accept Sweep + interactive Removed plot
+
+User-reported symptom: open a `.srv` saved after drawing baseline
+segments, and the cut-out interference reappears. Root cause:
+`segmentsBySweep` lived only in React component state and never reached
+the workspace, so save serialized the original (un-baselined) flux.
+
+**Math reminder.** Legacy VB at
+[survform.frm:5453-5539](../vb/survform.frm#L5453-L5539) **replaces**
+`Flux` with the drawn line (line 5494: `Flux = Y/X * Dec + B`) and
+stores the diff `oldFlux - newFlux` in a `Baseline!()` array (line
+5493) — the array used to render Picture3 (the bottom "what was
+removed" plot). The current React implementation already does the
+REPLACE; this pass keeps that math and adds the missing pieces: the
+backend commit, the diff-rendering bottom plot, and click-to-restore.
+
+**New backend RPC.**
+[`set_source_sweep_flux(handle, index, flux)`](../tauri-app/engine/src/radio_cartographer/rpc.py)
+overwrites a single source sweep's flux. Writes into whichever layer
+`current_source_flux` reads (reduced > calibrated), so the next
+`get_source_sweep` and `save_survey` see the new values. Rejects
+length-mismatched arrays and uncalibrated workspaces (Baseline Segment is
+UI-gated on calibration).
+
+**Frontend client.**
+[`setSourceSweepFlux(handle, index, flux)`](../tauri-app/app/src/ipc/client.ts)
+wrapper next to `getSourceSweep`.
+
+**`SurveyView` refactor.**
+- **State swap.** `segmentsBySweep: Record<number, BaselineSegment[]>` →
+  `removedBySweep: Record<number, RemovedMap>` where
+  `RemovedMap = Record<sampleIndex, removedAmount>` and
+  `removedAmount = originalFlux[i] - newFlux[i]`. Once committed, only the
+  per-sample map matters; the line endpoints get baked into the flux and
+  are no longer tracked (matches legacy: after commit, Picture2 redraws
+  from `Flux!()` and Picture3 from `Baseline!()`, neither shows the
+  original line).
+- **Top plot** now shows the *corrected* flux while edits are pending —
+  the user sees the flattened curve in real time, without re-rendering
+  through a separate baseline-preview pass.
+- **Bottom plot renamed "Removed".** Renders only the per-sample diff
+  points carrying their `sampleIndex` through `customdata`. Clicking a
+  point fires `handleRestoreClick`, which removes that entry from the
+  `RemovedMap` — the top plot's flux at that index reverts and the point
+  disappears from the bottom plot. The legacy persistent line overlay
+  was dropped (legacy code also doesn't redraw it after commit).
+- **"Undo Baseline" button removed** in favor of per-point restore-by-
+  click on the bottom plot.
+- **Accept Sweep commits.** The handler now `await`s
+  `setSourceSweepFlux(handle, sweepIndex, applyRemoved(sweep.flux,
+  removed))` before calling `acceptCurrentSweep()`. Calls a new
+  `markDirty()` (exposed on the survey context) so Save Survey lights up.
+- **Re-edit on already-accepted sweeps.** The button enables when there
+  are pending removals even if the sweep is already accepted; it renders
+  as **Apply Baselines** in that case (label switch based on
+  `hasPendingRemoved && isAccepted`).
+- **Per-sweep maps survive sweep navigation** but are cleared on
+  workspace change (new `useEffect(() => setRemovedBySweep({}),
+  [workspaceHandle])`).
+
+**`PointScatter` widening** in
+[PointScatter.tsx](../tauri-app/app/src/lib/plots/PointScatter.tsx):
+`Point` gained optional `sampleIndex`, threaded through `customdata` as
+the 4th element (sentinel `-1` for absent) and reconstructed in
+`onHover`/`onPointClick` via a `toPoint` helper. Lets the bottom plot
+identify which sample the user clicked without ad-hoc nearest-neighbour
+lookup.
+
+**Survey context.** New `markDirty()` callback on
+[survey-context.tsx](../tauri-app/app/src/state/survey-context.tsx)
+mirrors the equivalent on
+[scan-context.tsx](../tauri-app/app/src/state/scan-context.tsx). Exposed
+via the context value so `SurveyView` can flag the workspace as
+out-of-sync after committing.
+
+**Tests added** (extending
+[test_rpc_workspace.py](../tauri-app/engine/tests/rpc/test_rpc_workspace.py)):
+| Coverage |
+|---|
+| `set_source_sweep_flux` writes into `calibrated_source_flux` for a calibrated workspace. |
+| Modify a sweep → save `.srv` → `open_saved_survey` → `get_source_sweep` round-trips the modified flux to within 5e-4 (format truncation). |
+| Wrong-length flux array → `ERR_INVALID_PARAMS`. |
+| Uncalibrated workspace → `ERR_INVALID_PARAMS` (Baseline Segment is post-cal). |
+
+All passing: engine **206/206**, front-end **30/30**.
+
 ---
 
 ## What is left to do
@@ -426,20 +649,20 @@ All passing: engine **196/196**, front-end **30/30**.
 
 ### Backend persistence
 
-The per-sweep edits live in React state only. Three pieces need engine
-backing before the workflow round-trips to disk:
-
-- [ ] **Accept Sweep** should persist into the `SurveyWorkspace` — add an
-      `accepted_mask: NDArray[bool]` and an `accept_sweep(workspace, i)`
-      function. The post-acceptance survey handle (what `smooth`/`baseline`/
-      `align` operate on) should be derived from accepted-only sweeps.
-- [ ] **Baseline Segment** needs a backend RPC `baseline_segment(handle, i,
-      dec0, dec1)` that records the segment on the per-sweep state and
-      applies the linear-interpolation at accept time. Today the segments
-      are discarded on `Cancel`.
-- [ ] **Undo stack** for baseline segments should be unified with the
-      existing calibration undo stack so a single `Undo` button works on
-      whichever screen the user is on.
+- [x] ~~**Accept Sweep** should persist~~ — accepted state now round-trips
+      via the `#OGRC_ACCEPTED` trailer in `.srv` (§14). The workspace
+      itself still doesn't carry an `accepted_mask` (the frontend's
+      `acceptedSweeps` set is authoritative and is passed to
+      `save_survey`), but the round-trip works end-to-end.
+- [x] ~~**Baseline Segment** needs a backend RPC~~ — the simpler design
+      that won: commit on Accept Sweep via `set_source_sweep_flux` (§15).
+      Segments are baked into flux permanently; no per-segment record
+      stored. Restore-by-click on the new Removed plot replaces the
+      "undo last segment" gesture during the current edit session.
+- [x] ~~**Undo stack unification**~~ — the per-sweep Undo Baseline button
+      was removed in favour of per-point restore via the Removed plot.
+      The calibration undo stack stays as-is on the Calibrate Survey
+      screen.
 
 ### Pre Image gaps
 
@@ -473,7 +696,16 @@ backing before the workflow round-trips to disk:
       entirely in §10 rather than wired.
 
 ### Scan Processing
-- [ ] Add in the scan pipeline.
+- [x] ~~Open Scan…~~ — wired in §13. Calibrated `.scn` files round-trip
+      including the per-sample mask (cuts) and Peak Flux readout.
+- [ ] **Scan-level baseline/cut persistence.** `set_source_sweep_flux`
+      from §15 is survey-only; the scan equivalent (`set_scan_source_flux`?)
+      isn't there yet. Current scan workflow's existing
+      `cut_scan_segment` / `baseline_scan_source` / `select_scan_declination`
+      all already mutate the workspace, so save already captures their
+      effect — but if a future Scan UI grows a per-sample restore
+      gesture parallel to §15, it'll need the same plumbing.
+- [ ] Other scan-level reductions (smooth, etc.) still TBD.
 
 ### Image Processing
 - [ ] Add in the image pipeline.

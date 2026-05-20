@@ -70,7 +70,6 @@ export function PreImageView() {
     workspace,
     workspaceHandle,
     setViewMode,
-    resetSweepReview,
     makeImage,
   } = useSurvey();
   const [imagePixels, setImagePixels] = useState<ImagePixels | null>(null);
@@ -204,13 +203,13 @@ export function PreImageView() {
     });
   }, [survey, workspaceHandle, pix, generateImage]);
 
-  const handleCancel = useCallback(() => {
-    // Cancel from Pre Image returns to the per-sweep view so the user can
-    // re-accept sweeps. Matches the legacy app where Cancel on each screen
-    // walks the user back one step.
-    resetSweepReview();
+  const handleBackToSweeps = useCallback(() => {
+    // Return to the per-sweep view without resetting acceptances — every
+    // sweep stays accepted so the user can re-edit one (e.g. add a baseline
+    // segment on an already-accepted sweep) and come back via Create
+    // Pre-Image.
     setViewMode('survey');
-  }, [resetSweepReview, setViewMode]);
+  }, [setViewMode]);
 
   if (!workspace) {
     return (
@@ -273,7 +272,7 @@ export function PreImageView() {
                 Align Sweeps
               </button>
               <div className="button-gap" />
-              <button onClick={handleCancel}>Cancel</button>
+              <button onClick={handleBackToSweeps}>Back to Sweeps</button>
             </div>
 
             {imageMeta !== null && imagePixels && (

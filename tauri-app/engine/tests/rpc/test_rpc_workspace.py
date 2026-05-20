@@ -172,3 +172,87 @@ def test_set_bracket_enabled_toggles_cal_value() -> None:
     enabled = call(server, "set_bracket_enabled", {"handle": ws_handle, "bracket": "initial", "enabled": True})
     assert "error" not in enabled
     assert abs(enabled["result"]["cal1"] - cal1_pre) < 1e-12
+
+
+def _open_calibrated(server: RpcServer) -> int:
+    ws_handle, _ = _open(server)
+    cal = call(server, "apply_gain_calibration", {"handle": ws_handle})
+    assert "error" not in cal, cal
+    return ws_handle
+
+
+def test_set_source_sweep_flux_writes_to_calibrated_layer(tmp_path: Path) -> None:
+    server = RpcServer()
+    ws_handle = _open_calibrated(server)
+    sweep = call(server, "get_source_sweep", {"handle": ws_handle, "index": 1, "max_points": 0})
+    n = sweep["result"]["sample_count"]
+    new_flux = [0.5] * n
+    resp = call(
+        server,
+        "set_source_sweep_flux",
+        {"handle": ws_handle, "index": 1, "flux": new_flux},
+    )
+    assert "error" not in resp, resp
+    # The workspace's calibrated layer for that sweep should match what we sent.
+    ws = server._handles.get(ws_handle)
+    assert isinstance(ws, SurveyWorkspace)
+    assert ws.calibrated_source_flux is not None
+    np.testing.assert_allclose(ws.calibrated_source_flux[1], np.asarray(new_flux))
+
+
+def test_set_source_sweep_flux_round_trips_through_save_and_load(tmp_path: Path) -> None:
+    server = RpcServer()
+    ws_handle = _open_calibrated(server)
+    sweep = call(server, "get_source_sweep", {"handle": ws_handle, "index": 2, "max_points": 0})
+    n = sweep["result"]["sample_count"]
+    # Use a non-trivial pattern so the round-trip can't accidentally pass via
+    # an unrelated constant value.
+    new_flux = [float(i % 7) * 0.1 for i in range(n)]
+
+    set_resp = call(
+        server,
+        "set_source_sweep_flux",
+        {"handle": ws_handle, "index": 2, "flux": new_flux},
+    )
+    assert "error" not in set_resp, set_resp
+
+    out = tmp_path / "round.srv"
+    save = call(server, "save_survey", {"handle": ws_handle, "path": str(out)})
+    assert "error" not in save, save
+
+    reopen = call(server, "open_saved_survey", {"path": str(out)})
+    assert "error" not in reopen, reopen
+    reloaded_ws = int(reopen["result"]["workspace_handle"])
+    reloaded_sweep = call(
+        server, "get_source_sweep", {"handle": reloaded_ws, "index": 2, "max_points": 0}
+    )
+    # Round-trip through the .srv format truncates to 4 decimal places (#.####).
+    np.testing.assert_allclose(
+        reloaded_sweep["result"]["flux"], new_flux, atol=5e-4
+    )
+
+
+def test_set_source_sweep_flux_rejects_wrong_length() -> None:
+    server = RpcServer()
+    ws_handle = _open_calibrated(server)
+    resp = call(
+        server,
+        "set_source_sweep_flux",
+        {"handle": ws_handle, "index": 0, "flux": [1.0, 2.0, 3.0]},
+    )
+    assert "error" in resp
+    assert resp["error"]["code"] == -32602  # ERR_INVALID_PARAMS
+
+
+def test_set_source_sweep_flux_rejects_uncalibrated_workspace() -> None:
+    server = RpcServer()
+    ws_handle, _ = _open(server)
+    sweep = call(server, "get_source_sweep", {"handle": ws_handle, "index": 0, "max_points": 0})
+    n = sweep["result"]["sample_count"]
+    resp = call(
+        server,
+        "set_source_sweep_flux",
+        {"handle": ws_handle, "index": 0, "flux": [0.0] * n},
+    )
+    assert "error" in resp
+    assert resp["error"]["code"] == -32602
