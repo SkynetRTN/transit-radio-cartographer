@@ -630,6 +630,291 @@ out-of-sync after committing.
 
 All passing: engine **206/206**, front-end **30/30**.
 
+### 16. Image pipeline wired end-to-end
+
+The Image-menu items shipped in §12 with `disabled={true}` placeholders.
+This round wires every one of them and adds FITS support, palette
+editing, append/superimpose, and bi/tri-color flows — the legacy
+reference guide's "Image" section is now fully usable end-to-end.
+
+**Make Image gating** in
+[PreImageView.tsx](../tauri-app/app/src/views/PreImageView.tsx):
+`didSmooth` / `didBaseline` / `didAlign` flags flip in each step's
+success branch; the Make Image button enables only when all three are
+true. Its `title` shows the remaining steps so hover explains the
+gray-out. Flags live in component state — unmounting on Cancel to
+Sweeps resets them, mirroring the legacy workflow gate.
+
+**FITS read/write.** New
+[io/fits.py](../tauri-app/engine/src/radio_cartographer/io/fits.py)
+using `astropy` (already a dep). `read_fits` opens the primary HDU,
+runs WCS through `np.nan_to_num` for NaN sentinels (CAS-A FITS has
+them at the field edges), and derives `min_ra` / `max_ra` /
+`min_dec` / `max_dec` from `CRVAL`/`CDELT`/`CRPIX`. `write_fits`
+produces a single PrimaryHDU with the matching WCS plus `RC_NAME` and
+`RC_PIX` cards for the legacy-format metadata that has no FITS
+keyword equivalent. `_open_image_path` in
+[rpc.py](../tauri-app/engine/src/radio_cartographer/rpc.py) dispatches
+on extension: `.img` → `read_img` → `_image_to_gridded`; `.fits` /
+`.fit` → `read_fits`. `_save_image` mirrors the dispatch.
+
+**New RPCs**:
+[`open_image`](../tauri-app/engine/src/radio_cartographer/rpc.py),
+`save_image`, `save_bitmap`, `open_palette`, `save_palette`,
+`append_image`, `superimpose_image`, `bicolor_image`,
+`tricolor_image`, `extend_rgb_image`, `get_rgb_image_pixels`. All
+documented in
+[PROTOCOL.md](../tauri-app/engine/PROTOCOL.md). The two
+palette methods (`open_palette` / `save_palette`) were declared in
+the client months ago but had no engine dispatch — they're real now.
+
+**Compose engine.** New
+[image_compose.py](../tauri-app/engine/src/radio_cartographer/image_compose.py)
+hosts the resample-onto-common-grid logic shared by every multi-image
+operation:
+- `append_images` — union of bounding boxes, **max** on overlap
+  (legacy guide: "superimposing if there is overlap").
+- `superimpose_images` — union grid, weighted blend `w·p₁ + (1-w)·p₂`
+  on overlap; non-overlap takes whichever image covers.
+- `bicolor_compose` — two scalar inputs → RGB image; each channel
+  independently normalized to `[0,1]` so a faint patch still saturates
+  its channel at its own bright end (legacy bi-color behavior — see
+  `vb/survform.frm:7100ish`).
+- `tricolor_compose` — three scalar inputs → RGB image with fixed
+  `R = primary, G = second, B = third` order. The front-end permutes
+  channels client-side based on the user's color picks.
+- `extend_rgb_compose` — fills the **unused** channel of an existing
+  bi-color RGB with a new scalar image; this is what fires when the
+  user clicks *Make Tri-Color* with a bi-color already loaded
+  (auto-detection via `rgbUnusedChannel` in MainWindow).
+- Helpers `_resample_onto`, `_coverage_mask`, `_normalize01`,
+  `_two_image_grid` keep each operation a one-liner of intent.
+
+**Palette editor rewrite** in
+[PaletteEditor.tsx](../tauri-app/app/src/views/PaletteEditor.tsx).
+The previous 7-line stub is gone; the new editor matches the layout
+in the original §3 plan:
+- Horizontal gradient strip with draggable triangle pegs at each
+  stop's anchor (0..255 → 0..1 normalized for display).
+- Click empty space on the strip → adds a new stop, RGB interpolated
+  from neighbours. Click an existing peg → selects it; an inline row
+  below the strip shows editable Anchor / R / G / B inputs (0–255)
+  plus a swatch and a Remove button.
+- Drag-along-strip updates anchor live; the gradient repaints from
+  the in-memory stop list using the same `np.interp`-style scheme as
+  [palette.py](../tauri-app/engine/src/radio_cartographer/palette.py).
+- **Flux Range** Min/Max inputs autofill from `image.min_flux` /
+  `image.max_flux`; "Reset" returns them to those originals
+  (replaces the legacy "Original Flux Range" checkbox).
+- **Preset dropdown** lists every `.pal` in `fixtures/palettes/`.
+  **Load .pal…** / **Save .pal…** go through `open_palette` /
+  `save_palette`.
+- **OK** commits the working palette + flux range to survey context
+  (new `setImagePalette(stops, fluxMin, fluxMax)` action) and closes
+  the editor via an `onClose` prop;
+- [ImagePlot.tsx](../tauri-app/app/src/lib/plots/ImagePlot.tsx)
+  consumes both — when set, they override the hard-coded
+  `RADIO_CARTOGRAPHER_PALETTE` and the auto-computed `zmax`.
+  `paletteToColorscale` filters non-finite anchors and nudges
+  duplicates apart by an epsilon (Plotly silently crashes if two
+  colorscale anchors are equal).
+
+**Append / Superimpose dialog cascade** in
+[MainWindow.tsx](../tauri-app/app/src/views/MainWindow.tsx).
+Driven by a `ComposeStep` state machine instead of chained
+`window.confirm` / `window.prompt` (the IDE blocks those):
+1. File picker (`.img` / `.fits`).
+2. *"Do the two images use the same calibration?"* — Yes / No / Cancel
+   (`YesNoCancelDialog`). No surfaces a warning toast and proceeds.
+3. *Superimpose only:* *"Are both images weighted equally?"* — on No,
+   prompt percent (0–100) for the secondary's share; the primary
+   takes `(100-pct)/100`.
+4. *"Shift the second image?"* → on Yes, two numeric prompts: RA
+   shift (minutes → converted to sidereal seconds) and Dec shift
+   (degrees).
+5. Pixel resolution prompt — default = **1**.
+6. Engine call (`appendImage` / `superimposeImage`) → adopt the new
+   image via `adoptImage(meta, null)`.
+
+**Bi-Color / Tri-Color dialog cascade.** A second state machine
+(`ColorStep`) handles the three modes:
+- **`bicolor`** — scalar primary + one new image; user picks two R/G/B
+  channels (`ColorPickDialog`), engine returns `RgbImageMeta`.
+- **`tricolor-from-scalar`** — scalar primary + two new images; user
+  picks colors for the first two (third = remaining color
+  deterministically). Because `tricolor_image` always emits
+  `R = primary, G = second, B = third`, the front-end permutes the
+  returned channels to match the user's picks.
+- **`tricolor-from-rgb`** — existing bi-color + one new image, no
+  color picks (auto-fills the unused channel via `extend_rgb_image`).
+  Mode is selected automatically when the user clicks *Make
+  Tri-Color* and `rgbUnusedChannel !== null`.
+
+**New dialog components** under
+[views/dialogs/](../tauri-app/app/src/views/dialogs/):
+[`NumericInputDialog`](../tauri-app/app/src/views/dialogs/NumericInputDialog.tsx),
+[`YesNoCancelDialog`](../tauri-app/app/src/views/dialogs/YesNoCancelDialog.tsx),
+[`ColorPickDialog`](../tauri-app/app/src/views/dialogs/ColorPickDialog.tsx)
+(three R/G/B swatch buttons with a `disabledColors` list).
+
+**Magnifier** in
+[ImageView.tsx](../tauri-app/app/src/views/ImageView.tsx) (legacy
+reference guide §"Magnifier"):
+- Right-click on the main plot opens (or moves) a magnifier centered
+  at the clicked cell. The legacy guide phrases this as "a box around
+  your cursor will appear" — but it follows where you right-click,
+  not the live cursor.
+- The magnifier panel renders a second `ImagePlot` with the local
+  sub-grid and a **rescaled palette** (its own min/max), so a faint
+  patch still shows the full palette stretched into it (legacy
+  behavior). A `BoxOverlay` on the main plot marks what region is
+  being magnified.
+- **Arrow keys** nudge the magnifier center while it's open;
+  **Shift** = ×5 step. The handler skips when an `<input>` /
+  `<textarea>` / `contentEditable` is focused so dialog typing still
+  works.
+- **Default half-size = 15** cells, exposed as `magnifierHalfSize`
+  on survey context; *Change Magnifier Size…* prompts (1–200).
+- **Left-click pins** the hovered point. Pin/hover/em-dash flux
+  readout lives in the side panel — the on-plot tooltip is suppressed
+  (`hoverinfo: 'none'`) so the readout is the single source of
+  truth.
+
+**RGB plot axis decoupling.** Plotly's `image` trace force-locks
+`yaxis.scaleanchor = 'x'`, which squashed Dec when the RA range was
+wider — same issue we hit on the scalar `make_image` pre-image. Fix
+in [RgbImagePlot.tsx](../tauri-app/app/src/lib/plots/RgbImagePlot.tsx):
+render the 3-channel buffer onto a pre-rotated `<canvas>`, mount it
+as a Plotly `layout.images[]` entry with `sizing: 'stretch'`, and
+anchor an invisible scatter trace so both axes scale independently
+from the bounds.
+
+**Flux unit display.** Priority chain in
+[ImageView.tsx](../tauri-app/app/src/views/ImageView.tsx):
+1. `image.unit` if the loaded file carried one (our `.img` writer
+   sets this; legacy `.img` files leave it null).
+2. Workspace calibration state — `"Jy"` if flux-calibrated, `"GCU"`
+   if gain-calibrated only.
+3. **`"GCU"` default for standalone legacy `.img`** — user's note:
+   an image always implies at least gain calibration, never raw
+   volts.
+4. Empty string for FITS (no unit convention yet).
+
+**Survey-context additions** in
+[survey-context.tsx](../tauri-app/app/src/state/survey-context.tsx):
+`imagePalette`, `imageFluxRange`, `imageName`, `imageSavePath`,
+`magnifierHalfSize`, `rgbImage`, `rgbImagePixels`, plus action
+creators `setImage`, `setRgbImage`, `setImagePalette`, `setImageName`,
+`setMagnifierHalfSize`, `saveImage`. `setImage` and `setRgbImage` are
+mutually exclusive — setting either clears the other (you can't view
+both at once). Each setter closes the previous handle via
+`closeInBackground` so the engine doesn't leak.
+
+**Default pixel resolution = 1** (was 2) everywhere — Make Image
+button, Append/Superimpose dialogs, Bi/Tri-Color dialogs. Matches
+the legacy guide's recommended starting point.
+
+**Tests added**:
+[test_fits_io.py](../tauri-app/engine/tests/io/test_fits_io.py),
+[test_image_compose.py](../tauri-app/engine/tests/numerics/test_image_compose.py),
+[test_rpc_image_io.py](../tauri-app/engine/tests/rpc/test_rpc_image_io.py).
+UI tests:
+[PaletteEditor.test.tsx](../tauri-app/app/src/__tests__/PaletteEditor.test.tsx)
+rewritten end-to-end;
+[PreImageView.test.tsx](../tauri-app/app/src/__tests__/PreImageView.test.tsx)
+extended with the smooth/baseline/align gating cases;
+[MainWindow.menu.test.tsx](../tauri-app/app/src/__tests__/MainWindow.menu.test.tsx)
+mocks `RgbImagePlot` (jsdom has no `URL.createObjectURL`).
+
+### 17. Legacy `.img` byte-format fixes
+
+Three independent issues with the `.img` codec surfaced once real
+legacy fixtures (Cassiopeia, Cygnus, etc.) were loaded into the new
+viewer. Each is a faithful match against
+[vb/survform.frm](../vb/survform.frm); fixtures continue to byte-exact
+round-trip through `read_img` → `write_img`.
+
+**Mirror flip.** Legacy `.img` stores rows in `MaxDec → MinDec` order
+(`vb/survform.frm:1697` writes `YTemp% = Int((YMax% - Y)/15/Pix%)+1`,
+i.e. high Dec → low row index; the paint loop at line 4805 draws
+`Clr(Num, Cnt=1)` at `y=0`, top of the picture). Our internal
+convention is row 0 = MinDec (matches the Plotly heatmap's
+`ys[0] = min_dec`). Fix in
+[io/img.py](../tauri-app/engine/src/radio_cartographer/io/img.py): a
+symmetric `[::-1].copy()` flip on read and the matching flip on
+write. On-disk bytes stay legacy-compatible; only our in-memory
+representation is reoriented.
+
+**Optional unit suffix.** Legacy `.img` ends at the pixel grid — no
+unit is stored on disk (VB shows " Jy" at runtime from
+`DataForm.CalSlope.Caption`, not from the file). Our writer now
+**optionally** appends a length-prefixed ASCII unit string after the
+pixel grid; the reader detects it from the trailing bytes. When
+`image.unit is None` the suffix is skipped entirely, so legacy
+fixtures round-trip byte-exact. New files we write include `Jy` or
+`GCU` per the workspace's calibration state at make-image time.
+
+**Flux dequantization (the 5000-bucket scheme).** Legacy quantizes
+flux into **5000** buckets:
+`Clr% = Int((f - MinFluxPI)/(MaxFluxPI - MinFluxPI) * 5000) + 1`
+([vb/survform.frm:1706](../vb/survform.frm#L1706)). Our
+`_image_to_gridded` was inverting it as if the buckets were 0..255,
+so `cassio_a.img` (raw int16 max = 5000, `max_flux_p = 3.5578`)
+displayed `5000/255 * 3.5578 ≈ 69.76 GCU` instead of the legacy
+viewer's `3.55 GCU`. Fix in
+[rpc.py](../tauri-app/engine/src/radio_cartographer/rpc.py):
+- `_image_to_gridded`: `flux = lo + ((Clr - 1) / 4999) * (hi - lo)`,
+  clipped to `[lo, hi]` so unpainted background (`Clr = 0`) renders
+  at the floor.
+- `_gridded_to_image`: `int_pixels = round(norm * 4999) + 1` so files
+  we save are bucket-compatible with the legacy viewer's flux
+  readout.
+
+### 18. Crash-recovery + Open/New discard confirmation
+
+Two user-facing reliability tweaks driven by direct reports.
+
+**Error boundary safety net.** Opening a malformed or oversized image
+on top of an already-loaded one occasionally crashed the React tree —
+the user saw a fully gray UI with no way back. New
+[ErrorBoundary.tsx](../tauri-app/app/src/views/ErrorBoundary.tsx) is a
+class component that catches render-phase exceptions; the fallback in
+[App.tsx](../tauri-app/app/src/App.tsx) is mounted **inside** all the
+providers so it can use `useSurvey()` / `useScan()` to call
+`close()` on both contexts before resetting the boundary state.
+Result: any uncaught render error shows "Something went wrong" + the
+message + a **Return to home** button that wipes state and re-enters
+the empty workspace. No restart required.
+
+**Open/New discard confirmation** in
+[MainWindow.tsx](../tauri-app/app/src/views/MainWindow.tsx). When
+anything is loaded (survey, scan, scalar image, or RGB image) and the
+user clicks one of:
+- Image → Open Image…
+- Survey → New Survey…
+- Survey → Open Survey…
+- Scan → New Scan…
+- Scan → Open Scan…
+
+a `ConfirmDialog`
+([dialogs/ConfirmDialog.tsx](../tauri-app/app/src/views/dialogs/ConfirmDialog.tsx))
+pops with **"Open <X> will be discarded."** where `<X>` is the actual
+loaded items joined with English commas — e.g. `"Open Survey will be
+discarded."`, `"Open Survey and Image will be discarded."`, or `"Open
+Survey, Scan and Image will be discarded."`. Scalar and RGB images
+collapse to one "Image" since the context only holds one at a time.
+
+**Confirm actually discards.** Initially the dialog was advisory only
+— clicking OK ran the new-open handler without touching prior state,
+so e.g. opening an image over a survey left the survey workspace
+attached and the **Back to Pre Image** button kept working. Fixed: on
+confirm we call `close()` (clears survey/workspace/image/rgb) **and**
+`closeScan()` **and** `setAuxView(null)` before invoking the new
+handler — the dialog's promise is honored.
+
+Enter confirms; Escape cancels. If nothing is loaded, the warning is
+skipped and the file picker opens directly.
+
 ---
 
 ## What is left to do
@@ -672,14 +957,14 @@ All passing: engine **206/206**, front-end **30/30**.
 - [x] ~~Cal sweeps in the pre-image~~ — resolved by threading
       `workspace_handle` through `make_image`; the engine builds the grid
       from source sweeps only.
-- [ ] **Image save paths** — `Save Image As…`, `Save Bitmap As…`, and the
-      future `Save Image As FITS…` menu items are still disabled. `.img`
-      / `.bmp` codecs already exist in `engine/src/radio_cartographer/io/`;
-      wiring is just an RPC + `dialog.save()` call away.
-- [ ] **Per-cell flux readout outside hover.** Plotly hover now shows
-      `RA / Dec / Flux` in sexagesimal, matching the legacy bottom-right
-      readout. A click-to-pin variant (consistent with the Sweep view's
-      pin behaviour) is still TODO.
+- [x] ~~**Image save paths**~~ — wired in §16. `Save Image`,
+      `Save Image As…` (dispatches `.img`/`.fits` on extension), and
+      `Save Bitmap As…` are live, plus FITS read/write via
+      [io/fits.py](../tauri-app/engine/src/radio_cartographer/io/fits.py).
+- [x] ~~**Per-cell flux readout outside hover.**~~ Live in §16 — the
+      Image view's side panel now shows RA / Dec / Flux (with unit) for
+      the hovered cell, with left-click pinning, em-dash placeholders
+      when the cursor is off the image, and an explicit Unpin button.
 
 ### Menu and About polish (legacy reference guide)
 
@@ -708,21 +993,42 @@ All passing: engine **206/206**, front-end **30/30**.
 - [ ] Other scan-level reductions (smooth, etc.) still TBD.
 
 ### Image Processing
-- [ ] Add in the image pipeline.
-- [ ] Ensure all palettes and functionality can be mirrored.
-- [ ] Wire image-level controls into the
-      [ImageView](../tauri-app/app/src/views/ImageView.tsx) side panel.
-      The view itself was added in §12 with only a `Back to Pre Image`
-      button; Save Image, Save Bitmap As…, Show Palette, Append /
-      Superimpose, Make Bi-Color / Tri-Color, Change Magnifier Size,
-      and Change Image Name still need handlers. The existing
-      `Image save paths` bullet under "Pre Image gaps" above belongs
-      here too — the `.img`/`.bmp` codecs are ready, just unwired.
+- [x] ~~Add in the image pipeline.~~ Done in §16.
+- [x] ~~Ensure all palettes and functionality can be mirrored.~~ Palette
+      editor in §16 (gradient strip + draggable pegs, presets, Load/Save
+      `.pal`). `.img` legacy compatibility fixes in §17 (mirror flip,
+      unit suffix, 5000-bucket flux dequantization).
+- [x] ~~Wire image-level controls into the
+      [ImageView](../tauri-app/app/src/views/ImageView.tsx) side panel.~~
+      All of Save Image, Save Image As…, Save Bitmap As…, Show Palette,
+      Append/Superimpose, Make Bi-Color / Tri-Color, Change Magnifier
+      Size, and Change Image Name are wired in §16, plus a right-click
+      Magnifier with arrow-key navigation.
+- [ ] **Change Image Name** currently uses `window.prompt` — replace
+      with a real dialog component for consistency with the rest of the
+      menu.
 
-
+### Calibration
+- [x] ~~Flux Calibration calibrates files currently open in workspace — Any open file
+      survey, scan, or image, should convert to Janskies when a calibration file is
+      added, with the exception of files that haven't yet been gain calibrated, in
+      which case they should convert to Jy as soon as they have been gain calibrated.~~
+      Done. The auto-apply effect in
+      [flux-cal-context.tsx](../tauri-app/app/src/state/flux-cal-context.tsx) now
+      depends on `slope` as well as the workspace's calibration flags, so loading a
+      `.cal` while a gain-calibrated survey/scan/image is already open immediately
+      applies — previously the effect only fired on workspace state changes, so a
+      `.cal` opened *after* gain calibration was silently ignored. Standalone images
+      get the same treatment via new RPC endpoints
+      `flux_cal_apply_to_image` / `flux_cal_revert_from_image`
+      ([rpc.py](../tauri-app/engine/src/radio_cartographer/rpc.py)) and matching
+      `GriddedImage.flux_calibrated` / `flux_slope` fields in
+      [image.py](../tauri-app/engine/src/radio_cartographer/image.py).
 ### Phase 6 carryovers (already tracked in tauri_plan_phase_4.md)
 
-- [ ] FITS export (`io/fits.py` + `Image → Save Image As FITS…`).
+- [x] ~~FITS export (`io/fits.py` + `Image → Save Image As FITS…`).~~
+      Done in §16 — both read and write via `astropy`, dispatched by
+      extension in `_open_image_path` / `_save_image`.
 - [ ] Headless pipeline replay tests (`tests/pipeline/`).
 - [ ] Live stdio sidecar wiring — the Tauri `rpc_request` command is still a
       placeholder shim returning canned responses; the real Python process

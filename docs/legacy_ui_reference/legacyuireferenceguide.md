@@ -188,3 +188,51 @@ Currently brings a pink line that you move around to fit the slope of known vs m
 
 # Image
 
+## The Magnifier
+**When shown:** In image screen
+**Screenshot:** `docs\legacy_ui_reference\screenshots\magnifier.png` 
+
+### Notes
+When you have an image open, you can right click and a box around your cursor will appear (there could be a different way to get it such as double clicking a reason or selecting the region) This opens a magnifier in the lower right that has the box you've clicked on but rescaled so that the brightest things are on the bright end of the color palette, even if the whole thing is the same color with the scaling of the whole image. I also want to add a similar "pinning" of points where if you click on a point on the map or on the magnified box it locks the ra, dec and flux, the release needs to be something other than clicking empty space because there won't be much empty space in the map
+
+## Open Image/Save Image/Save Image As/Save Bitmap as
+**When shown:** When items clicked from "image menu"
+
+
+### Notes
+You should be able to open a .img file, save a .img and save the image as a bitmap, later we would like to add the ability to open fits files as images
+
+
+## Append Image
+**When shown:** Append Image
+**Screenshot:** `docs\legacy_ui_reference\screenshots\appendedimage.png` 
+
+### Notes
+When you first click append image you must select a .img file to append, then a pop up asks if the images use the same calibration, (unclear what behavior should be if the answer is no) Then you are asked if you want to shift the appending image, if yes it asks for the shift in ra in minutes and in dec in degrees, then asks for the pixel resolution, each of these pop up boxes have a cancel option as well. After you've made it past the dialogs it appends the images, leaving white space if the images aren't directly next to each other, and superimposing if there is overlap. 
+
+## Superimpose Image
+**When shown:** Superimpose Image
+
+
+### Notes
+When you first click superimpose image you must select a .img file to superimpose, then a pop up asks if the images use the same calibration, (unclear what behavior should be if the answer is no). Then you are asked if both images are weighted equally, if no you must input the superimposing image weight as a percentage of the image you already have loaded Then you are asked if you want to shift the superimposing image, if yes it asks for the shift in ra in minutes and in dec in degrees, then asks for the pixel resolution, each of these pop up boxes have a cancel option as well. After you've made it past the dialogs it superimposes the images, which works the same as appending if there is no overlap
+
+## Bicolor Image
+**When shown:** Bicolor Image
+**Screenshot:** `docs\legacy_ui_reference\screenshots\bicolorimage.png` 
+
+### Notes
+Opens the file select to select another image, then asks for initial image color (red green, or blue), then for the second image color, also red green or blue (pops up an invalid color selection error if you've selected the same as the inital image) then asks if images use the same calibration and if you want to shift the second image, then creates the images with the assigned colors, seemingly using a function similar to the append 
+
+## Tricolor Image
+**When shown:** tricolor Image
+
+### Notes
+Current implementation has the button for a tricolored image disabled until you have a bicolored image and when you select it has you select an image and go through the same dialog as the bicolored image but skipping the color selection (just assigning the not-yet-selected color). I would like to also be able to create a tri colored image, by selecting from just a single image and then picking two additional image files and going through the dialogs for that. 
+
+## Show Palette 
+**When shown:** Show Palette
+**Screenshot:** `docs\legacy_ui_reference\screenshots\showpalette.png` 
+
+### Notes
+Allows you to change the palette being used, as well as adjust the min and max flux. In the upper left there in a Flux Range with Min: and Max: input boxes, autofilled with the flux range being used in the image already. If the max is adjusted everything that is above that will just be white (or whatever color is at the top of your palette) You can also upload a .pal file to be used as the palette (examples can be found in fixtures\palettes) you can also make a new palette using the color bars and save the palette as a .pal file to then apply to your image. All changes made here propagate to the image screen when user clicks OK, which also closes the UI. 

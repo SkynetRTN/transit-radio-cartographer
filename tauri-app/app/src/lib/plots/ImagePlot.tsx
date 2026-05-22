@@ -1,12 +1,68 @@
 import { useEffect, useRef } from 'react';
 import Plotly from 'plotly.js-dist-min';
-import type { ImageMeta, ImagePixels } from '../../ipc/client';
+import type { ImageMeta, ImagePixels, PaletteStop } from '../../ipc/client';
+
+export interface ImagePoint {
+  ra: number;
+  dec: number;
+  flux: number;
+  col: number;
+  row: number;
+}
+
+export interface BoxOverlay {
+  raCenter: number;
+  decCenter: number;
+  raHalfWidth: number;
+  decHalfHeight: number;
+}
 
 interface Props {
   image: ImagePixels;
   meta?: ImageMeta | null;
   title: string;
   testId?: string;
+  palette?: PaletteStop[] | null;
+  fluxRange?: { min: number; max: number } | null;
+  onHover?: (point: ImagePoint | null) => void;
+  onClick?: (point: ImagePoint) => void;
+  onContextMenu?: (point: ImagePoint | null) => void;
+  boxOverlay?: BoxOverlay | null;
+  showColorBar?: boolean;
+  fixedHeight?: number;
+}
+
+function paletteToColorscale(stops: PaletteStop[]): Array<[number, string]> {
+  // Plotly requires the colorscale to start at 0, end at 1, and be strictly
+  // monotonic in between. Two stops at the same anchor (which can happen when
+  // the user drags pegs together in the editor) crash Plotly without a clear
+  // error — guard by nudging duplicates apart and filtering NaN.
+  const finite = stops.filter(
+    (s) => Number.isFinite(s.anchor) && Number.isFinite(s.r) && Number.isFinite(s.g) && Number.isFinite(s.b),
+  );
+  if (finite.length === 0) return [[0, 'rgb(0,0,0)'], [1, 'rgb(255,255,255)']];
+  const sorted = [...finite].sort((a, b) => a.anchor - b.anchor);
+  const maxAnchor = sorted[sorted.length - 1].anchor || 1;
+  const out: Array<[number, string]> = sorted.map((s) => {
+    const t = Math.max(0, Math.min(1, s.anchor / maxAnchor));
+    const r = Math.round(Math.max(0, Math.min(255, s.r)));
+    const g = Math.round(Math.max(0, Math.min(255, s.g)));
+    const b = Math.round(Math.max(0, Math.min(255, s.b)));
+    return [t, `rgb(${r},${g},${b})`];
+  });
+  if (out[0][0] > 0) out.unshift([0, out[0][1]]);
+  if (out[out.length - 1][0] < 1) out.push([1, out[out.length - 1][1]]);
+  // Nudge duplicate (or descending after rounding) anchors apart by a tiny
+  // epsilon so the array is strictly increasing. Plotly fails silently on
+  // duplicates; this keeps the editor usable while a peg sits on top of
+  // another.
+  const epsilon = 1e-6;
+  for (let i = 1; i < out.length; i++) {
+    if (out[i][0] <= out[i - 1][0]) {
+      out[i][0] = Math.min(1, out[i - 1][0] + epsilon);
+    }
+  }
+  return out;
 }
 
 // Legacy 8-stop default palette from vb/survform.frm:1518-1550 — anchors are
@@ -75,8 +131,24 @@ function sexagesimalTicks(
   return { tickvals, ticktext };
 }
 
-export function ImagePlot({ image, meta, title, testId }: Props) {
+export function ImagePlot({
+  image,
+  meta,
+  title,
+  testId,
+  palette,
+  fluxRange,
+  onHover,
+  onClick,
+  onContextMenu,
+  boxOverlay,
+  showColorBar = true,
+  fixedHeight,
+}: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
+  // Keep the most recent hovered cell so the container's onContextMenu handler
+  // can report it without needing Plotly's native (suppressed) right-click.
+  const lastHoverRef = useRef<ImagePoint | null>(null);
 
   useEffect(() => {
     const node = ref.current;
@@ -127,34 +199,28 @@ export function ImagePlot({ image, meta, title, testId }: Props) {
       for (let j = 0; j < h; j++) ys[j] = j;
     }
 
-    // Build a per-cell `customdata` matrix carrying the pre-formatted
-    // sexagesimal strings so Plotly's hover can display them directly via
-    // `hovertemplate`. Avoids re-formatting in a hover-event handler.
-    const customdata: string[][][] | null = hasBounds
-      ? ys.map((decVal) => {
-          const dec = formatDecDegrees(decVal);
-          return xs.map((raVal) => [formatRaSeconds(raVal), dec]);
-        })
-      : null;
-
-    const hovertemplate = hasBounds
-      ? 'RA: %{customdata[0]}<br>Dec: %{customdata[1]}<br>Flux: %{z:.4f}<extra></extra>'
-      : 'col %{x}, row %{y}<br>Flux: %{z:.4f}<extra></extra>';
-
+    const colorscale =
+      palette && palette.length > 0
+        ? paletteToColorscale(palette)
+        : RADIO_CARTOGRAPHER_PALETTE;
+    const effectiveZMin = fluxRange ? fluxRange.min : 0;
+    const effectiveZMax = fluxRange ? fluxRange.max : zmax > 0 ? zmax : 1;
     const data: Plotly.Data[] = [
       {
         z: image.pixels,
         x: xs,
         y: ys,
         type: 'heatmap',
-        colorscale: RADIO_CARTOGRAPHER_PALETTE,
+        colorscale,
         zsmooth: false,
-        zmin: 0,
-        zmax: zmax > 0 ? zmax : 1,
-        showscale: true,
+        zmin: effectiveZMin,
+        zmax: effectiveZMax,
+        showscale: showColorBar,
         hoverongaps: false,
-        ...(customdata ? { customdata } : {}),
-        hovertemplate,
+        // Suppress Plotly's hover tooltip — the RA/Dec/Flux readout lives in
+        // the side panel now. `hoverinfo: 'none'` hides the label but still
+        // fires `plotly_hover` events so the React-side readout updates.
+        hoverinfo: 'none',
       } as Plotly.Data,
     ];
 
@@ -192,6 +258,21 @@ export function ImagePlot({ image, meta, title, testId }: Props) {
         : {}),
     };
 
+    const shapes: Partial<Plotly.Shape>[] = [];
+    if (boxOverlay && hasBounds) {
+      shapes.push({
+        type: 'rect',
+        xref: 'x',
+        yref: 'y',
+        x0: boxOverlay.raCenter - boxOverlay.raHalfWidth,
+        x1: boxOverlay.raCenter + boxOverlay.raHalfWidth,
+        y0: boxOverlay.decCenter - boxOverlay.decHalfHeight,
+        y1: boxOverlay.decCenter + boxOverlay.decHalfHeight,
+        line: { color: 'white', width: 2 },
+        fillcolor: 'rgba(255, 255, 255, 0.05)',
+      } as Partial<Plotly.Shape>);
+    }
+
     const layout: Partial<Plotly.Layout> = {
       title: { text: title },
       margin: { l: 70, r: 20, t: title ? 40 : 12, b: 50 },
@@ -200,12 +281,74 @@ export function ImagePlot({ image, meta, title, testId }: Props) {
       font: { family: 'Tahoma, sans-serif', size: 11 },
       xaxis,
       yaxis,
+      shapes,
     };
     Plotly.react(node, data, layout, { displayModeBar: false, responsive: true });
+
+    // Wire up Plotly's hover / click events to the optional React callbacks.
+    // Plotly attaches these via `node.on(...)`; we remove them on cleanup via
+    // `removeAllListeners` (provided by Plotly's events module).
+    const plotEl = node as unknown as {
+      on: (event: string, cb: (data: unknown) => void) => void;
+      removeAllListeners?: (event: string) => void;
+    };
+    const onHoverWired = (data: unknown) => {
+      const d = data as { points?: Array<{ x: number; y: number; z: number; pointIndex?: [number, number] }> };
+      if (!d.points || d.points.length === 0) return;
+      const p = d.points[0];
+      const idx = p.pointIndex;
+      const point: ImagePoint = {
+        ra: p.x,
+        dec: p.y,
+        flux: p.z,
+        col: idx ? idx[1] : 0,
+        row: idx ? idx[0] : 0,
+      };
+      lastHoverRef.current = point;
+      if (onHover) onHover(point);
+    };
+    const onUnhoverWired = () => {
+      // Don't clear lastHoverRef — context-menu after the mouse drifts a hair
+      // off a cell should still target the most recent cell.
+      if (onHover) onHover(null);
+    };
+    const onClickWired = (data: unknown) => {
+      const d = data as { points?: Array<{ x: number; y: number; z: number; pointIndex?: [number, number] }> };
+      if (!d.points || d.points.length === 0 || !onClick) return;
+      const p = d.points[0];
+      const idx = p.pointIndex;
+      onClick({
+        ra: p.x,
+        dec: p.y,
+        flux: p.z,
+        col: idx ? idx[1] : 0,
+        row: idx ? idx[0] : 0,
+      });
+    };
+    plotEl.on('plotly_hover', onHoverWired);
+    plotEl.on('plotly_unhover', onUnhoverWired);
+    plotEl.on('plotly_click', onClickWired);
+
     return () => {
+      plotEl.removeAllListeners?.('plotly_hover');
+      plotEl.removeAllListeners?.('plotly_unhover');
+      plotEl.removeAllListeners?.('plotly_click');
       Plotly.purge(node);
     };
-  }, [image, meta, title]);
+  }, [image, meta, title, palette, fluxRange, boxOverlay, showColorBar, onHover, onClick]);
 
-  return <div data-testid={testId ?? 'image-plot'} ref={ref} style={{ width: '100%', height: '420px' }} />;
+  const handleContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!onContextMenu) return;
+    e.preventDefault();
+    onContextMenu(lastHoverRef.current);
+  };
+
+  return (
+    <div
+      data-testid={testId ?? 'image-plot'}
+      ref={ref}
+      onContextMenu={handleContextMenu}
+      style={{ width: '100%', height: fixedHeight ?? 420 }}
+    />
+  );
 }

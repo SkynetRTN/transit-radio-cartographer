@@ -12,12 +12,20 @@ import {
   rpcClient,
   type ImageMeta,
   type ImagePixels,
+  type PaletteStop,
   type ReductionResult,
+  type RgbImageMeta,
+  type RgbImagePixels,
   type SurveyMeta,
   type WorkspaceOverview,
 } from '../ipc/client';
 
 export type WorkspaceViewMode = 'survey' | 'calibrate-survey' | 'pre-image' | 'image';
+
+export interface FluxRange {
+  min: number;
+  max: number;
+}
 
 export interface SurveyState {
   loading: boolean;
@@ -28,6 +36,18 @@ export interface SurveyState {
   viewMode: WorkspaceViewMode;
   image: ImageMeta | null;
   imagePixels: ImagePixels | null;
+  // RGB composite image (bi/tri-color) — only one of `image` or `rgbImage`
+  // is non-null at a time. ImageView dispatches on which is present.
+  rgbImage: RgbImageMeta | null;
+  rgbImagePixels: RgbImagePixels | null;
+  imagePalette: PaletteStop[] | null;
+  imageFluxRange: FluxRange | null;
+  imageName: string;
+  imageSavePath: string | null;
+  // Half-width of the magnifier window (in source-pixel cells). Lives in the
+  // shared context so the Image menu's "Change Magnifier Size…" can update it
+  // while the magnifier itself is rendered by ImageView.
+  magnifierHalfSize: number;
   reducing: boolean;
   savePath: string | null;
   dirty: boolean;
@@ -47,7 +67,19 @@ export interface SurveyState {
   refreshWorkspace: () => Promise<void>;
   applyReduction: (op: (handle: number) => Promise<ReductionResult>) => Promise<void>;
   makeImage: (pix?: number) => Promise<ImageMeta | null>;
+  setImage: (meta: ImageMeta, pixels: ImagePixels, savePath?: string | null) => void;
+  setRgbImage: (meta: RgbImageMeta, pixels: RgbImagePixels) => void;
+  setImagePalette: (palette: PaletteStop[] | null, flux: FluxRange | null) => void;
+  setImageName: (name: string) => void;
+  setMagnifierHalfSize: (n: number) => void;
+  saveImage: (path: string) => Promise<string | null>;
   clearImage: () => Promise<void>;
+  // Re-multiply / un-multiply the open image's pixels by a flux-cal slope.
+  // The image handle is preserved; meta and pixels are refreshed in place
+  // (palette, savePath and name are kept). Used by the flux-cal auto-apply
+  // effect when a `.cal` file is loaded while a standalone image is open.
+  applyImageFluxCalibration: (slope: number) => Promise<void>;
+  revertImageFluxCalibration: () => Promise<void>;
   save: (path?: string) => Promise<string | null>;
   markDirty: () => void;
 }
@@ -66,6 +98,13 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   const [viewMode, setViewMode] = useState<WorkspaceViewMode>('survey');
   const [image, setImage] = useState<ImageMeta | null>(null);
   const [imagePixels, setImagePixels] = useState<ImagePixels | null>(null);
+  const [rgbImage, setRgbImageState] = useState<RgbImageMeta | null>(null);
+  const [rgbImagePixels, setRgbImagePixels] = useState<RgbImagePixels | null>(null);
+  const [imagePalette, setImagePaletteState] = useState<PaletteStop[] | null>(null);
+  const [imageFluxRange, setImageFluxRangeState] = useState<FluxRange | null>(null);
+  const [imageName, setImageNameState] = useState<string>('image');
+  const [imageSavePath, setImageSavePath] = useState<string | null>(null);
+  const [magnifierHalfSize, setMagnifierHalfSizeState] = useState<number>(15);
   const [loading, setLoading] = useState(false);
   const [reducing, setReducing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -78,6 +117,10 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   const surveyRef = useRef<SurveyMeta | null>(survey);
   const workspaceHandleRef = useRef<number | null>(workspaceHandle);
   const imageRef = useRef<ImageMeta | null>(image);
+  const rgbImageRef = useRef<RgbImageMeta | null>(rgbImage);
+  const imagePaletteRef = useRef<PaletteStop[] | null>(imagePalette);
+  const imageFluxRangeRef = useRef<FluxRange | null>(imageFluxRange);
+  const imageNameRef = useRef<string>(imageName);
   const savePathRef = useRef<string | null>(savePath);
   const acceptedSweepsRef = useRef<Set<number>>(acceptedSweeps);
   useEffect(() => {
@@ -89,6 +132,18 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     imageRef.current = image;
   }, [image]);
+  useEffect(() => {
+    rgbImageRef.current = rgbImage;
+  }, [rgbImage]);
+  useEffect(() => {
+    imagePaletteRef.current = imagePalette;
+  }, [imagePalette]);
+  useEffect(() => {
+    imageFluxRangeRef.current = imageFluxRange;
+  }, [imageFluxRange]);
+  useEffect(() => {
+    imageNameRef.current = imageName;
+  }, [imageName]);
   useEffect(() => {
     savePathRef.current = savePath;
   }, [savePath]);
@@ -112,6 +167,12 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       setWorkspace(meta.workspace ?? null);
       setImage(null);
       setImagePixels(null);
+      setRgbImageState(null);
+      setRgbImagePixels(null);
+      setImagePaletteState(null);
+      setImageFluxRangeState(null);
+      setImageSavePath(null);
+      setImageNameState(meta.workspace?.name ?? 'image');
       if (isSaved) {
         const sweepCount = meta.workspace?.source_count ?? 0;
         const acceptedList =
@@ -159,11 +220,18 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     closeInBackground(surveyRef.current?.handle);
     closeInBackground(workspaceHandleRef.current);
     closeInBackground(imageRef.current?.handle);
+    closeInBackground(rgbImageRef.current?.handle);
     setSurvey(null);
     setWorkspace(null);
     setWorkspaceHandle(null);
     setImage(null);
     setImagePixels(null);
+    setRgbImageState(null);
+    setRgbImagePixels(null);
+    setImagePaletteState(null);
+    setImageFluxRangeState(null);
+    setImageSavePath(null);
+    setImageNameState('image');
     setViewMode('survey');
     setCurrentSweepIndex(0);
     setAcceptedSweeps(new Set());
@@ -268,10 +336,158 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const setImageAction = useCallback(
+    (meta: ImageMeta, pixels: ImagePixels, savePath: string | null = null) => {
+      const prevImage = imageRef.current;
+      const prevRgb = rgbImageRef.current;
+      setImage(meta);
+      setImagePixels(pixels);
+      setRgbImageState(null);
+      setRgbImagePixels(null);
+      setImageSavePath(savePath);
+      // If the loaded file carried a palette (legacy .img), surface it. FITS
+      // files have no palette, so leave the existing one alone — the user can
+      // open the editor to pick a new one.
+      if (meta.palette && meta.palette.length > 0) {
+        setImagePaletteState(meta.palette);
+      }
+      setViewMode('image');
+      if (prevImage && prevImage.handle !== meta.handle) {
+        closeInBackground(prevImage.handle);
+      }
+      if (prevRgb) closeInBackground(prevRgb.handle);
+    },
+    [],
+  );
+
+  const setRgbImageAction = useCallback(
+    (meta: RgbImageMeta, pixels: RgbImagePixels) => {
+      const prevImage = imageRef.current;
+      const prevRgb = rgbImageRef.current;
+      setRgbImageState(meta);
+      setRgbImagePixels(pixels);
+      // Replacing whichever image was previously showing.
+      setImage(null);
+      setImagePixels(null);
+      setImageSavePath(null);
+      setViewMode('image');
+      if (prevImage) closeInBackground(prevImage.handle);
+      if (prevRgb && prevRgb.handle !== meta.handle) {
+        closeInBackground(prevRgb.handle);
+      }
+    },
+    [],
+  );
+
+  const setImagePaletteAction = useCallback(
+    (palette: PaletteStop[] | null, flux: FluxRange | null) => {
+      setImagePaletteState(palette);
+      setImageFluxRangeState(flux);
+    },
+    [],
+  );
+
+  const setImageNameAction = useCallback((name: string) => {
+    setImageNameState(name);
+  }, []);
+
+  const setMagnifierHalfSizeAction = useCallback((n: number) => {
+    // Clamp to a sane range so the magnifier always has at least a 3×3
+    // window and never asks for more cells than the image actually contains.
+    if (!Number.isFinite(n)) return;
+    setMagnifierHalfSizeState(Math.max(1, Math.min(200, Math.round(n))));
+  }, []);
+
+  const saveImageAction = useCallback(async (path: string): Promise<string | null> => {
+    const current = imageRef.current;
+    if (!current) return null;
+    const ext = path.toLowerCase().slice(path.lastIndexOf('.'));
+    const palette = imagePaletteRef.current ?? undefined;
+    const flux = imageFluxRangeRef.current;
+    const opts: {
+      palette?: PaletteStop[];
+      flux_min?: number;
+      flux_max?: number;
+      name?: string;
+      pix?: number;
+      unit?: string;
+    } = { name: imageNameRef.current };
+    if (palette) opts.palette = palette;
+    if (flux) {
+      opts.flux_min = flux.min;
+      opts.flux_max = flux.max;
+    }
+    // Persist the flux unit. Prefer whatever the in-memory image reports
+    // (engine sets this from the workspace at `make_image` time or carries
+    // it across via `open_image`). The user-stated invariant is that any
+    // saved image is at least gain-calibrated, so default to GCU.
+    opts.unit = current.unit ?? 'GCU';
+    try {
+      if (ext === '.bmp') {
+        const bmpOpts: { palette?: PaletteStop[]; flux_min?: number; flux_max?: number } = {};
+        if (palette) bmpOpts.palette = palette;
+        if (flux) {
+          bmpOpts.flux_min = flux.min;
+          bmpOpts.flux_max = flux.max;
+        }
+        const r = await rpcClient.saveBitmap(current.handle, path, bmpOpts);
+        return r.path;
+      }
+      const r = await rpcClient.saveImage(current.handle, path, opts);
+      setImageSavePath(r.path);
+      return r.path;
+    } catch (e) {
+      setError((e as Error).message);
+      return null;
+    }
+  }, []);
+
   const clearImage = useCallback(async () => {
     closeInBackground(imageRef.current?.handle);
     setImage(null);
     setImagePixels(null);
+    setImagePaletteState(null);
+    setImageFluxRangeState(null);
+    setImageSavePath(null);
+  }, []);
+
+  const applyImageFluxCalibration = useCallback(async (slope: number) => {
+    const current = imageRef.current;
+    if (!current) return;
+    try {
+      const updated = await rpcClient.fluxCalApplyToImage(current.handle, slope);
+      const pixels = await rpcClient.getImagePixels(updated.handle);
+      // Preserve palette, savePath, name, and viewMode — only the pixel
+      // values and unit changed. Scale the user's selected flux range so
+      // their palette stretch keeps mapping to the same physical features
+      // (just expressed in Jy instead of GCU).
+      setImage(updated);
+      setImagePixels(pixels);
+      const prev = imageFluxRangeRef.current;
+      if (prev) {
+        setImageFluxRangeState({ min: prev.min * slope, max: prev.max * slope });
+      }
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }, []);
+
+  const revertImageFluxCalibration = useCallback(async () => {
+    const current = imageRef.current;
+    if (!current) return;
+    const slope = current.flux_slope ?? null;
+    try {
+      const updated = await rpcClient.fluxCalRevertFromImage(current.handle);
+      const pixels = await rpcClient.getImagePixels(updated.handle);
+      setImage(updated);
+      setImagePixels(pixels);
+      const prev = imageFluxRangeRef.current;
+      if (prev && slope && slope !== 0) {
+        setImageFluxRangeState({ min: prev.min / slope, max: prev.max / slope });
+      }
+    } catch (e) {
+      setError((e as Error).message);
+    }
   }, []);
 
   const markDirty = useCallback(() => {
@@ -309,6 +525,13 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       viewMode,
       image,
       imagePixels,
+      rgbImage,
+      rgbImagePixels,
+      imagePalette,
+      imageFluxRange,
+      imageName,
+      imageSavePath,
+      magnifierHalfSize,
       reducing,
       savePath,
       dirty,
@@ -324,7 +547,15 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       refreshWorkspace,
       applyReduction,
       makeImage,
+      setImage: setImageAction,
+      setRgbImage: setRgbImageAction,
+      setImagePalette: setImagePaletteAction,
+      setImageName: setImageNameAction,
+      setMagnifierHalfSize: setMagnifierHalfSizeAction,
+      saveImage: saveImageAction,
       clearImage,
+      applyImageFluxCalibration,
+      revertImageFluxCalibration,
       save,
       markDirty,
     }),
@@ -337,6 +568,13 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       viewMode,
       image,
       imagePixels,
+      rgbImage,
+      rgbImagePixels,
+      imagePalette,
+      imageFluxRange,
+      imageName,
+      imageSavePath,
+      magnifierHalfSize,
       reducing,
       savePath,
       dirty,
@@ -350,7 +588,15 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       refreshWorkspace,
       applyReduction,
       makeImage,
+      setImageAction,
+      setRgbImageAction,
+      setImagePaletteAction,
+      setImageNameAction,
+      setMagnifierHalfSizeAction,
+      saveImageAction,
       clearImage,
+      applyImageFluxCalibration,
+      revertImageFluxCalibration,
       save,
       markDirty,
     ],

@@ -23,6 +23,10 @@ interface Props {
   yAxisLabel: string;
   highlightRange?: { x0: number; x1: number } | null;
   highlightYRange?: { y0: number; y1: number } | null;
+  // Fill color for the X-range drag-highlight band. Defaults to green so the
+  // Cut Segment gesture stays visually consistent; Determine Peak passes a
+  // light blue to keep the two gestures visually distinguishable.
+  highlightColor?: string;
   verticalLines?: number[];
   overlayLines?: { points: Array<{ x: number; y: number }>; color?: string; width?: number }[];
   pinnedPoint?: { x: number; y: number } | null;
@@ -34,6 +38,16 @@ interface Props {
   onDragEnd?: () => void;
   dragEnabled?: boolean;
   dragAxis?: 'x' | 'y';
+  // Free-cursor tracking in data space. Fires on every mousemove inside the
+  // plot area, regardless of whether the cursor is over a data point. Used by
+  // peak/baseline interactions that need the cursor's Y even when it's above
+  // all visible points (`vb/scanform.frm:1808` draws the peak line at the raw
+  // cursor Y, not the nearest sample's flux).
+  onCursorMove?: (x: number, y: number) => void;
+  // Fires for any click inside the plot area (including empty space) with the
+  // click's data-space coordinates. Runs in addition to `onPointClick` /
+  // `onEmptyClick`, so callers can use it when they need raw cursor x/y.
+  onCursorClick?: (x: number, y: number) => void;
   testId?: string;
   height?: number;
   fixedXRange?: [number, number];
@@ -52,6 +66,7 @@ function buildShapes(
   highlightRange?: { x0: number; x1: number } | null,
   verticalLines?: number[],
   highlightYRange?: { y0: number; y1: number } | null,
+  highlightColor: string = '#00c000',
 ): Partial<Plotly.Shape>[] {
   const shapes: Partial<Plotly.Shape>[] = [];
   if (highlightRange) {
@@ -63,7 +78,7 @@ function buildShapes(
       x1: highlightRange.x1,
       y0: 0,
       y1: 1,
-      fillcolor: '#00c000',
+      fillcolor: highlightColor,
       opacity: 0.5,
       line: { width: 0 },
       layer: 'above',
@@ -108,6 +123,7 @@ export function PointScatter({
   yAxisLabel,
   highlightRange,
   highlightYRange,
+  highlightColor,
   verticalLines,
   overlayLines,
   pinnedPoint,
@@ -119,6 +135,8 @@ export function PointScatter({
   onDragEnd,
   dragEnabled = false,
   dragAxis = 'x',
+  onCursorMove,
+  onCursorClick,
   testId,
   height = 280,
   fixedXRange,
@@ -134,6 +152,8 @@ export function PointScatter({
   const dragEndRef = useRef(onDragEnd);
   const dragEnabledRef = useRef(dragEnabled);
   const dragAxisRef = useRef(dragAxis);
+  const cursorMoveRef = useRef(onCursorMove);
+  const cursorClickRef = useRef(onCursorClick);
   const lastPointClickAt = useRef(0);
   hoverRef.current = onHover;
   clickRef.current = onPointClick;
@@ -143,6 +163,8 @@ export function PointScatter({
   dragEndRef.current = onDragEnd;
   dragEnabledRef.current = dragEnabled;
   dragAxisRef.current = dragAxis;
+  cursorMoveRef.current = onCursorMove;
+  cursorClickRef.current = onCursorClick;
 
   // ── Effect 1: build/refresh the plot when data or axes change.
   //   Highlight & vertical-lines updates do NOT trip this effect — they go
@@ -239,7 +261,7 @@ export function PointScatter({
         mirror: true,
         ...(fixedYRange ? { range: fixedYRange, autorange: false } : {}),
       },
-      shapes: buildShapes(highlightRange, verticalLines, highlightYRange),
+      shapes: buildShapes(highlightRange, verticalLines, highlightYRange, highlightColor),
       showlegend: false,
       hovermode: 'closest',
       dragmode: false,
@@ -313,9 +335,9 @@ export function PointScatter({
     const internal = node as unknown as LayoutInternal;
     if (!internal._fullLayout) return; // plot not initialised yet
     Plotly.relayout(node, {
-      shapes: buildShapes(highlightRange, verticalLines, highlightYRange),
+      shapes: buildShapes(highlightRange, verticalLines, highlightYRange, highlightColor),
     }).catch(() => {});
-  }, [highlightRange, verticalLines, highlightYRange]);
+  }, [highlightRange, verticalLines, highlightYRange, highlightColor]);
 
   // ── Effect 3: drag-to-cut. Attached once and always live so cursor and
   //   listener state can flip with dragEnabled (read via ref) without
@@ -375,6 +397,49 @@ export function PointScatter({
       node.removeEventListener('mousedown', onMouseDown, true);
       window.removeEventListener('mousemove', onMouseMove, true);
       window.removeEventListener('mouseup', onMouseUp, true);
+    };
+  }, []);
+
+  // ── Effect 4: free-cursor tracking. Always wired so callers that opt into
+  //   `onCursorMove` / `onCursorClick` receive the raw cursor position in data
+  //   space even when it sits above every data point (needed for the peak
+  //   line — see `vb/scanform.frm:1808`).
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+
+    const computeXY = (clientX: number, clientY: number): { x: number; y: number } | null => {
+      const internal = node as unknown as LayoutInternal;
+      const rect = node.getBoundingClientRect();
+      const xa = internal._fullLayout?.xaxis;
+      const ya = internal._fullLayout?.yaxis;
+      if (!xa?.p2d || xa._offset === undefined) return null;
+      if (!ya?.p2d || ya._offset === undefined) return null;
+      const px = clientX - rect.left - xa._offset;
+      const py = clientY - rect.top - ya._offset;
+      // Constrain to the plot area so a stray off-plot mouseover doesn't
+      // report nonsense data values back to the caller.
+      if (xa._length !== undefined && (px < 0 || px > xa._length)) return null;
+      if (ya._length !== undefined && (py < 0 || py > ya._length)) return null;
+      return { x: xa.p2d(px), y: ya.p2d(py) };
+    };
+
+    const onMove = (e: MouseEvent) => {
+      if (!cursorMoveRef.current) return;
+      const v = computeXY(e.clientX, e.clientY);
+      if (v) cursorMoveRef.current(v.x, v.y);
+    };
+    const onClick = (e: MouseEvent) => {
+      if (!cursorClickRef.current) return;
+      const v = computeXY(e.clientX, e.clientY);
+      if (v) cursorClickRef.current(v.x, v.y);
+    };
+
+    node.addEventListener('mousemove', onMove);
+    node.addEventListener('click', onClick);
+    return () => {
+      node.removeEventListener('mousemove', onMove);
+      node.removeEventListener('click', onClick);
     };
   }, []);
 

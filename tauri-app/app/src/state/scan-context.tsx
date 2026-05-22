@@ -29,6 +29,12 @@ export interface ScanState {
   markDirty: () => void;
   refreshOverview: () => Promise<void>;
   save: (path?: string) => Promise<string | null>;
+  // Fit kind used by Determine Peak. Encoded as a number to reuse the
+  // existing NumericInputDialog: `0` selects the Gaussian fit (current
+  // default), `2` / `3` / `4` select an N-degree polynomial fit. Clamped to
+  // {0, 2, 3, 4} at the setter site in MainWindow.
+  peakFitDegree: number;
+  setPeakFitDegree: (degree: number) => void;
 }
 
 const ScanContext = createContext<ScanState | null>(null);
@@ -48,6 +54,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
   const [savePath, setSavePath] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [peakFitDegree, setPeakFitDegree] = useState<number>(0);
 
   const handleRef = useRef<number | null>(handle);
   const savePathRef = useRef<string | null>(savePath);
@@ -149,6 +156,8 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       markDirty,
       refreshOverview,
       save,
+      peakFitDegree,
+      setPeakFitDegree,
     }),
     [
       loading,
@@ -165,6 +174,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       markDirty,
       refreshOverview,
       save,
+      peakFitDegree,
     ],
   );
 

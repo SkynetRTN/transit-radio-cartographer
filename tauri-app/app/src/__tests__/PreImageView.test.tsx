@@ -89,12 +89,32 @@ test('Pre Image view auto-generates an image on entry', async () => {
   // `(handle, pix, workspaceHandle)` — workspace_handle=2 comes from the
   // mocked SurveyMeta below. Passing it makes the engine drop cal sweeps.
   await waitFor(() =>
-    expect(rpcClient.makeImage as unknown as ReturnType<typeof vi.fn>).toHaveBeenCalledWith(1, 2, 2),
+    expect(rpcClient.makeImage as unknown as ReturnType<typeof vi.fn>).toHaveBeenCalledWith(1, 1, 2),
   );
   await waitFor(() => expect(screen.getByText('Smooth Sweeps')).not.toBeDisabled());
 });
 
-test('Make Image opens a Pixel Resolution prompt that defaults to 2 and re-renders', async () => {
+async function runSmoothBaselineAlign() {
+  await waitFor(() => expect(screen.getByText('Smooth Sweeps')).not.toBeDisabled());
+  fireEvent.click(screen.getByText('Smooth Sweeps'));
+  await waitFor(() =>
+    expect(rpcClient.smooth as unknown as ReturnType<typeof vi.fn>).toHaveBeenCalled(),
+  );
+  await waitFor(() => expect(screen.getByText('Baseline Sweeps')).not.toBeDisabled());
+  fireEvent.click(screen.getByText('Baseline Sweeps'));
+  fireEvent.click(screen.getByRole('button', { name: 'OK' }));
+  await waitFor(() =>
+    expect(rpcClient.baseline as unknown as ReturnType<typeof vi.fn>).toHaveBeenCalled(),
+  );
+  await waitFor(() => expect(screen.getByText('Align Sweeps')).not.toBeDisabled());
+  fireEvent.click(screen.getByText('Align Sweeps'));
+  fireEvent.click(screen.getByRole('button', { name: 'OK' }));
+  await waitFor(() =>
+    expect(rpcClient.align as unknown as ReturnType<typeof vi.fn>).toHaveBeenCalled(),
+  );
+}
+
+test('Make Image is gated until smooth, baseline, and align all run', async () => {
   await act(async () => {
     render(
       <SurveyProvider>
@@ -111,11 +131,65 @@ test('Make Image opens a Pixel Resolution prompt that defaults to 2 and re-rende
     );
   });
   await waitFor(() => expect(screen.getByText('Smooth Sweeps')).not.toBeDisabled());
+  const makeImageBtn = screen.getByRole('button', { name: 'Make Image' });
+  expect(makeImageBtn).toBeDisabled();
+  // Tooltip should call out the remaining steps.
+  expect(makeImageBtn.getAttribute('title')).toMatch(/smooth sweeps/);
+  expect(makeImageBtn.getAttribute('title')).toMatch(/apply a baseline/);
+  expect(makeImageBtn.getAttribute('title')).toMatch(/align sweeps/);
+
+  // After smooth + baseline only, the button stays disabled and the title
+  // should no longer mention completed steps.
+  fireEvent.click(screen.getByText('Smooth Sweeps'));
+  await waitFor(() =>
+    expect(rpcClient.smooth as unknown as ReturnType<typeof vi.fn>).toHaveBeenCalled(),
+  );
+  fireEvent.click(screen.getByText('Baseline Sweeps'));
+  fireEvent.click(screen.getByRole('button', { name: 'OK' }));
+  await waitFor(() =>
+    expect(rpcClient.baseline as unknown as ReturnType<typeof vi.fn>).toHaveBeenCalled(),
+  );
+  expect(screen.getByRole('button', { name: 'Make Image' })).toBeDisabled();
+  expect(
+    screen.getByRole('button', { name: 'Make Image' }).getAttribute('title'),
+  ).toMatch(/align/);
+
+  // After Align Sweeps the button enables.
+  fireEvent.click(screen.getByText('Align Sweeps'));
+  fireEvent.click(screen.getByRole('button', { name: 'OK' }));
+  await waitFor(() =>
+    expect(rpcClient.align as unknown as ReturnType<typeof vi.fn>).toHaveBeenCalled(),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Make Image' })).not.toBeDisabled(),
+  );
+});
+
+test('Make Image opens a Pixel Resolution prompt that defaults to current pix and re-renders', async () => {
+  await act(async () => {
+    render(
+      <SurveyProvider>
+        <HydrateSurvey
+          meta={{
+            handle: 1,
+            metadata: { sweep_count: 1, path: '/tmp/and0a.md2' },
+            workspace_handle: 2,
+            workspace: workspaceOverview,
+          }}
+        />
+        <PreImageView />
+      </SurveyProvider>,
+    );
+  });
+  await runSmoothBaselineAlign();
   const makeImageMock = rpcClient.makeImage as unknown as ReturnType<typeof vi.fn>;
   const initialCalls = makeImageMock.mock.calls.length;
-  fireEvent.click(screen.getByText('Make Image'));
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Make Image' })).not.toBeDisabled(),
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Make Image' }));
   const input = (await screen.findByRole('spinbutton')) as HTMLInputElement;
-  expect(input.value).toBe('2');
+  expect(input.value).toBe('1');
   fireEvent.change(input, { target: { value: '4' } });
   fireEvent.click(screen.getByRole('button', { name: 'OK' }));
   await waitFor(() => expect(makeImageMock).toHaveBeenCalledWith(1, 4, 2));

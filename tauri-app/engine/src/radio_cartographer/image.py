@@ -28,6 +28,82 @@ class GriddedImage:
     max_ra: float
     min_dec: float
     max_dec: float
+    # Optional flux unit ("Jy" / "GCU" / None). Set when loading a `.img`
+    # carrying the unit suffix, or when `make_image` is called from a
+    # workspace whose calibration state is known. Propagates into the RPC's
+    # ImageMeta so the React side can show "0.42 Jy" or "0.42 GCU" in the
+    # readout instead of bare numbers.
+    unit: str | None = None
+    # Flux calibration applied directly to this image (independent of any
+    # survey/scan workspace). Survey- and scan-built images carry their
+    # calibration via the workspace; standalone images opened from `.img` /
+    # `.fits` use these fields so the auto-apply effect can `revert` and
+    # re-apply when the user loads a different `.cal` file.
+    flux_calibrated: bool = False
+    flux_slope: float | None = None
+
+
+def apply_flux_calibration_image(image: GriddedImage, slope: float) -> GriddedImage:
+    """Return a new image with pixels scaled by `slope` and unit set to "Jy".
+
+    Idempotent: if the image is already flux-calibrated, returns it unchanged.
+    Mirrors the survey/scan equivalents — the caller is expected to revert
+    first if they want to re-calibrate with a different slope.
+    """
+    if image.flux_calibrated:
+        return image
+    if slope == 0.0:
+        raise ValueError("flux calibration slope must be nonzero")
+    return GriddedImage(
+        pixels=image.pixels * slope,
+        wcs=image.wcs,
+        min_ra=image.min_ra,
+        max_ra=image.max_ra,
+        min_dec=image.min_dec,
+        max_dec=image.max_dec,
+        unit="Jy",
+        flux_calibrated=True,
+        flux_slope=float(slope),
+    )
+
+
+def revert_flux_calibration_image(image: GriddedImage) -> GriddedImage:
+    """Undo a previously-applied flux calibration, returning flux to GCU."""
+    if not image.flux_calibrated or image.flux_slope in (None, 0.0):
+        return image
+    slope = image.flux_slope
+    assert slope is not None
+    return GriddedImage(
+        pixels=image.pixels / slope,
+        wcs=image.wcs,
+        min_ra=image.min_ra,
+        max_ra=image.max_ra,
+        min_dec=image.min_dec,
+        max_dec=image.max_dec,
+        unit="GCU",
+        flux_calibrated=False,
+        flux_slope=None,
+    )
+
+
+@dataclass(frozen=True)
+class RgbGriddedImage:
+    """A 3-channel image — what bi/tri-color composites produce.
+
+    Each channel is a (height, width) float array in [0, 1] (normalized to its
+    own channel min/max so a faint source still saturates that channel's color
+    at the bright end — the legacy bi-color behavior). RA/Dec bounds match
+    `GriddedImage` so the rendering side can re-use the same axis machinery.
+    """
+
+    pixels_r: NDArray[np.float64]
+    pixels_g: NDArray[np.float64]
+    pixels_b: NDArray[np.float64]
+    wcs: WCSMetadata
+    min_ra: float
+    max_ra: float
+    min_dec: float
+    max_dec: float
 
 
 def _legacy_grid_shape(pix: int) -> tuple[int, int]:

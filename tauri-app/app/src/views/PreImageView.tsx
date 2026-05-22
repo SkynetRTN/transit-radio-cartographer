@@ -2,67 +2,12 @@ import { useCallback, useEffect, useState } from 'react';
 import { rpcClient, type ImageMeta, type ImagePixels } from '../ipc/client';
 import { useSurvey } from '../state/survey-context';
 import { ImagePlot } from '../lib/plots/ImagePlot';
+import { NumericInputDialog, type NumericPrompt } from './dialogs/NumericInputDialog';
 
-interface NumericPrompt {
-  title: string;
-  label: string;
-  defaultValue: number;
-  onSubmit: (value: number) => void;
-}
-
-function NumericInputDialog({
-  prompt,
-  onCancel,
-}: {
-  prompt: NumericPrompt;
-  onCancel: () => void;
-}) {
-  const [value, setValue] = useState<string>(String(prompt.defaultValue));
-  const [error, setError] = useState<string | null>(null);
-
-  const submit = () => {
-    const num = parseFloat(value);
-    if (!Number.isFinite(num)) {
-      setError('Please enter a numeric value');
-      return;
-    }
-    prompt.onSubmit(num);
-  };
-
-  return (
-    <div className="modal-backdrop" role="dialog" aria-label={prompt.title}>
-      <div className="modal">
-        <div className="modal-title">{prompt.title}</div>
-        <div className="modal-row">
-          <span>{prompt.label}</span>
-          <input
-            type="number"
-            step="any"
-            aria-label={prompt.label}
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            autoFocus
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') submit();
-              if (e.key === 'Escape') onCancel();
-            }}
-          />
-        </div>
-        {error && <div className="modal-error">{error}</div>}
-        <div className="modal-buttons">
-          <button onClick={submit} className="primary">
-            OK
-          </button>
-          <button onClick={onCancel}>Cancel</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// vb/survform.frm:1509 — the legacy "Input Pixel Resolution" dialog defaults
-// to `"2"` on first open, then to whatever the user last entered.
-const DEFAULT_PIX = 2;
+// Default pixel resolution for the auto-generated pre-image and the Make
+// Image dialog. Legacy VB defaulted to 2 (vb/survform.frm:1509); we use 1
+// for a sharper preview by default.
+const DEFAULT_PIX = 1;
 
 export function PreImageView() {
   const {
@@ -79,6 +24,13 @@ export function PreImageView() {
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState<NumericPrompt | null>(null);
+  // Track whether each reduction has been run at least once in this Pre Image
+  // session. The Make Image button only enables after all three have fired —
+  // returning to the per-sweep view unmounts this component, so the flags
+  // implicitly reset on re-entry.
+  const [didSmooth, setDidSmooth] = useState(false);
+  const [didBaseline, setDidBaseline] = useState(false);
+  const [didAlign, setDidAlign] = useState(false);
 
   const generateImage = useCallback(
     async (pixValue: number) => {
@@ -147,6 +99,7 @@ export function PreImageView() {
     try {
       await rpcClient.smooth(survey.handle, 5, workspaceHandle);
       await generateImage(pix);
+      setDidSmooth(true);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -169,6 +122,7 @@ export function PreImageView() {
         try {
           await rpcClient.baseline(survey.handle, value, workspaceHandle);
           await generateImage(pix);
+          setDidBaseline(true);
         } catch (e) {
           setError((e as Error).message);
         } finally {
@@ -193,6 +147,7 @@ export function PreImageView() {
         try {
           await rpcClient.align(survey.handle, value, workspaceHandle);
           await generateImage(pix);
+          setDidAlign(true);
         } catch (e) {
           setError((e as Error).message);
         } finally {
@@ -210,6 +165,15 @@ export function PreImageView() {
     // Pre-Image.
     setViewMode('survey');
   }, [setViewMode]);
+
+  const canMakeImage = didSmooth && didBaseline && didAlign;
+  const remainingSteps: string[] = [];
+  if (!didSmooth) remainingSteps.push('smooth sweeps');
+  if (!didBaseline) remainingSteps.push('apply a baseline');
+  if (!didAlign) remainingSteps.push('align sweeps');
+  const makeImageTitle = canMakeImage
+    ? 'Build the gridded image at a chosen pixel resolution (default 2)'
+    : `Before making the image you must: smooth sweeps, apply a baseline, align sweeps. Remaining: ${remainingSteps.join(', ')}.`;
 
   if (!workspace) {
     return (
@@ -243,9 +207,9 @@ export function PreImageView() {
             <div className="side-buttons">
               <button
                 onClick={openMakeImagePrompt}
-                disabled={busy}
+                disabled={busy || !canMakeImage}
                 className="primary"
-                title="Regenerate the gridded pre-image at a chosen pixel resolution (default 2)"
+                title={makeImageTitle}
               >
                 Make Image
               </button>

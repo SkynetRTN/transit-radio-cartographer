@@ -5,7 +5,7 @@ import json
 import struct
 import sys
 import traceback
-from dataclasses import asdict
+from dataclasses import asdict, replace as replace_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -13,13 +13,32 @@ import numpy as np
 
 from ._handles import HandleRegistry, UnknownHandleError
 from .flux_calibration import default_known_jy, fit_counts_to_jy, fit_error, read_scn_peak
-from .image import GriddedImage, make_image
+from .image import (
+    GriddedImage,
+    RgbGriddedImage,
+    WCSMetadata,
+    apply_flux_calibration_image,
+    make_image,
+    revert_flux_calibration_image,
+)
+from .image_compose import (
+    append_images,
+    bicolor_compose,
+    extend_rgb_compose,
+    superimpose_images,
+    tricolor_compose,
+)
+from .io.bmp import write_bmp_from_rgb
 from .io.cal import read_cal, write_cal
+from .io.fits import read_fits, write_fits
+from .io.img import read_img, write_img
 from .io.md1 import read_md1
 from .io.md2 import read_md2
+from .io.pal import read_pal, write_pal
 from .io.scn import read_scn, write_scn
 from .io.srv import read_srv, write_srv
-from .models import CalibrationEntry, CalibrationTable, Survey, Sweep
+from .models import CalibrationEntry, CalibrationTable, Image, Palette, PaletteStop, Survey, Sweep
+from .palette import apply_palette
 from .scan_workspace import (
     ScanWorkspace,
     apply_flux_calibration_scan,
@@ -30,6 +49,8 @@ from .scan_workspace import (
     cut_calibration_segment_scan,
     cut_scan_segment,
     determine_peak,
+    determine_peak_fit,
+    determine_peak_gaussian,
     revert_flux_calibration_scan,
     scan_from_scn,
     select_calibration_declination_scan,
@@ -98,6 +119,166 @@ def _survey_from_workspace_sources(ws: "SurveyWorkspace") -> Survey:
         swp=0,
         sweep0=sweeps[0],
         sweeps=tuple(sweeps),
+    )
+
+
+def _image_to_gridded(image: Image) -> GriddedImage:
+    """Convert a legacy `.img` Image (int16 + palette) to a GriddedImage.
+
+    Legacy quantizes flux into 5000 buckets:
+    `Clr = Int((f - MinFluxPI) / (MaxFluxPI - MinFluxPI) * 5000) + 1`
+    (vb/survform.frm:1706). Invert with `(Clr - 1) / 4999`. Pixels carrying
+    `Clr = 0` are unpainted background; legacy renders them at MinFluxPI, so
+    we clamp negatives back to that floor here.
+    """
+    pixels_f = np.asarray(image.pixels, dtype=np.float64)
+    p_lo = float(image.min_flux_p)
+    p_hi = float(image.max_flux_p)
+    if p_hi > p_lo and pixels_f.size:
+        pixels_f = p_lo + ((pixels_f - 1.0) / 4999.0) * (p_hi - p_lo)
+        pixels_f = np.clip(pixels_f, p_lo, p_hi)
+    height, width = pixels_f.shape
+    cdelt1 = -(image.max_ra - image.min_ra) / max(width - 1, 1)
+    cdelt2 = (image.max_dec - image.min_dec) / max(height - 1, 1)
+    wcs = WCSMetadata(
+        ctype1="RA---TAN",
+        ctype2="DEC--TAN",
+        crval1=(image.min_ra + image.max_ra) / 2.0,
+        crval2=(image.min_dec + image.max_dec) / 2.0,
+        crpix1=(width + 1) / 2.0,
+        crpix2=(height + 1) / 2.0,
+        cdelt1=cdelt1,
+        cdelt2=cdelt2,
+    )
+    return GriddedImage(
+        pixels=pixels_f,
+        wcs=wcs,
+        min_ra=float(image.min_ra),
+        max_ra=float(image.max_ra),
+        min_dec=float(image.min_dec),
+        max_dec=float(image.max_dec),
+        unit=image.unit,
+        # Infer flux state from the on-disk unit suffix. Legacy files
+        # without a suffix are treated as GCU (not flux-calibrated) so
+        # the auto-apply effect can promote them to Jy when a `.cal`
+        # is loaded.
+        flux_calibrated=(image.unit == "Jy"),
+        flux_slope=None,
+    )
+
+
+def _gridded_to_image(
+    image: GriddedImage,
+    *,
+    palette: "Palette | None",
+    flux_min: float,
+    flux_max: float,
+    name: str,
+    pix: int,
+    unit: str | None = None,
+) -> Image:
+    """Pack a GriddedImage as a legacy `.img` Image with int16 pixels.
+
+    Legacy quantizes flux into 5000 buckets (`Clr = Int((f - lo) / (hi - lo)
+    * 5000) + 1`, vb/survform.frm:1706), so files produced here load
+    correctly in the legacy viewer's flux readout. Callers supply the flux
+    range (the palette's "stretch") and a palette; we fall back to the
+    8-stop default if no palette is given.
+    """
+    pal = palette if palette is not None else _default_palette()
+    if flux_max <= flux_min:
+        flux_max = flux_min + 1e-9
+    norm = (image.pixels - flux_min) / (flux_max - flux_min)
+    norm = np.clip(norm, 0.0, 1.0)
+    int_pixels = ((norm * 4999.0).round() + 1.0).astype(np.int16)
+    return Image(
+        name=name,
+        min_ra=float(image.min_ra),
+        max_ra=float(image.max_ra),
+        min_dec=float(image.min_dec),
+        max_dec=float(image.max_dec),
+        min_flux=float(np.min(image.pixels)) if image.pixels.size else 0.0,
+        max_flux=float(np.max(image.pixels)) if image.pixels.size else 0.0,
+        min_ra_p=float(image.min_ra),
+        max_ra_p=float(image.max_ra),
+        min_dec_p=float(image.min_dec),
+        max_dec_p=float(image.max_dec),
+        min_flux_p=float(flux_min),
+        max_flux_p=float(flux_max),
+        pix=int(pix),
+        palette=pal,
+        pixels=int_pixels,
+        unit=unit,
+    )
+
+
+def _palette_stops_payload(palette: "Palette") -> list[dict[str, float]]:
+    return [
+        {"anchor": float(s.anchor), "r": float(s.r), "g": float(s.g), "b": float(s.b)}
+        for s in palette.stops
+    ]
+
+
+def _palette_from_stops(stops_payload: Any) -> "Palette | None":
+    if not stops_payload:
+        return None
+    if not isinstance(stops_payload, list):
+        raise RpcError(ERR_INVALID_PARAMS, "palette stops must be a list")
+    stops: list[PaletteStop] = []
+    for entry in stops_payload:
+        try:
+            stops.append(
+                PaletteStop(
+                    anchor=float(entry["anchor"]),
+                    r=float(entry["r"]),
+                    g=float(entry["g"]),
+                    b=float(entry["b"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, f"invalid palette stop: {entry!r}") from exc
+    return Palette(stops=tuple(stops))
+
+
+def _default_palette() -> "Palette":
+    """The legacy 8-stop ramp (vb/survform.frm:1518-1550).
+
+    Returned anchors are in [0, 255] to match the .pal/.img convention.
+    """
+    return Palette(
+        stops=(
+            PaletteStop(anchor=0.0, r=0, g=0, b=0),
+            PaletteStop(anchor=255.0 / 7.0, r=255, g=0, b=255),
+            PaletteStop(anchor=255.0 * 2 / 7.0, r=0, g=0, b=255),
+            PaletteStop(anchor=255.0 * 3 / 7.0, r=0, g=255, b=255),
+            PaletteStop(anchor=255.0 * 4 / 7.0, r=0, g=255, b=0),
+            PaletteStop(anchor=255.0 * 5 / 7.0, r=255, g=255, b=0),
+            PaletteStop(anchor=255.0 * 6 / 7.0, r=255, g=0, b=0),
+            PaletteStop(anchor=255.0, r=255, g=255, b=255),
+        )
+    )
+
+
+def _flux_range_from_params(params: dict[str, Any], image: GriddedImage) -> tuple[float, float]:
+    if "flux_min" in params and "flux_max" in params:
+        try:
+            return float(params["flux_min"]), float(params["flux_max"])
+        except (TypeError, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, "flux_min/flux_max must be numeric") from exc
+    if image.pixels.size:
+        return float(np.min(image.pixels)), float(np.max(image.pixels))
+    return 0.0, 1.0
+
+
+def _open_image_path(path: str) -> GriddedImage:
+    ext = Path(path).suffix.lower()
+    if ext == ".img":
+        return _image_to_gridded(read_img(path))
+    if ext in (".fits", ".fit"):
+        return read_fits(path)
+    raise RpcError(
+        ERR_INVALID_PARAMS,
+        f"unsupported image extension {ext!r}; expected .img/.fits/.fit",
     )
 
 
@@ -179,6 +360,28 @@ class RpcServer:
                 result = self._make_image(params)
             elif method == "get_image_pixels":
                 result = self._get_image_pixels(params)
+            elif method == "open_image":
+                result = self._open_image(params)
+            elif method == "save_image":
+                result = self._save_image(params)
+            elif method == "save_bitmap":
+                result = self._save_bitmap(params)
+            elif method == "append_image":
+                result = self._append_image(params)
+            elif method == "superimpose_image":
+                result = self._superimpose_image(params)
+            elif method == "bicolor_image":
+                result = self._bicolor_image(params)
+            elif method == "tricolor_image":
+                result = self._tricolor_image(params)
+            elif method == "extend_rgb_image":
+                result = self._extend_rgb_image(params)
+            elif method == "get_rgb_image_pixels":
+                result = self._get_rgb_image_pixels(params)
+            elif method == "open_palette":
+                result = self._open_palette(params)
+            elif method == "save_palette":
+                result = self._save_palette(params)
             elif method == "get_workspace_overview":
                 result = self._get_workspace_overview(params)
             elif method == "get_source_sweep":
@@ -223,6 +426,10 @@ class RpcServer:
                 result = self._baseline_scan_source(params)
             elif method == "determine_scan_peak":
                 result = self._determine_scan_peak(params)
+            elif method == "determine_scan_peak_fit":
+                result = self._determine_scan_peak_fit(params)
+            elif method == "determine_scan_peak_gaussian":
+                result = self._determine_scan_peak_gaussian(params)
             elif method == "undo_scan":
                 result = self._undo_scan(params)
             elif method == "save_scan":
@@ -247,8 +454,21 @@ class RpcServer:
                 result = self._flux_cal_apply_to_scan(params)
             elif method == "flux_cal_revert_from_scan":
                 result = self._flux_cal_revert_from_scan(params)
+            elif method == "flux_cal_apply_to_image":
+                result = self._flux_cal_apply_to_image(params)
+            elif method == "flux_cal_revert_from_image":
+                result = self._flux_cal_revert_from_image(params)
             elif method == "export_fits":
-                raise RpcError(ERR_INVALID_PARAMS, "export_fits is not implemented in Phase 3")
+                # Legacy hook from the Phase 3 stub — `save_image` is now the
+                # canonical FITS write path (dispatch is by file extension).
+                params_with_fits = dict(params)
+                path = params_with_fits.get("path", "")
+                if not str(path).lower().endswith((".fits", ".fit")):
+                    raise RpcError(
+                        ERR_INVALID_PARAMS,
+                        "export_fits requires a .fits/.fit path; use save_image for .img",
+                    )
+                result = self._save_image(params_with_fits)
             else:
                 raise RpcError(ERR_UNKNOWN_METHOD, f"Unknown method: {method}")
             return {"jsonrpc": "2.0", "id": req_id, "result": result}
@@ -442,6 +662,9 @@ class RpcServer:
         except (TypeError, ValueError) as exc:
             raise RpcError(ERR_INVALID_PARAMS, "pix must be an integer") from exc
         ws_handle = params.get("workspace_handle")
+        unit: str | None = None
+        flux_calibrated = False
+        flux_slope: float | None = None
         if ws_handle is not None:
             # Pre-image is built from source sweeps only — the cal brackets
             # point at a different calibrator, so including them stretches the
@@ -450,23 +673,30 @@ class RpcServer:
             # `calibrated_source_flux` is in gain units; we prefer those.
             ws = self._resolve_workspace(int(ws_handle))
             survey = _survey_from_workspace_sources(ws)
+            # An image always implies at least gain-calibration (you can't
+            # make a sensible image from raw volts). Reflect Jy after flux
+            # calibration, otherwise GCU. When the workspace was flux-cal'd,
+            # carry the slope onto the image so the auto-apply effect treats
+            # it as already-calibrated (and doesn't try to multiply again).
+            if ws.flux_calibrated:
+                unit = "Jy"
+                flux_calibrated = True
+                flux_slope = ws.flux_slope
+            else:
+                unit = "GCU"
         else:
             handle = int(params.get("handle", -1))
             survey = self._resolve_survey(handle)
         image = make_image(survey, pix=pix)
+        if unit is not None or flux_calibrated:
+            image = replace_dataclass(
+                image,
+                unit=unit if unit is not None else image.unit,
+                flux_calibrated=flux_calibrated,
+                flux_slope=flux_slope,
+            )
         new_handle = self._handles.create(image)
-        height, width = image.pixels.shape
-        return {
-            "handle": new_handle,
-            "width": int(width),
-            "height": int(height),
-            "min_ra": float(image.min_ra),
-            "max_ra": float(image.max_ra),
-            "min_dec": float(image.min_dec),
-            "max_dec": float(image.max_dec),
-            "min_flux": float(np.min(image.pixels)),
-            "max_flux": float(np.max(image.pixels)),
-        }
+        return self._image_meta(image, new_handle)
 
     def _get_image_pixels(self, params: dict[str, Any]) -> dict[str, Any]:
         handle = int(params.get("handle", -1))
@@ -489,6 +719,295 @@ class RpcServer:
             "width": int(width),
             "height": int(height),
         }
+
+    def _image_meta(self, image: GriddedImage, handle: int) -> dict[str, Any]:
+        height, width = image.pixels.shape
+        return {
+            "handle": handle,
+            "width": int(width),
+            "height": int(height),
+            "min_ra": float(image.min_ra),
+            "max_ra": float(image.max_ra),
+            "min_dec": float(image.min_dec),
+            "max_dec": float(image.max_dec),
+            "min_flux": float(np.min(image.pixels)) if image.pixels.size else 0.0,
+            "max_flux": float(np.max(image.pixels)) if image.pixels.size else 0.0,
+            "unit": image.unit,
+            "flux_calibrated": bool(image.flux_calibrated),
+            "flux_slope": (
+                float(image.flux_slope) if image.flux_slope is not None else None
+            ),
+        }
+
+    def _open_image(self, params: dict[str, Any]) -> dict[str, Any]:
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        ext = Path(str(path)).suffix.lower()
+        try:
+            if ext == ".img":
+                legacy = read_img(str(path))
+                image = _image_to_gridded(legacy)
+                palette_stops = _palette_stops_payload(legacy.palette)
+            elif ext in (".fits", ".fit"):
+                image = read_fits(str(path))
+                palette_stops = None
+            else:
+                raise RpcError(
+                    ERR_INVALID_PARAMS,
+                    f"unsupported image extension {ext!r}; expected .img/.fits/.fit",
+                )
+        except RpcError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to open image: {exc}") from exc
+        handle = self._handles.create(image)
+        result = self._image_meta(image, handle)
+        if palette_stops is not None:
+            result["palette"] = palette_stops
+        return result
+
+    def _save_image(self, params: dict[str, Any]) -> dict[str, Any]:
+        handle = int(params.get("handle", -1))
+        image = self._resolve_image(handle)
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        ext = Path(str(path)).suffix.lower()
+        try:
+            if ext == ".img":
+                palette = _palette_from_stops(params.get("palette"))
+                flux_min, flux_max = _flux_range_from_params(params, image)
+                # Unit precedence: explicit `unit` param wins; otherwise fall
+                # back to whatever the GriddedImage carries (loaded from disk
+                # or set by `make_image` from the workspace).
+                unit_param = params.get("unit")
+                unit = (
+                    str(unit_param) if isinstance(unit_param, str) and unit_param else image.unit
+                )
+                legacy = _gridded_to_image(
+                    image,
+                    palette=palette,
+                    flux_min=flux_min,
+                    flux_max=flux_max,
+                    name=str(params.get("name", "image")),
+                    pix=int(params.get("pix", 1)),
+                    unit=unit,
+                )
+                write_img(legacy, str(path))
+            elif ext in (".fits", ".fit"):
+                write_fits(
+                    image,
+                    str(path),
+                    name=str(params.get("name")) if params.get("name") is not None else None,
+                    pix=int(params["pix"]) if params.get("pix") is not None else None,
+                )
+            else:
+                raise RpcError(
+                    ERR_INVALID_PARAMS,
+                    f"unsupported image extension {ext!r}; expected .img/.fits/.fit",
+                )
+        except RpcError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to save image: {exc}") from exc
+        return {"path": str(path), "bytes_written": int(Path(str(path)).stat().st_size)}
+
+    def _save_bitmap(self, params: dict[str, Any]) -> dict[str, Any]:
+        handle = int(params.get("handle", -1))
+        image = self._resolve_image(handle)
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        palette = _palette_from_stops(params.get("palette")) or _default_palette()
+        flux_min, flux_max = _flux_range_from_params(params, image)
+        rgb = apply_palette(image.pixels, palette, flux_min, flux_max)
+        try:
+            write_bmp_from_rgb(rgb, str(path))
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to save bitmap: {exc}") from exc
+        return {"path": str(path), "bytes_written": int(Path(str(path)).stat().st_size)}
+
+    def _append_image(self, params: dict[str, Any]) -> dict[str, Any]:
+        primary = self._resolve_image(int(params.get("handle", -1)))
+        other_path = params.get("other_path")
+        if not other_path:
+            raise RpcError(ERR_INVALID_PARAMS, "other_path is required")
+        secondary = _open_image_path(str(other_path))
+        ra_shift = float(params.get("ra_shift_seconds", 0.0))
+        dec_shift = float(params.get("dec_shift_degrees", 0.0))
+        pix = params.get("pix")
+        pix_int = int(pix) if pix is not None else None
+        composed = append_images(
+            primary, secondary, pix=pix_int, ra_shift_seconds=ra_shift, dec_shift_degrees=dec_shift
+        )
+        new_handle = self._handles.create(composed)
+        return self._image_meta(composed, new_handle)
+
+    def _resolve_rgb_image(self, handle: int) -> RgbGriddedImage:
+        try:
+            obj = self._handles.get(handle)
+        except UnknownHandleError as exc:
+            raise RpcError(ERR_INVALID_HANDLE, f"unknown handle: {handle}") from exc
+        if not isinstance(obj, RgbGriddedImage):
+            raise RpcError(ERR_INVALID_HANDLE, f"handle {handle} is not an RGB image")
+        return obj
+
+    def _rgb_image_meta(self, image: RgbGriddedImage, handle: int) -> dict[str, Any]:
+        height, width = image.pixels_r.shape
+        return {
+            "handle": handle,
+            "kind": "rgb",
+            "width": int(width),
+            "height": int(height),
+            "min_ra": float(image.min_ra),
+            "max_ra": float(image.max_ra),
+            "min_dec": float(image.min_dec),
+            "max_dec": float(image.max_dec),
+        }
+
+    def _bicolor_image(self, params: dict[str, Any]) -> dict[str, Any]:
+        primary = self._resolve_image(int(params.get("handle", -1)))
+        other_path = params.get("other_path")
+        if not other_path:
+            raise RpcError(ERR_INVALID_PARAMS, "other_path is required")
+        secondary = _open_image_path(str(other_path))
+        primary_channel = str(params.get("primary_channel", "r")).lower()
+        secondary_channel = str(params.get("secondary_channel", "g")).lower()
+        ra_shift = float(params.get("ra_shift_seconds", 0.0))
+        dec_shift = float(params.get("dec_shift_degrees", 0.0))
+        pix = params.get("pix")
+        pix_int = int(pix) if pix is not None else None
+        try:
+            composed = bicolor_compose(
+                primary,
+                secondary,
+                primary_channel=primary_channel,
+                secondary_channel=secondary_channel,
+                pix=pix_int,
+                ra_shift_seconds=ra_shift,
+                dec_shift_degrees=dec_shift,
+            )
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        new_handle = self._handles.create(composed)
+        return self._rgb_image_meta(composed, new_handle)
+
+    def _tricolor_image(self, params: dict[str, Any]) -> dict[str, Any]:
+        primary = self._resolve_image(int(params.get("handle", -1)))
+        second_path = params.get("second_path")
+        third_path = params.get("third_path")
+        if not second_path or not third_path:
+            raise RpcError(ERR_INVALID_PARAMS, "second_path and third_path are required")
+        secondary = _open_image_path(str(second_path))
+        tertiary = _open_image_path(str(third_path))
+        ra_shift = float(params.get("ra_shift_seconds", 0.0))
+        dec_shift = float(params.get("dec_shift_degrees", 0.0))
+        pix = params.get("pix")
+        pix_int = int(pix) if pix is not None else None
+        composed = tricolor_compose(
+            primary,
+            secondary,
+            tertiary,
+            pix=pix_int,
+            ra_shift_seconds=ra_shift,
+            dec_shift_degrees=dec_shift,
+        )
+        new_handle = self._handles.create(composed)
+        return self._rgb_image_meta(composed, new_handle)
+
+    def _extend_rgb_image(self, params: dict[str, Any]) -> dict[str, Any]:
+        rgb = self._resolve_rgb_image(int(params.get("handle", -1)))
+        other_path = params.get("other_path")
+        if not other_path:
+            raise RpcError(ERR_INVALID_PARAMS, "other_path is required")
+        other = _open_image_path(str(other_path))
+        ra_shift = float(params.get("ra_shift_seconds", 0.0))
+        dec_shift = float(params.get("dec_shift_degrees", 0.0))
+        try:
+            composed = extend_rgb_compose(
+                rgb, other, ra_shift_seconds=ra_shift, dec_shift_degrees=dec_shift
+            )
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        new_handle = self._handles.create(composed)
+        return self._rgb_image_meta(composed, new_handle)
+
+    def _get_rgb_image_pixels(self, params: dict[str, Any]) -> dict[str, Any]:
+        handle = int(params.get("handle", -1))
+        image = self._resolve_rgb_image(handle)
+        try:
+            max_dim = int(params.get("max_dim", 400))
+        except (TypeError, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, "max_dim must be an integer") from exc
+        r = image.pixels_r
+        g = image.pixels_g
+        b = image.pixels_b
+        height, width = r.shape
+        if max_dim > 0:
+            longest = max(height, width)
+            step = -(-longest // max_dim)
+            step = max(1, step)
+            if step > 1:
+                r = r[::step, ::step]
+                g = g[::step, ::step]
+                b = b[::step, ::step]
+                height, width = r.shape
+        return {
+            "r": r.tolist(),
+            "g": g.tolist(),
+            "b": b.tolist(),
+            "width": int(width),
+            "height": int(height),
+        }
+
+    def _superimpose_image(self, params: dict[str, Any]) -> dict[str, Any]:
+        primary = self._resolve_image(int(params.get("handle", -1)))
+        other_path = params.get("other_path")
+        if not other_path:
+            raise RpcError(ERR_INVALID_PARAMS, "other_path is required")
+        secondary = _open_image_path(str(other_path))
+        ra_shift = float(params.get("ra_shift_seconds", 0.0))
+        dec_shift = float(params.get("dec_shift_degrees", 0.0))
+        weight = float(params.get("weight", 0.5))
+        pix = params.get("pix")
+        pix_int = int(pix) if pix is not None else None
+        try:
+            composed = superimpose_images(
+                primary,
+                secondary,
+                weight=weight,
+                pix=pix_int,
+                ra_shift_seconds=ra_shift,
+                dec_shift_degrees=dec_shift,
+            )
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        new_handle = self._handles.create(composed)
+        return self._image_meta(composed, new_handle)
+
+    def _open_palette(self, params: dict[str, Any]) -> dict[str, Any]:
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        try:
+            palette = read_pal(str(path))
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to open palette: {exc}") from exc
+        return {"stops": _palette_stops_payload(palette), "path": str(path)}
+
+    def _save_palette(self, params: dict[str, Any]) -> dict[str, Any]:
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        palette = _palette_from_stops(params.get("stops"))
+        if palette is None:
+            raise RpcError(ERR_INVALID_PARAMS, "stops is required")
+        try:
+            write_pal(palette, str(path))
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to save palette: {exc}") from exc
+        return {"path": str(path), "bytes_written": int(Path(str(path)).stat().st_size)}
 
     def _resolve_workspace(self, handle: int) -> SurveyWorkspace:
         try:
@@ -958,6 +1477,58 @@ class RpcServer:
         peak = determine_peak(ws, flux_y)
         return {"peak_flux": float(peak), "overview": self._scan_overview(ws)}
 
+    def _determine_scan_peak_fit(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        try:
+            ra_min = float(params["ra_min"])
+            ra_max = float(params["ra_max"])
+            degree = int(params.get("degree", 2))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RpcError(
+                ERR_INVALID_PARAMS,
+                "ra_min/ra_max are required numbers and degree must be an integer",
+            ) from exc
+        if not ws.calibrated:
+            raise RpcError(ERR_INVALID_PARAMS, "scan must be calibrated before determining peak")
+        try:
+            peak_flux, ra_grid, flux_grid, peak_ra = determine_peak_fit(
+                ws, ra_min, ra_max, degree
+            )
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        return {
+            "peak_flux": float(peak_flux),
+            "peak_ra": float(peak_ra),
+            "fit_ra": [float(x) for x in ra_grid],
+            "fit_flux": [float(x) for x in flux_grid],
+            "overview": self._scan_overview(ws),
+        }
+
+    def _determine_scan_peak_gaussian(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        try:
+            ra_min = float(params["ra_min"])
+            ra_max = float(params["ra_max"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RpcError(
+                ERR_INVALID_PARAMS, "ra_min/ra_max are required numbers"
+            ) from exc
+        if not ws.calibrated:
+            raise RpcError(ERR_INVALID_PARAMS, "scan must be calibrated before determining peak")
+        try:
+            peak_flux, ra_grid, flux_grid, peak_ra = determine_peak_gaussian(
+                ws, ra_min, ra_max
+            )
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        return {
+            "peak_flux": float(peak_flux),
+            "peak_ra": float(peak_ra),
+            "fit_ra": [float(x) for x in ra_grid],
+            "fit_flux": [float(x) for x in flux_grid],
+            "overview": self._scan_overview(ws),
+        }
+
     def _undo_scan(self, params: dict[str, Any]) -> dict[str, Any]:
         ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
         undone = undo_scan(ws)
@@ -1167,6 +1738,27 @@ class RpcServer:
         ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
         revert_flux_calibration_scan(ws)
         return self._scan_overview(ws)
+
+    def _flux_cal_apply_to_image(self, params: dict[str, Any]) -> dict[str, Any]:
+        handle = int(params.get("handle", -1))
+        image = self._resolve_image(handle)
+        try:
+            slope = float(params["slope"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, "slope is required and must be numeric") from exc
+        try:
+            updated = apply_flux_calibration_image(image, slope)
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        self._handles.set(handle, updated)
+        return self._image_meta(updated, handle)
+
+    def _flux_cal_revert_from_image(self, params: dict[str, Any]) -> dict[str, Any]:
+        handle = int(params.get("handle", -1))
+        image = self._resolve_image(handle)
+        updated = revert_flux_calibration_image(image)
+        self._handles.set(handle, updated)
+        return self._image_meta(updated, handle)
 
     def _echo_array(self, params: dict[str, Any]) -> dict[str, Any]:
         token = params.get("token")

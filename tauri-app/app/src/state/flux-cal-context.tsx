@@ -4,7 +4,6 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -65,49 +64,58 @@ export function FluxCalibrationProvider({ children }: { children: ReactNode }) {
   const survey = useSurvey();
   const scan = useScan();
 
-  // Refs for the auto-apply effect — it must read the *latest* slope and
-  // workspace handle, but the effect should fire on workspace state changes,
-  // not on every slope change (which would cause apply loops).
-  const slopeRef = useRef<number | null>(null);
+  // Auto-apply: any time the slope, the workspace handle, or the workspace's
+  // calibration state changes, push the slope into whichever workspace kinds
+  // are open and gain-calibrated. The guards make this idempotent — already
+  // flux-calibrated workspaces are skipped, so re-renders never double-apply.
+  //
+  // Two trigger directions both run through this:
+  //  - User opens a `.cal` while a survey/scan/image is already gain-cal'd →
+  //    `slope` flips from null to a number, effect runs, apply happens.
+  //  - User loads `.cal` first, then gain-calibrates the workspace later →
+  //    `calibrated` flips to true, effect runs, apply happens.
   useEffect(() => {
-    slopeRef.current = slope;
-  }, [slope]);
-
-  // Auto-apply: when the survey workspace becomes gain-calibrated and a flux
-  // slope is loaded but not yet applied, push it down. Same for the scan.
-  // Reverse direction: when a workspace reverts to raw (e.g., the user closed
-  // and reopened a file), we leave the flag alone — the next gain calibration
-  // will trigger this effect again.
-  useEffect(() => {
-    const s = slopeRef.current;
-    if (s === null || s === 0) return;
+    if (slope === null || slope === 0) return;
     const ws = survey.workspace;
     const handle = survey.workspaceHandle;
-    if (
-      ws &&
-      handle !== null &&
-      ws.calibrated &&
-      !ws.flux_calibrated
-    ) {
+    if (ws && handle !== null && ws.calibrated && !ws.flux_calibrated) {
       rpcClient
-        .fluxCalApplyToSurvey(handle, s)
+        .fluxCalApplyToSurvey(handle, slope)
         .then(() => survey.refreshWorkspace())
         .catch((err) => setRpcError((err as Error).message));
     }
-  }, [survey.workspace?.calibrated, survey.workspace?.flux_calibrated, survey.workspaceHandle]);
+  }, [
+    slope,
+    survey.workspace?.calibrated,
+    survey.workspace?.flux_calibrated,
+    survey.workspaceHandle,
+  ]);
 
   useEffect(() => {
-    const s = slopeRef.current;
-    if (s === null || s === 0) return;
+    if (slope === null || slope === 0) return;
     const ov = scan.overview;
     const handle = scan.handle;
     if (ov && handle !== null && ov.calibrated && !ov.flux_calibrated) {
       rpcClient
-        .fluxCalApplyToScan(handle, s)
+        .fluxCalApplyToScan(handle, slope)
         .then(() => scan.refreshOverview())
         .catch((err) => setRpcError((err as Error).message));
     }
-  }, [scan.overview?.calibrated, scan.overview?.flux_calibrated, scan.handle]);
+  }, [slope, scan.overview?.calibrated, scan.overview?.flux_calibrated, scan.handle]);
+
+  // Images opened standalone (via Image → Open Image…) carry their own
+  // calibration flag — the user-stated convention is that an image always
+  // implies at least gain calibration, so any image that isn't already in
+  // Jy is a candidate for the loaded slope.
+  useEffect(() => {
+    if (slope === null || slope === 0) return;
+    const img = survey.image;
+    if (img && !img.flux_calibrated) {
+      survey.applyImageFluxCalibration(slope).catch((err) => {
+        setRpcError((err as Error).message);
+      });
+    }
+  }, [slope, survey.image?.handle, survey.image?.flux_calibrated]);
 
   const newCalibration = useCallback(() => {
     setTable({ ...EMPTY_TABLE, entries: [] });

@@ -59,6 +59,48 @@ def test_img_pixels_contain_signal(outputs_dir: Path) -> None:
     assert int(img.pixels.max()) > 0
 
 
+def test_img_unit_roundtrip(outputs_dir: Path, tmp_path: Path) -> None:
+    """When `unit` is set, `write_img` appends it after the pixel grid and
+    `read_img` reads it back. When `unit` is None (legacy files) the suffix
+    is omitted, preserving byte-exact round-trip with legacy fixtures."""
+    from dataclasses import replace
+
+    src = read_img(outputs_dir / "cygnus_a.img")
+    # Legacy file: no unit on disk.
+    assert src.unit is None
+    # Round-trip with an explicit unit and verify it comes back.
+    jy = replace(src, unit="Jy", raw_bytes=None)
+    out = tmp_path / "with_unit.img"
+    write_img(jy, out)
+    re_read = read_img(out)
+    assert re_read.unit == "Jy"
+    # Pixels survive the read/write flip symmetrically.
+    np.testing.assert_array_equal(re_read.pixels, jy.pixels)
+
+
+def test_img_vertical_orientation_matches_legacy(outputs_dir: Path) -> None:
+    """`read_img` flips rows so internally `pixels[0]` is at MinDec (matching
+    `make_image`'s convention). The legacy file's first byte-row is MaxDec —
+    so the read-side flip puts that byte-row at `pixels[-1]`. We can verify
+    by comparing the raw file's first row against `pixels[-1]`."""
+    src_path = outputs_dir / "cygnus_a.img"
+    img = read_img(src_path)
+    # Build the legacy byte order by re-writing without our flip, just to
+    # sanity-check: legacy first row should equal our `pixels[-1]`.
+    rows, cols = img.pixels.shape
+    raw = src_path.read_bytes()
+    # Skip header by replaying the read; easier path: rely on the existing
+    # round-trip — if the flip is consistent on both sides, the second-to-last
+    # byte pair of the FILE (counting from header end) is `pixels[0][0]`.
+    # That's enough of a check: assert that pixels[0] is NOT identical to the
+    # first byte-row of the raw file.
+    header_end = len(raw) - rows * cols * 2 - (
+        (2 + len(img.unit)) if img.unit else 0
+    )
+    first_legacy_row = np.frombuffer(raw, dtype="<i2", count=cols, offset=header_end)
+    np.testing.assert_array_equal(first_legacy_row, img.pixels[-1])
+
+
 def test_img_truncated_grid_raises(tmp_path: Path) -> None:
     """A truncated `.img` should error rather than silently zero-extend."""
     # 14 header strings + 0 palette, but no grid bytes for Pix=1.

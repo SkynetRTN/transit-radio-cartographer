@@ -71,6 +71,20 @@ vi.mock('../ipc/client', () => {
       determineScanPeak: vi
         .fn()
         .mockResolvedValue({ peak_flux: 4.5, overview: { ...overviewCalibrated, peak_flux: 4.5 } }),
+      determineScanPeakFit: vi.fn().mockResolvedValue({
+        peak_flux: 4.5,
+        peak_ra: 10,
+        fit_ra: [5, 10, 15],
+        fit_flux: [3.5, 4.5, 3.5],
+        overview: { ...overviewCalibrated, peak_flux: 4.5 },
+      }),
+      determineScanPeakGaussian: vi.fn().mockResolvedValue({
+        peak_flux: 4.6,
+        peak_ra: 10,
+        fit_ra: [5, 10, 15],
+        fit_flux: [3.0, 4.6, 3.0],
+        overview: { ...overviewCalibrated, peak_flux: 4.6 },
+      }),
       undoScan: vi.fn().mockResolvedValue({ undone: true, overview: overviewRaw }),
       saveScan: vi.fn().mockResolvedValue({ path: '/tmp/cyg0a.scn', bytes_written: 1234 }),
     },

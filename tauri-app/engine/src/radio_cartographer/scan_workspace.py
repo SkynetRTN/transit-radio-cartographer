@@ -415,9 +415,142 @@ def determine_peak(workspace: ScanWorkspace, flux_y: float) -> float:
     the user's click on the flux-vs-RA plot — the user is expected to place
     the horizontal cursor line at the peak of the source they care about.
     This helper just stores the value so the UI can render it; no math.
+
+    Superseded by `determine_peak_fit`, which actually computes the peak from
+    a polynomial fit instead of trusting the user's eyeball. Kept so the
+    `determine_scan_peak` RPC and its existing tests keep working.
     """
     workspace.peak_flux = float(flux_y)
     return workspace.peak_flux
+
+
+def determine_peak_gaussian(
+    workspace: ScanWorkspace,
+    ra_min: float,
+    ra_max: float,
+    *,
+    grid_size: int = 200,
+) -> tuple[float, NDArray[np.float64], NDArray[np.float64], float]:
+    """Fit a Gaussian + constant baseline over a user-selected RA range.
+
+    Counterpart to `determine_peak_fit` for symmetric, peak-shaped sources
+    (the common case for point-source scans).
+
+    Uses the log-quadratic trick rather than a nonlinear solver so we don't
+    have to pull in `scipy`: subtract a baseline (min flux in the band), take
+    `log(flux - baseline)`, fit a degree-2 polynomial with `np.polyfit`, then
+    recover `(σ, μ, amplitude)` analytically from the quadratic coefficients
+    (`a·x² + b·x + c`: `σ = √(-1/2a)`, `μ = -b/2a`, `amplitude = exp(c - b²/4a)`).
+    Works well for clean point-source peaks; if the user needs robustness
+    against asymmetry/noise, the polynomial-fit path is still available.
+
+    Same contract as the polynomial variant: validate, snapshot undo, store
+    `peak_flux`, return the curve grid for the UI to draw.
+    """
+    if ra_min == ra_max:
+        raise ValueError("peak-fit range must be non-empty")
+    if ra_min > ra_max:
+        ra_min, ra_max = ra_max, ra_min
+    region = (
+        (workspace.source_ra >= ra_min)
+        & (workspace.source_ra <= ra_max)
+        & workspace.source_mask
+    )
+    n = int(region.sum())
+    if n < 4:
+        raise ValueError(
+            f"need at least 4 kept samples in the range to fit a Gaussian (found {n})"
+        )
+    ra = workspace.source_ra[region]
+    flux = current_source_flux(workspace)[region]
+    baseline = float(np.min(flux))
+    above = flux - baseline
+    # Strictly-positive subset for the log. Pre-allocating a tiny epsilon
+    # before discarding loses one degree of freedom and biases the fit; better
+    # to just drop the at-baseline samples.
+    positive = above > 1e-12
+    if int(positive.sum()) < 3:
+        raise ValueError(
+            "not enough above-baseline samples in the range to fit a Gaussian "
+            "(try widening the range or use the polynomial fit instead)"
+        )
+    pos_flux = above[positive]
+    log_above = np.log(pos_flux)
+    # Weight by flux² — equal-variance noise in linear space becomes
+    # `1/flux`-variance in log space, so weights ∝ flux² give the right
+    # least-squares cost. Without this the tails dominate the fit and shift
+    # the recovered peak.
+    coeff = np.polyfit(ra[positive], log_above, deg=2, w=pos_flux)
+    a, b, c = float(coeff[0]), float(coeff[1]), float(coeff[2])
+    if a >= 0:
+        raise ValueError(
+            "selected range does not contain a Gaussian-shaped peak "
+            "(log-quadratic fit was non-concave); try a different range "
+            "or use the polynomial fit"
+        )
+    mu = -b / (2.0 * a)
+    log_amp = c - (b * b) / (4.0 * a)
+    amplitude = float(np.exp(log_amp))
+    sigma_sq = -1.0 / (2.0 * a)
+    sigma = float(np.sqrt(sigma_sq))
+    ra_grid = np.linspace(ra_min, ra_max, grid_size)
+    flux_grid = amplitude * np.exp(-0.5 * ((ra_grid - mu) / sigma) ** 2) + baseline
+    max_idx = int(np.argmax(flux_grid))
+    peak_flux = float(flux_grid[max_idx])
+    peak_ra = float(ra_grid[max_idx])
+    _push_source_undo(workspace)
+    workspace.peak_flux = peak_flux
+    return peak_flux, ra_grid, flux_grid, peak_ra
+
+
+def determine_peak_fit(
+    workspace: ScanWorkspace,
+    ra_min: float,
+    ra_max: float,
+    degree: int,
+    *,
+    grid_size: int = 200,
+) -> tuple[float, NDArray[np.float64], NDArray[np.float64], float]:
+    """Fit a polynomial over a user-selected RA range and record its peak.
+
+    The user drags a band on the flux plot; this routine fits
+    `np.polyfit(ra, flux, deg=degree)` to the kept source samples inside that
+    band, evaluates the fit on a dense grid, and stores the grid's maximum on
+    `workspace.peak_flux`. Returns `(peak_flux, ra_grid, flux_grid, peak_ra)`
+    — the grid arrays are returned so the UI can draw the fit on top of the
+    data; nothing about the grid is persisted on the workspace.
+
+    Uses the same `np.polyfit` pattern as `scan.subtract_baseline` so we don't
+    invent a second polynomial-fit code path.
+    """
+    if degree not in (2, 3, 4):
+        raise ValueError(f"degree must be 2, 3, or 4 (got {degree})")
+    if ra_min == ra_max:
+        raise ValueError("peak-fit range must be non-empty")
+    if ra_min > ra_max:
+        ra_min, ra_max = ra_max, ra_min
+    region = (
+        (workspace.source_ra >= ra_min)
+        & (workspace.source_ra <= ra_max)
+        & workspace.source_mask
+    )
+    n = int(region.sum())
+    if n < degree + 1:
+        raise ValueError(
+            f"need at least {degree + 1} kept samples in the range to fit a "
+            f"degree-{degree} polynomial (found {n})"
+        )
+    ra = workspace.source_ra[region]
+    flux = current_source_flux(workspace)[region]
+    coeff = np.polyfit(ra, flux, deg=degree)
+    ra_grid = np.linspace(ra_min, ra_max, grid_size)
+    flux_grid = np.polyval(coeff, ra_grid)
+    max_idx = int(np.argmax(flux_grid))
+    peak_flux = float(flux_grid[max_idx])
+    peak_ra = float(ra_grid[max_idx])
+    _push_source_undo(workspace)
+    workspace.peak_flux = peak_flux
+    return peak_flux, ra_grid, flux_grid, peak_ra
 
 
 def undo_scan(workspace: ScanWorkspace) -> bool:

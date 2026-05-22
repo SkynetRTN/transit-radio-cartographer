@@ -9,11 +9,15 @@ from radio_cartographer.rpc import RpcServer
 
 from .helpers import call
 
-FIXTURES = Path(__file__).resolve().parents[4] / "fixtures" / "inputs"
-SURVEY_FIXTURE = FIXTURES / "cygnus1a.md2"
-SCAN_FIXTURE = FIXTURES / "cas0a.md1"
-CAL_FIXTURE = FIXTURES / "cal25a.cal"
-PEAK_SCN = FIXTURES / "cas0awpeak.scn"
+FIXTURES_ROOT = Path(__file__).resolve().parents[4] / "fixtures"
+INPUTS = FIXTURES_ROOT / "inputs"
+INTERMEDIATES = FIXTURES_ROOT / "intermediates"
+SURVEY_FIXTURE = INPUTS / "cygnus1a.md2"
+SCAN_FIXTURE = INPUTS / "cas0a.md1"
+CAL_FIXTURE = INPUTS / "cal25a.cal"
+# Reduced .scn fixtures live under intermediates/ — they're outputs of the
+# legacy reduction pipeline, not raw telescope captures.
+PEAK_SCN = INTERMEDIATES / "cas0awpeak.scn"
 
 
 def test_flux_cal_read_file_returns_table_slope_and_error() -> None:
@@ -135,3 +139,60 @@ def test_flux_cal_apply_to_scan_updates_overview_and_peak() -> None:
     assert resp["result"]["flux_calibrated"] is True
     assert resp["result"]["flux_slope"] == 0.5
     assert abs(resp["result"]["peak_flux"] - 2.5) < 1e-9
+
+
+def test_flux_cal_apply_to_image_scales_pixels_and_marks_state() -> None:
+    """Standalone image: opening a `.cal` while an image is loaded should
+    multiply pixels by the slope and report the image as flux-calibrated.
+
+    Regression for the Phase 4 plan §Calibration item — the auto-apply effect
+    needs the image to expose `flux_calibrated`/`flux_slope` so it doesn't
+    double-apply on subsequent renders.
+    """
+    server = RpcServer()
+    opened = call(server, "open_survey", {"path": str(SURVEY_FIXTURE)})
+    sv_handle = opened["result"]["handle"]
+    ws_handle = opened["result"]["workspace_handle"]
+    call(server, "apply_gain_calibration", {"handle": ws_handle})
+    img_resp = call(
+        server, "make_image", {"handle": sv_handle, "pix": 4, "workspace_handle": ws_handle}
+    )
+    assert "error" not in img_resp, img_resp
+    img_handle = img_resp["result"]["handle"]
+    assert img_resp["result"]["unit"] == "GCU"
+    assert img_resp["result"]["flux_calibrated"] is False
+    before_max = img_resp["result"]["max_flux"]
+
+    flux = call(server, "flux_cal_apply_to_image", {"handle": img_handle, "slope": 2.5})
+    assert "error" not in flux, flux
+    assert flux["result"]["flux_calibrated"] is True
+    assert flux["result"]["flux_slope"] == 2.5
+    assert flux["result"]["unit"] == "Jy"
+    assert abs(flux["result"]["max_flux"] - before_max * 2.5) < 1e-6
+
+    # Idempotent: applying again is a no-op (matches the survey/scan guard).
+    again = call(server, "flux_cal_apply_to_image", {"handle": img_handle, "slope": 2.5})
+    assert "error" not in again, again
+    assert again["result"]["flux_slope"] == 2.5
+    assert abs(again["result"]["max_flux"] - flux["result"]["max_flux"]) < 1e-6
+
+    revert = call(server, "flux_cal_revert_from_image", {"handle": img_handle})
+    assert "error" not in revert, revert
+    assert revert["result"]["flux_calibrated"] is False
+    assert revert["result"]["flux_slope"] is None
+    assert abs(revert["result"]["max_flux"] - before_max) < 1e-6
+
+
+def test_flux_cal_apply_to_image_rejects_zero_slope() -> None:
+    server = RpcServer()
+    opened = call(server, "open_survey", {"path": str(SURVEY_FIXTURE)})
+    sv_handle = opened["result"]["handle"]
+    ws_handle = opened["result"]["workspace_handle"]
+    call(server, "apply_gain_calibration", {"handle": ws_handle})
+    img_resp = call(
+        server, "make_image", {"handle": sv_handle, "pix": 4, "workspace_handle": ws_handle}
+    )
+    img_handle = img_resp["result"]["handle"]
+    resp = call(server, "flux_cal_apply_to_image", {"handle": img_handle, "slope": 0.0})
+    assert "error" in resp
+    assert "nonzero" in resp["error"]["message"]

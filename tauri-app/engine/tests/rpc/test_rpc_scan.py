@@ -197,6 +197,173 @@ def test_determine_scan_peak_records_the_click_y_value() -> None:
     assert resp["result"]["overview"]["peak_flux"] == 4.2
 
 
+def _install_synthetic_quadratic(
+    server: RpcServer, handle: int, *, peak_flux: float, peak_ra: float
+) -> None:
+    """Overwrite a calibrated workspace with a known-quadratic source.
+
+    Replaces `source_ra` and `reduced_source_flux` with `flux = peak_flux - 0.1·(ra - peak_ra)²`
+    so the polynomial-fit RPC has an analytical truth value to compare against.
+    """
+    ws = server._handles.get(handle)
+    assert isinstance(ws, ScanWorkspace)
+    assert ws.calibrated
+    ra = np.linspace(peak_ra - 5.0, peak_ra + 5.0, 51)
+    flux = peak_flux - 0.1 * (ra - peak_ra) ** 2
+    ws.source_ra = ra
+    ws.source_mask = np.ones(ra.shape, dtype=np.bool_)
+    ws.reduced_source_flux = flux
+
+
+def test_determine_scan_peak_fit_recovers_known_quadratic() -> None:
+    server = RpcServer()
+    handle, _ = _open(server)
+    call(server, "apply_scan_calibration", {"handle": handle})
+    _install_synthetic_quadratic(server, handle, peak_flux=5.0, peak_ra=10.0)
+    resp = call(
+        server,
+        "determine_scan_peak_fit",
+        {"handle": handle, "ra_min": 7.0, "ra_max": 13.0, "degree": 2},
+    )
+    assert "error" not in resp, resp
+    result = resp["result"]
+    # Quadratic recovery is essentially exact (modulo float epsilon + grid step).
+    assert abs(result["peak_flux"] - 5.0) < 1e-3
+    assert abs(result["peak_ra"] - 10.0) < 0.05
+    assert result["overview"]["peak_flux"] == result["peak_flux"]
+    assert len(result["fit_ra"]) == len(result["fit_flux"]) == 200
+    assert result["fit_ra"][0] == 7.0
+    assert result["fit_ra"][-1] == 13.0
+
+
+def test_determine_scan_peak_fit_undo_restores_prior_peak_flux() -> None:
+    server = RpcServer()
+    handle, _ = _open(server)
+    call(server, "apply_scan_calibration", {"handle": handle})
+    # Seed a prior peak value so we can verify undo restores it.
+    call(server, "determine_scan_peak", {"handle": handle, "flux": 3.0})
+    _install_synthetic_quadratic(server, handle, peak_flux=7.0, peak_ra=20.0)
+    fit = call(
+        server,
+        "determine_scan_peak_fit",
+        {"handle": handle, "ra_min": 17.0, "ra_max": 23.0, "degree": 2},
+    )
+    assert "error" not in fit, fit
+    assert abs(fit["result"]["peak_flux"] - 7.0) < 1e-3
+    undone = call(server, "undo_scan", {"handle": handle})
+    assert "error" not in undone, undone
+    assert undone["result"]["overview"]["peak_flux"] == 3.0
+
+
+def test_determine_scan_peak_fit_rejects_too_few_samples() -> None:
+    server = RpcServer()
+    handle, _ = _open(server)
+    call(server, "apply_scan_calibration", {"handle": handle})
+    _install_synthetic_quadratic(server, handle, peak_flux=5.0, peak_ra=10.0)
+    # A 0.1-wide window catches only ~1 sample from the 51-sample synthetic
+    # source — fewer than degree+1=5 required for a degree-4 fit.
+    resp = call(
+        server,
+        "determine_scan_peak_fit",
+        {"handle": handle, "ra_min": 9.95, "ra_max": 10.05, "degree": 4},
+    )
+    assert "error" in resp, resp
+    assert "kept samples" in resp["error"]["message"]
+
+
+def _install_synthetic_gaussian(
+    server: RpcServer, handle: int, *, peak_flux: float, peak_ra: float, stddev: float
+) -> None:
+    """Overwrite a calibrated workspace with a known Gaussian source.
+
+    Replaces `source_ra` and `reduced_source_flux` with
+    `flux = peak_flux · exp(-((ra - peak_ra)/stddev)²/2)` so the Gaussian-fit
+    RPC has an analytical truth value to compare against.
+    """
+    ws = server._handles.get(handle)
+    assert isinstance(ws, ScanWorkspace)
+    assert ws.calibrated
+    ra = np.linspace(peak_ra - 5 * stddev, peak_ra + 5 * stddev, 51)
+    flux = peak_flux * np.exp(-0.5 * ((ra - peak_ra) / stddev) ** 2)
+    ws.source_ra = ra
+    ws.source_mask = np.ones(ra.shape, dtype=np.bool_)
+    ws.reduced_source_flux = flux
+
+
+def test_determine_scan_peak_gaussian_recovers_known_gaussian() -> None:
+    server = RpcServer()
+    handle, _ = _open(server)
+    call(server, "apply_scan_calibration", {"handle": handle})
+    _install_synthetic_gaussian(
+        server, handle, peak_flux=7.5, peak_ra=20.0, stddev=1.5
+    )
+    resp = call(
+        server,
+        "determine_scan_peak_gaussian",
+        {"handle": handle, "ra_min": 15.0, "ra_max": 25.0},
+    )
+    assert "error" not in resp, resp
+    result = resp["result"]
+    # The log-quadratic fit has small intrinsic bias from the
+    # baseline-subtraction step (the synthetic has no offset, but the
+    # estimator still subtracts `min(flux)` from the band, which clips the
+    # tail samples). 1% of peak is well inside the noise floor of any real
+    # telescope scan; we just want to confirm we're in the right neighborhood.
+    assert abs(result["peak_flux"] - 7.5) < 0.05
+    assert abs(result["peak_ra"] - 20.0) < 0.05
+    assert result["overview"]["peak_flux"] == result["peak_flux"]
+    assert len(result["fit_ra"]) == len(result["fit_flux"]) == 200
+
+
+def test_determine_scan_peak_gaussian_undo_restores_prior_peak_flux() -> None:
+    server = RpcServer()
+    handle, _ = _open(server)
+    call(server, "apply_scan_calibration", {"handle": handle})
+    call(server, "determine_scan_peak", {"handle": handle, "flux": 2.0})
+    _install_synthetic_gaussian(
+        server, handle, peak_flux=6.0, peak_ra=10.0, stddev=2.0
+    )
+    fit = call(
+        server,
+        "determine_scan_peak_gaussian",
+        {"handle": handle, "ra_min": 4.0, "ra_max": 16.0},
+    )
+    assert "error" not in fit, fit
+    undone = call(server, "undo_scan", {"handle": handle})
+    assert undone["result"]["overview"]["peak_flux"] == 2.0
+
+
+def test_determine_scan_peak_gaussian_rejects_too_few_samples() -> None:
+    server = RpcServer()
+    handle, _ = _open(server)
+    call(server, "apply_scan_calibration", {"handle": handle})
+    _install_synthetic_gaussian(
+        server, handle, peak_flux=5.0, peak_ra=10.0, stddev=1.0
+    )
+    # Narrow window catches < 4 samples → not enough for a 4-param Gaussian.
+    resp = call(
+        server,
+        "determine_scan_peak_gaussian",
+        {"handle": handle, "ra_min": 9.99, "ra_max": 10.01},
+    )
+    assert "error" in resp, resp
+    assert "kept samples" in resp["error"]["message"]
+
+
+def test_determine_scan_peak_fit_rejects_invalid_degree() -> None:
+    server = RpcServer()
+    handle, _ = _open(server)
+    call(server, "apply_scan_calibration", {"handle": handle})
+    _install_synthetic_quadratic(server, handle, peak_flux=5.0, peak_ra=10.0)
+    resp = call(
+        server,
+        "determine_scan_peak_fit",
+        {"handle": handle, "ra_min": 7.0, "ra_max": 13.0, "degree": 5},
+    )
+    assert "error" in resp
+    assert "degree" in resp["error"]["message"].lower()
+
+
 def test_full_scan_pipeline_round_trip() -> None:
     """Drive the entire `legacyuireferenceguide.md` § Scan Processing flow."""
     server = RpcServer()

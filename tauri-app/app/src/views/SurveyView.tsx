@@ -13,13 +13,13 @@ function formatRa(volts: number): string {
 }
 
 function formatDec(deg: number): string {
-  // Declination in the .md2 fixtures appears to be in arc-minutes.
-  const totalArcSec = deg * 60;
-  const sign = totalArcSec < 0 ? '-' : '';
-  const abs = Math.abs(totalArcSec);
-  const d = Math.floor(abs / 3600);
-  const m = Math.floor((abs % 3600) / 60);
-  const s = Math.floor(abs % 60);
+  // `.md2` declination is decimal degrees, matching `.md1` and the legacy
+  // `vb/survform.frm:8703-8705` formatter.
+  const sign = deg < 0 ? '-' : '';
+  const abs = Math.abs(deg);
+  const d = Math.floor(abs);
+  const m = Math.floor((abs - d) * 60);
+  const s = Math.floor((abs - d - m / 60) * 3600);
   return `${sign}${String(d).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
@@ -429,7 +429,7 @@ export function SurveyView() {
             <div className="readout">
               <div>RA: {readoutPoint ? formatRa(readoutPoint.ra) : '--:--:--'}</div>
               <div>Dec: {readoutPoint ? formatDec(readoutPoint.dec) : '--:--:--'}</div>
-              <div>Flux: {readoutPoint ? formatFlux(readoutPoint.flux, unit) : `-- ${unit === 'volts' ? 'V' : 'GCU'}`}</div>
+              <div>Flux: {readoutPoint ? formatFlux(readoutPoint.flux, unit) : `-- ${unit === 'volts' ? 'V' : unit === 'jy' ? 'Jy' : 'GCU'}`}</div>
               {stickyPoint && !baselineMode && (
                 <div className="readout-pin">📌 pinned (click empty space to release)</div>
               )}

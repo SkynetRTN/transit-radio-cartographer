@@ -5,6 +5,7 @@ import { SurveyProvider } from '../state/survey-context';
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(), save: vi.fn() }));
 vi.mock('../lib/plots/SweepPlot', () => ({ SweepPlot: () => null }));
 vi.mock('../lib/plots/ImagePlot', () => ({ ImagePlot: () => null }));
+vi.mock('../lib/plots/RgbImagePlot', () => ({ RgbImagePlot: () => null }));
 vi.mock('../lib/plots/PointScatter', () => ({ PointScatter: () => null }));
 vi.mock('../ipc/client', () => ({
   rpcClient: {
@@ -61,6 +62,8 @@ vi.mock('../ipc/client', () => ({
     fluxCalRevertFromSurvey: vi.fn(),
     fluxCalApplyToScan: vi.fn(),
     fluxCalRevertFromScan: vi.fn(),
+    fluxCalApplyToImage: vi.fn(),
+    fluxCalRevertFromImage: vi.fn(),
   },
 }));
 
@@ -104,6 +107,59 @@ test('save scan menu items respect hasScan and savePath state', () => {
   // No scan loaded → both Save items are disabled.
   expect(screen.getByRole('menuitem', { name: 'Save Scan' })).toBeDisabled();
   expect(screen.getByRole('menuitem', { name: 'Save Scan As…' })).toBeDisabled();
+});
+
+test('Change Degree of Determine Peak menu item opens a numeric prompt', async () => {
+  const dialog = await import('@tauri-apps/plugin-dialog');
+  const client = await import('../ipc/client');
+  (dialog.open as unknown as ReturnType<typeof vi.fn>).mockResolvedValue('/tmp/cyg0a.md1');
+  (client.rpcClient.openScan as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+    handle: 11,
+    metadata: { path: '/tmp/cyg0a.md1', source_count: 200 },
+    overview: {
+      name: 'CYG0A',
+      path: '/tmp/cyg0a.md1',
+      source_count: 200,
+      source_kept: 200,
+      initial_cal_samples: 120,
+      terminal_cal_samples: 120,
+      initial_kept: 120,
+      terminal_kept: 120,
+      cal1: 0.34,
+      cal2: 0.36,
+      calibrated: false,
+      initial_enabled: true,
+      terminal_enabled: true,
+      can_undo: false,
+      peak_flux: null,
+    },
+  });
+  renderApp();
+  // Disabled until a scan is loaded.
+  fireEvent.click(screen.getByText('Scan'));
+  expect(
+    screen.getByRole('menuitem', { name: 'Change Determine Peak Fit…' }),
+  ).toBeDisabled();
+  fireEvent.click(screen.getByRole('menuitem', { name: 'New Scan…' }));
+  await vi.waitFor(() => {
+    expect(client.rpcClient.openScan).toHaveBeenCalledWith('/tmp/cyg0a.md1');
+  });
+  // Open the dialog, change the value, submit. Clamp-to-[2,4] is enforced in onSubmit;
+  // here we just check the dialog appears and accepts an in-range value.
+  fireEvent.click(screen.getByText('Scan'));
+  await vi.waitFor(() => {
+    expect(
+      screen.getByRole('menuitem', { name: 'Change Determine Peak Fit…' }),
+    ).not.toBeDisabled();
+  });
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Change Determine Peak Fit…' }));
+  const input = await screen.findByLabelText('Fit kind (0 = Gaussian, 2/3/4 = polynomial degree):');
+  fireEvent.change(input, { target: { value: '3' } });
+  fireEvent.click(screen.getByRole('button', { name: 'OK' }));
+  // Dialog dismisses after submit.
+  await vi.waitFor(() => {
+    expect(screen.queryByLabelText('Fit kind (0 = Gaussian, 2/3/4 = polynomial degree):')).not.toBeInTheDocument();
+  });
 });
 
 test('save survey menu items respect hasSurvey and savePath state', () => {

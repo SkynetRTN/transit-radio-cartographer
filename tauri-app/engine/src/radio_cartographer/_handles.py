@@ -36,6 +36,12 @@ class HandleRegistry:
         except KeyError as exc:
             raise UnknownHandleError(handle) from exc
 
+    def set(self, handle: int, value: object) -> None:
+        with self._lock:
+            if handle not in self._items:
+                raise UnknownHandleError(handle)
+            self._items[handle] = value
+
     def pop(self, handle: int) -> object:
         try:
             return self._items.pop(handle)

@@ -204,12 +204,56 @@ export interface ImageMeta {
   max_dec: number;
   min_flux: number;
   max_flux: number;
+  palette?: PaletteStop[];
+  // Flux unit: "Jy" after flux calibration, "GCU" after gain-only calibration,
+  // null for legacy `.img` files that don't carry it (those default to GCU at
+  // display time per the user's convention: an image always implies at least
+  // gain calibration).
+  unit?: string | null;
+  // True when a flux calibration slope has been applied directly to this
+  // image. Mirrors the survey/scan workspace flag so the auto-apply effect
+  // can treat the image consistently with the other workspace kinds.
+  flux_calibrated?: boolean;
+  flux_slope?: number | null;
 }
 
 export interface ImagePixels {
   pixels: number[][];
   width: number;
   height: number;
+}
+
+export interface RgbImageMeta {
+  handle: number;
+  kind: 'rgb';
+  width: number;
+  height: number;
+  min_ra: number;
+  max_ra: number;
+  min_dec: number;
+  max_dec: number;
+}
+
+export interface RgbImagePixels {
+  r: number[][];
+  g: number[][];
+  b: number[][];
+  width: number;
+  height: number;
+}
+
+export type ChannelColor = 'r' | 'g' | 'b';
+
+export interface PaletteStop {
+  anchor: number;
+  r: number;
+  g: number;
+  b: number;
+}
+
+export interface PaletteResult {
+  stops: PaletteStop[];
+  path: string;
 }
 
 export class RpcClient {
@@ -343,17 +387,129 @@ export class RpcClient {
   getImagePixels(handle: number, maxDim = 400) {
     return this.request<ImagePixels>('get_image_pixels', { handle, max_dim: maxDim });
   }
-  applyPalette(imageHandle: number, paletteHandle: number) {
-    return this.request('apply_palette', {
-      image_handle: imageHandle,
-      palette_handle: paletteHandle,
-    });
+  openImage(path: string) {
+    return this.request<ImageMeta>('open_image', { path });
+  }
+  saveImage(
+    handle: number,
+    path: string,
+    options?: {
+      palette?: PaletteStop[];
+      flux_min?: number;
+      flux_max?: number;
+      name?: string;
+      pix?: number;
+      unit?: string;
+    },
+  ) {
+    const params: Record<string, unknown> = { handle, path };
+    if (options?.palette !== undefined) params.palette = options.palette;
+    if (options?.flux_min !== undefined) params.flux_min = options.flux_min;
+    if (options?.flux_max !== undefined) params.flux_max = options.flux_max;
+    if (options?.name !== undefined) params.name = options.name;
+    if (options?.pix !== undefined) params.pix = options.pix;
+    if (options?.unit !== undefined) params.unit = options.unit;
+    return this.request<{ path: string; bytes_written: number }>('save_image', params);
+  }
+  saveBitmap(
+    handle: number,
+    path: string,
+    options?: { palette?: PaletteStop[]; flux_min?: number; flux_max?: number },
+  ) {
+    const params: Record<string, unknown> = { handle, path };
+    if (options?.palette !== undefined) params.palette = options.palette;
+    if (options?.flux_min !== undefined) params.flux_min = options.flux_min;
+    if (options?.flux_max !== undefined) params.flux_max = options.flux_max;
+    return this.request<{ path: string; bytes_written: number }>('save_bitmap', params);
+  }
+  appendImage(
+    handle: number,
+    otherPath: string,
+    options?: { ra_shift_seconds?: number; dec_shift_degrees?: number; pix?: number },
+  ) {
+    const params: Record<string, unknown> = { handle, other_path: otherPath };
+    if (options?.ra_shift_seconds !== undefined) params.ra_shift_seconds = options.ra_shift_seconds;
+    if (options?.dec_shift_degrees !== undefined)
+      params.dec_shift_degrees = options.dec_shift_degrees;
+    if (options?.pix !== undefined) params.pix = options.pix;
+    return this.request<ImageMeta>('append_image', params);
+  }
+  superimposeImage(
+    handle: number,
+    otherPath: string,
+    options?: {
+      weight?: number;
+      ra_shift_seconds?: number;
+      dec_shift_degrees?: number;
+      pix?: number;
+    },
+  ) {
+    const params: Record<string, unknown> = { handle, other_path: otherPath };
+    if (options?.weight !== undefined) params.weight = options.weight;
+    if (options?.ra_shift_seconds !== undefined) params.ra_shift_seconds = options.ra_shift_seconds;
+    if (options?.dec_shift_degrees !== undefined)
+      params.dec_shift_degrees = options.dec_shift_degrees;
+    if (options?.pix !== undefined) params.pix = options.pix;
+    return this.request<ImageMeta>('superimpose_image', params);
+  }
+  bicolorImage(
+    handle: number,
+    otherPath: string,
+    primaryChannel: ChannelColor,
+    secondaryChannel: ChannelColor,
+    options?: { ra_shift_seconds?: number; dec_shift_degrees?: number; pix?: number },
+  ) {
+    const params: Record<string, unknown> = {
+      handle,
+      other_path: otherPath,
+      primary_channel: primaryChannel,
+      secondary_channel: secondaryChannel,
+    };
+    if (options?.ra_shift_seconds !== undefined) params.ra_shift_seconds = options.ra_shift_seconds;
+    if (options?.dec_shift_degrees !== undefined)
+      params.dec_shift_degrees = options.dec_shift_degrees;
+    if (options?.pix !== undefined) params.pix = options.pix;
+    return this.request<RgbImageMeta>('bicolor_image', params);
+  }
+  tricolorImage(
+    handle: number,
+    secondPath: string,
+    thirdPath: string,
+    options?: { ra_shift_seconds?: number; dec_shift_degrees?: number; pix?: number },
+  ) {
+    const params: Record<string, unknown> = {
+      handle,
+      second_path: secondPath,
+      third_path: thirdPath,
+    };
+    if (options?.ra_shift_seconds !== undefined) params.ra_shift_seconds = options.ra_shift_seconds;
+    if (options?.dec_shift_degrees !== undefined)
+      params.dec_shift_degrees = options.dec_shift_degrees;
+    if (options?.pix !== undefined) params.pix = options.pix;
+    return this.request<RgbImageMeta>('tricolor_image', params);
+  }
+  extendRgbImage(
+    handle: number,
+    otherPath: string,
+    options?: { ra_shift_seconds?: number; dec_shift_degrees?: number },
+  ) {
+    const params: Record<string, unknown> = { handle, other_path: otherPath };
+    if (options?.ra_shift_seconds !== undefined) params.ra_shift_seconds = options.ra_shift_seconds;
+    if (options?.dec_shift_degrees !== undefined)
+      params.dec_shift_degrees = options.dec_shift_degrees;
+    return this.request<RgbImageMeta>('extend_rgb_image', params);
+  }
+  getRgbImagePixels(handle: number, maxDim = 400) {
+    return this.request<RgbImagePixels>('get_rgb_image_pixels', { handle, max_dim: maxDim });
   }
   loadPalette(path: string) {
-    return this.request('open_palette', { path });
+    return this.request<PaletteResult>('open_palette', { path });
   }
-  savePalette(handle: number, path: string) {
-    return this.request('save_palette', { handle, path });
+  savePalette(path: string, stops: PaletteStop[]) {
+    return this.request<{ path: string; bytes_written: number }>('save_palette', {
+      path,
+      stops,
+    });
   }
   // ─── Scan pipeline (Scan menu → New Scan… → MD1)
   openScan(path: string) {
@@ -432,6 +588,24 @@ export class RpcClient {
       flux,
     });
   }
+  determineScanPeakFit(handle: number, raMin: number, raMax: number, degree: number) {
+    return this.request<{
+      peak_flux: number;
+      peak_ra: number;
+      fit_ra: number[];
+      fit_flux: number[];
+      overview: ScanOverview;
+    }>('determine_scan_peak_fit', { handle, ra_min: raMin, ra_max: raMax, degree });
+  }
+  determineScanPeakGaussian(handle: number, raMin: number, raMax: number) {
+    return this.request<{
+      peak_flux: number;
+      peak_ra: number;
+      fit_ra: number[];
+      fit_flux: number[];
+      overview: ScanOverview;
+    }>('determine_scan_peak_gaussian', { handle, ra_min: raMin, ra_max: raMax });
+  }
   undoScan(handle: number) {
     return this.request<{ undone: boolean; overview: ScanOverview }>('undo_scan', { handle });
   }
@@ -477,6 +651,12 @@ export class RpcClient {
   }
   fluxCalRevertFromScan(handle: number) {
     return this.request<ScanOverview>('flux_cal_revert_from_scan', { handle });
+  }
+  fluxCalApplyToImage(handle: number, slope: number) {
+    return this.request<ImageMeta>('flux_cal_apply_to_image', { handle, slope });
+  }
+  fluxCalRevertFromImage(handle: number) {
+    return this.request<ImageMeta>('flux_cal_revert_from_image', { handle });
   }
 }
 

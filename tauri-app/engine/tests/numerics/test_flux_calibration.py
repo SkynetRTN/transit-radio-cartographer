@@ -83,20 +83,20 @@ def test_fit_error_rms_formula() -> None:
     assert fit_error(table) == pytest.approx(expected)
 
 
-def test_read_scn_peak_pulls_value_from_header(inputs_dir: Path) -> None:
+def test_read_scn_peak_pulls_value_from_header(intermediates_dir: Path) -> None:
     # cas0awpeak.scn carries a "Peak Flux: <X>" header — the value is what the
     # legacy "Add Source" gesture would write into MFlux for this calibrator.
-    name, peak = read_scn_peak(inputs_dir / "cas0awpeak.scn")
+    name, peak = read_scn_peak(intermediates_dir / "cas0awpeak.scn")
     assert isinstance(name, str) and name
     assert peak > 0.0
 
 
-def test_read_scn_peak_empty_header_yields_zero(inputs_dir: Path, tmp_path: Path) -> None:
+def test_read_scn_peak_empty_header_yields_zero(intermediates_dir: Path, tmp_path: Path) -> None:
     from dataclasses import replace
 
     from radio_cartographer.io.scn import read_scn, write_scn
 
-    src = read_scn(inputs_dir / "cas0awpeak.scn")
+    src = read_scn(intermediates_dir / "cas0awpeak.scn")
     cleared = replace(src, peak="", raw_bytes=None)
     out = tmp_path / "nopeak.scn"
     write_scn(cleared, out)

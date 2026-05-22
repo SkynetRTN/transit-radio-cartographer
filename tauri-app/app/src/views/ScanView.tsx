@@ -34,18 +34,34 @@ interface Mode {
 }
 
 export function ScanView() {
-  const { scan, overview, handle, setViewMode, close, refreshOverview, setOverview, markDirty } = useScan();
+  const {
+    scan,
+    overview,
+    handle,
+    setViewMode,
+    close,
+    refreshOverview,
+    setOverview,
+    markDirty,
+    peakFitDegree,
+  } = useScan();
   const [view, setView] = useState<ScanViewPayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hoverPoint, setHoverPoint] = useState<Point | null>(null);
   const [stickyPoint, setStickyPoint] = useState<Point | null>(null);
-  const [hoverY, setHoverY] = useState<number | null>(null);
   const [mode, setMode] = useState<Mode>({ kind: 'idle' });
   const [dragRange, setDragRange] = useState<{ x0: number; x1: number } | null>(null);
   const [dragDecRange, setDragDecRange] = useState<{ y0: number; y1: number } | null>(null);
   const [pendingBaselinePoint, setPendingBaselinePoint] = useState<
     { ra: number; flux: number } | null
+  >(null);
+  // Polynomial curve from the most recent Determine Peak fit. Drawn over the
+  // flux plot so the user can see how the fit lays through their selection;
+  // cleared whenever the view reloads. Engine doesn't persist this — only the
+  // resulting `peak_flux` lives on the workspace.
+  const [pendingPeakFit, setPendingPeakFit] = useState<
+    { ra: number[]; flux: number[] } | null
   >(null);
   const dragOrigin = useRef<number | null>(null);
   const dragDecOrigin = useRef<number | null>(null);
@@ -75,6 +91,7 @@ export function ScanView() {
     setPendingBaselinePoint(null);
     setDragRange(null);
     setDragDecRange(null);
+    setPendingPeakFit(null);
   }, [view]);
 
   const unit: 'volts' | 'gain' | 'jy' = view?.unit ?? 'volts';
@@ -174,29 +191,15 @@ export function ScanView() {
     ];
   }, [view]);
 
-  // Track hover Y while in peak mode so we can draw a horizontal cursor line.
-  // The legacy gesture (`vb/scanform.frm:1796-1820`) paints a blue line at
-  // the cursor's Y on the flux plot.
-  const handleHover = useCallback(
-    (p: Point | null) => {
-      setHoverPoint(p);
-      if (mode.kind === 'peak' && p) setHoverY(p.flux);
-    },
-    [mode.kind],
-  );
+  const handleHover = useCallback((p: Point | null) => {
+    setHoverPoint(p);
+  }, []);
 
   const handleClick = useCallback(
     async (p: Point) => {
-      if (mode.kind === 'peak' && handle !== null) {
-        try {
-          const res = await rpcClient.determineScanPeak(handle, p.flux);
-          setOverview(res.overview);
-          markDirty();
-          setMode({ kind: 'idle' });
-          setHoverY(null);
-        } catch (e) {
-          setError((e as Error).message);
-        }
+      if (mode.kind === 'peak') {
+        // Peak fits are committed by the drag-end handler on the flux plot,
+        // not by clicks on individual data points.
         return;
       }
       if (mode.kind === 'baseline' && handle !== null) {
@@ -239,19 +242,21 @@ export function ScanView() {
   const fluxDragHandlers = useMemo(
     () => ({
       onDragStart: (x: number) => {
-        if (mode.kind !== 'cut') return;
+        if (mode.kind !== 'cut' && mode.kind !== 'peak') return;
         dragOrigin.current = x;
         setDragRange({ x0: x, x1: x });
       },
       onDragUpdate: (x: number) => {
-        if (mode.kind !== 'cut' || dragOrigin.current === null) return;
+        if (mode.kind !== 'cut' && mode.kind !== 'peak') return;
+        if (dragOrigin.current === null) return;
         const origin = dragOrigin.current;
         setDragRange({ x0: Math.min(origin, x), x1: Math.max(origin, x) });
       },
       onDragEnd: async () => {
         const range = dragRange;
+        const activeMode = mode.kind;
         dragOrigin.current = null;
-        if (mode.kind !== 'cut' || !range || handle === null) {
+        if ((activeMode !== 'cut' && activeMode !== 'peak') || !range || handle === null) {
           setDragRange(null);
           return;
         }
@@ -262,15 +267,41 @@ export function ScanView() {
         setDragRange(null);
         setMode({ kind: 'idle' });
         try {
-          await rpcClient.cutScanSegment(handle, range.x0, range.x1);
-          await Promise.all([loadView(), refreshOverview()]);
-          markDirty();
+          if (activeMode === 'cut') {
+            await rpcClient.cutScanSegment(handle, range.x0, range.x1);
+            await Promise.all([loadView(), refreshOverview()]);
+            markDirty();
+          } else {
+            // peakFitDegree === 0 → Gaussian; 2/3/4 → polynomial. See the
+            // encoding comment on `peakFitDegree` in scan-context.tsx.
+            const res =
+              peakFitDegree === 0
+                ? await rpcClient.determineScanPeakGaussian(handle, range.x0, range.x1)
+                : await rpcClient.determineScanPeakFit(
+                    handle,
+                    range.x0,
+                    range.x1,
+                    peakFitDegree,
+                  );
+            setOverview(res.overview);
+            setPendingPeakFit({ ra: res.fit_ra, flux: res.fit_flux });
+            markDirty();
+          }
         } catch (e) {
           setError((e as Error).message);
         }
       },
     }),
-    [mode.kind, dragRange, handle, loadView, refreshOverview, markDirty],
+    [
+      mode.kind,
+      dragRange,
+      handle,
+      loadView,
+      refreshOverview,
+      markDirty,
+      peakFitDegree,
+      setOverview,
+    ],
   );
 
   const decDragHandlers = useMemo(
@@ -314,7 +345,6 @@ export function ScanView() {
     (kind: Mode['kind']) => {
       setMode((m) => (m.kind === kind ? { kind: 'idle' } : { kind }));
       setPendingBaselinePoint(null);
-      setHoverY(null);
     },
     [],
   );
@@ -355,21 +385,20 @@ export function ScanView() {
 
   const readoutPoint = stickyPoint ?? hoverPoint;
 
-  // Peak-mode horizontal line overlay on the flux plot.
-  const peakLineOverlay = mode.kind === 'peak' && hoverY !== null && view?.calibrated
+  // Polynomial-fit curve overlay from the most recent Determine Peak. Drawn
+  // edge-to-edge of the fit's RA grid so the user can see how the polynomial
+  // lays through the selected band. Frontend-only — not persisted.
+  const peakFitOverlay = pendingPeakFit
     ? [
         {
-          points: [
-            { x: view.source.ra[0], y: hoverY },
-            { x: view.source.ra[view.source.ra.length - 1], y: hoverY },
-          ],
+          points: pendingPeakFit.ra.map((ra, i) => ({ x: ra, y: pendingPeakFit.flux[i] })),
           color: '#0080ff',
           width: 2,
         },
       ]
     : [];
 
-  const fluxOverlays = [...peakLineOverlay, ...baselineOverlay] as Array<{
+  const fluxOverlays = [...peakFitOverlay, ...baselineOverlay] as Array<{
     points: { x: number; y: number }[];
     color?: string;
     width?: number;
@@ -380,7 +409,10 @@ export function ScanView() {
     if (mode.kind === 'select-dec') return 'Select Declination: drag on the declination plot…';
     if (mode.kind === 'baseline')
       return pendingBaselinePoint ? 'Baseline Source: click endpoint…' : 'Baseline Source: click first point…';
-    if (mode.kind === 'peak') return 'Determine Peak: click at the peak flux level…';
+    if (mode.kind === 'peak') {
+      const fitLabel = peakFitDegree === 0 ? 'Gaussian' : `polynomial degree ${peakFitDegree}`;
+      return `Determine Peak: drag an RA range over the peak (${fitLabel})…`;
+    }
     return null;
   })();
 
@@ -415,10 +447,11 @@ export function ScanView() {
                           : null
                     }
                     highlightRange={dragRange}
+                    highlightColor={mode.kind === 'peak' ? '#5fb7ff' : undefined}
                     onDragStart={fluxDragHandlers.onDragStart}
                     onDragUpdate={fluxDragHandlers.onDragUpdate}
                     onDragEnd={fluxDragHandlers.onDragEnd}
-                    dragEnabled={mode.kind === 'cut'}
+                    dragEnabled={mode.kind === 'cut' || mode.kind === 'peak'}
                     testId="scan-flux-plot"
                     height={240}
                     showXTicks={false}
@@ -495,9 +528,9 @@ export function ScanView() {
                   <button
                     onClick={() => toggleMode('peak')}
                     className={mode.kind === 'peak' ? 'active' : ''}
-                    title="Click on the flux plot at the peak of your source"
+                    title="Drag an RA range over the peak; a polynomial is fit and its maximum becomes the peak flux"
                   >
-                    {mode.kind === 'peak' ? 'Determine Peak (click…)' : 'Determine Peak'}
+                    {mode.kind === 'peak' ? 'Determine Peak (drag…)' : 'Determine Peak'}
                   </button>
                   <button
                     onClick={() => toggleMode('cut')}
@@ -520,7 +553,8 @@ export function ScanView() {
 
             {calibrated && overview.peak_flux !== null && (
               <div className="readout peak-readout">
-                <strong>Peak Flux:</strong> {overview.peak_flux.toFixed(3)} {unit === 'gain' ? 'GCU' : 'V'}
+                <strong>Peak Flux:</strong> {overview.peak_flux.toFixed(3)}{' '}
+                {unit === 'jy' ? 'Jy' : unit === 'gain' ? 'GCU' : 'V'}
               </div>
             )}
 
@@ -528,7 +562,10 @@ export function ScanView() {
               <div>RA: {readoutPoint ? formatRa(readoutPoint.ra) : '--:--:--'}</div>
               <div>Dec: {readoutPoint ? formatDec(readoutPoint.dec) : '--:--:--'}</div>
               <div>
-                Flux: {readoutPoint ? formatFlux(readoutPoint.flux, unit) : `-- ${unit === 'gain' ? 'GCU' : 'V'}`}
+                Flux:{' '}
+                {readoutPoint
+                  ? formatFlux(readoutPoint.flux, unit)
+                  : `-- ${unit === 'jy' ? 'Jy' : unit === 'gain' ? 'GCU' : 'V'}`}
               </div>
               {stickyPoint && mode.kind === 'idle' && (
                 <div className="readout-pin">📌 pinned (click empty space to release)</div>
