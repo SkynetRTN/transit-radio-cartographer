@@ -1,4 +1,4 @@
-# Radio Cartographer (Karaleah)
+# Radio Cartographer
 
 A Visual Basic 5 desktop application for reducing and visualizing single-dish
 radio-astronomy survey data. Originally written by **Daniel E. Reichart**
