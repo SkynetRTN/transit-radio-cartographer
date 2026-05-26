@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { rpcClient, type SourceSweep } from '../ipc/client';
 import { useSurvey } from '../state/survey-context';
 import { PointScatter, type Point } from '../lib/plots/PointScatter';
@@ -32,8 +32,8 @@ function formatFlux(v: number, unit: 'volts' | 'gain' | 'jy'): string {
 
 // Map of sample index → amount removed (originalFlux[i] - newFlux[i]).
 // Matches legacy VB's `Baseline!()` array (vb/survform.frm:5493): for samples
-// inside a drawn segment, Flux gets replaced with the drawn line and the
-// difference is what we plot in the bottom "Removed" panel.
+// inside a drawn "Remove RFI" segment, Flux gets replaced with the drawn line
+// and the difference is what we plot in the bottom "Removed" panel.
 type RemovedMap = Record<number, number>;
 
 function applyRemoved(flux: number[], removed: RemovedMap): number[] {
@@ -70,11 +70,21 @@ export function SurveyView() {
   const [pendingBaselinePoint, setPendingBaselinePoint] = useState<
     { dec: number; flux: number } | null
   >(null);
-  // Per-sweep, per-sample "removed" amount from Baseline Segment edits.
+  // Per-sweep, per-sample "removed" amount from Remove RFI edits.
   // Lives only until Accept Sweep, at which point it's committed to the
   // backend workspace (and cleared here so the next view of this sweep
   // reads the new baseline flux from disk).
   const [removedBySweep, setRemovedBySweep] = useState<Record<number, RemovedMap>>({});
+  // Per-sweep stack of prior `removedBySweep[i]` snapshots. Every Remove RFI
+  // removal AND every drag-region restore pushes one entry, so a single Undo
+  // reverts whichever happened last on this sweep. Cleared on workspace change
+  // and on Accept Sweep (the prior states no longer make sense once the engine
+  // owns the flux array).
+  const [historyBySweep, setHistoryBySweep] = useState<Record<number, RemovedMap[]>>({});
+  const [restoreDragRange, setRestoreDragRange] = useState<
+    { x0: number; x1: number } | null
+  >(null);
+  const restoreDragOrigin = useRef<number | null>(null);
   const [committing, setCommitting] = useState(false);
   const [sweepInput, setSweepInput] = useState<string>(() => String(sweepIndex + 1));
 
@@ -85,12 +95,13 @@ export function SurveyView() {
     setStickyPoint(null);
     setBaselineMode(false);
     setPendingBaselinePoint(null);
-  }, [workspaceHandle, workspace?.calibrated, sweepIndex]);
+  }, [workspaceHandle, workspace?.calibrated, workspace?.flux_calibrated, sweepIndex]);
 
   // When the workspace itself changes (different .md2 / .srv opened), drop
   // any pending per-sweep baseline edits from the previous survey.
   useEffect(() => {
     setRemovedBySweep({});
+    setHistoryBySweep({});
   }, [workspaceHandle]);
 
   useEffect(() => {
@@ -122,7 +133,10 @@ export function SurveyView() {
     return () => {
       cancelled = true;
     };
-  }, [workspaceHandle, sweepIndex]);
+    // `flux_calibrated` is a dep so the sweep is re-fetched in Jy as soon as a
+    // `.cal` is loaded — otherwise the cached GCU samples stay on screen even
+    // though the engine workspace has been rescaled.
+  }, [workspaceHandle, sweepIndex, workspace?.flux_calibrated]);
 
   const removed = useMemo<RemovedMap>(
     () => removedBySweep[sweepIndex] ?? {},
@@ -191,6 +205,22 @@ export function SurveyView() {
     setHoverPoint(p);
   }, []);
 
+  // Replace this sweep's RemovedMap with `next` and remember the previous
+  // value on the undo stack so a subsequent Undo can revert this one mutation
+  // (either a Remove RFI removal or a drag-region restore — both go through
+  // here).
+  const commitRemoved = useCallback(
+    (next: RemovedMap) => {
+      const prevMap = removedBySweep[sweepIndex] ?? {};
+      setHistoryBySweep((h) => {
+        const stack = h[sweepIndex] ?? [];
+        return { ...h, [sweepIndex]: [...stack, prevMap] };
+      });
+      setRemovedBySweep((prev) => ({ ...prev, [sweepIndex]: next }));
+    },
+    [removedBySweep, sweepIndex],
+  );
+
   const handleClick = useCallback(
     (p: Point) => {
       if (baselineMode) {
@@ -205,39 +235,67 @@ export function SurveyView() {
           const lo = Math.min(dec0, dec1);
           const hi = Math.max(dec0, dec1);
           const slope = dec1 === dec0 ? 0 : (flux1 - flux0) / (dec1 - dec0);
-          setRemovedBySweep((prev) => {
-            const next: RemovedMap = { ...(prev[sweepIndex] ?? {}) };
-            for (let i = 0; i < sweep.dec.length; i++) {
-              const d = sweep.dec[i];
-              if (d < lo || d > hi) continue;
-              const lineFlux = flux0 + slope * (d - dec0);
-              next[i] = sweep.flux[i] - lineFlux;
-            }
-            return { ...prev, [sweepIndex]: next };
-          });
+          const next: RemovedMap = { ...(removedBySweep[sweepIndex] ?? {}) };
+          for (let i = 0; i < sweep.dec.length; i++) {
+            const d = sweep.dec[i];
+            if (d < lo || d > hi) continue;
+            const lineFlux = flux0 + slope * (d - dec0);
+            next[i] = sweep.flux[i] - lineFlux;
+          }
+          commitRemoved(next);
           setPendingBaselinePoint(null);
         }
         return;
       }
       setStickyPoint(p);
     },
-    [baselineMode, pendingBaselinePoint, sweepIndex, sweep],
+    [baselineMode, pendingBaselinePoint, sweepIndex, sweep, removedBySweep, commitRemoved],
   );
 
-  const handleRestoreClick = useCallback(
-    (p: Point) => {
-      if (p.sampleIndex === undefined) return;
-      const idx = p.sampleIndex;
-      setRemovedBySweep((prev) => {
-        const current = prev[sweepIndex];
-        if (!current || !(idx in current)) return prev;
-        const next: RemovedMap = { ...current };
-        delete next[idx];
-        return { ...prev, [sweepIndex]: next };
-      });
-    },
-    [sweepIndex],
-  );
+  // Drag a region across the Removed plot to restore every removed sample
+  // whose declination falls inside it. Mirrors the "Select Declination" UX
+  // from the calibration views — see BUG-004.
+  const handleRestoreDragStart = useCallback((x: number) => {
+    restoreDragOrigin.current = x;
+    setRestoreDragRange({ x0: x, x1: x });
+  }, []);
+
+  const handleRestoreDragUpdate = useCallback((x: number) => {
+    if (restoreDragOrigin.current === null) return;
+    const origin = restoreDragOrigin.current;
+    setRestoreDragRange({ x0: Math.min(origin, x), x1: Math.max(origin, x) });
+  }, []);
+
+  const handleRestoreDragEnd = useCallback(() => {
+    const range = restoreDragRange;
+    restoreDragOrigin.current = null;
+    setRestoreDragRange(null);
+    if (!range || range.x0 === range.x1 || !sweep) return;
+    const current = removedBySweep[sweepIndex];
+    if (!current) return;
+    const next: RemovedMap = { ...current };
+    let changed = false;
+    for (const key of Object.keys(current)) {
+      const i = Number(key);
+      const d = sweep.dec[i];
+      if (d >= range.x0 && d <= range.x1) {
+        delete next[i];
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    commitRemoved(next);
+  }, [restoreDragRange, sweep, sweepIndex, removedBySweep, commitRemoved]);
+
+  // Pop the most recent removal/restore on this sweep off the history stack.
+  // Disabled when the stack is empty (Undo button reflects this).
+  const handleUndo = useCallback(() => {
+    const stack = historyBySweep[sweepIndex] ?? [];
+    if (stack.length === 0) return;
+    const prevMap = stack[stack.length - 1];
+    setRemovedBySweep((r) => ({ ...r, [sweepIndex]: prevMap }));
+    setHistoryBySweep((h) => ({ ...h, [sweepIndex]: stack.slice(0, -1) }));
+  }, [historyBySweep, sweepIndex]);
 
   const handleEmptyClick = useCallback(() => {
     if (baselineMode) {
@@ -264,6 +322,13 @@ export function SurveyView() {
       try {
         await rpcClient.setSourceSweepFlux(workspaceHandle, sweepIndex, newFlux);
         setRemovedBySweep((prev) => {
+          const next = { ...prev };
+          delete next[sweepIndex];
+          return next;
+        });
+        // The pre-commit history snapshots reference a flux array the engine
+        // no longer owns, so they can't roll back anything meaningful.
+        setHistoryBySweep((prev) => {
           const next = { ...prev };
           delete next[sweepIndex];
           return next;
@@ -303,9 +368,10 @@ export function SurveyView() {
   const allAccepted = acceptedSweeps.size >= sweepCount && sweepCount > 0;
   const baselineHint = baselineMode
     ? pendingBaselinePoint
-      ? 'Baseline: click endpoint…'
-      : 'Baseline: click first point…'
+      ? 'Remove RFI: click endpoint…'
+      : 'Remove RFI: click first point…'
     : null;
+  const canUndo = (historyBySweep[sweepIndex]?.length ?? 0) > 0;
 
   return (
     <div className="survey-view workspace">
@@ -355,13 +421,18 @@ export function SurveyView() {
                   series={bottomSeries}
                   xAxisLabel=""
                   yAxisLabel=""
-                  onPointClick={handleRestoreClick}
+                  highlightRange={restoreDragRange}
+                  highlightColor="#3060c0"
+                  onDragStart={handleRestoreDragStart}
+                  onDragUpdate={handleRestoreDragUpdate}
+                  onDragEnd={handleRestoreDragEnd}
+                  dragEnabled={hasPendingRemoved}
                   testId="baseline-plot"
                   height={200}
                 />
                 {!hasPendingRemoved && (
                   <div className="plot-status">
-                    Draw a baseline segment to see removed points here. Click a point to restore it.
+                    Removed samples appear here. Drag a declination range to restore them.
                   </div>
                 )}
               </div>
@@ -382,8 +453,8 @@ export function SurveyView() {
                     ? 'Calibrate the survey first'
                     : hasPendingRemoved
                       ? isAccepted
-                        ? 'Commit pending baseline edits to this accepted sweep'
-                        : 'Commit baseline edits and accept this sweep'
+                        ? 'Commit pending RFI edits to this accepted sweep'
+                        : 'Commit RFI edits and accept this sweep'
                       : isAccepted
                         ? 'This sweep is already accepted'
                         : 'Accept this sweep into the survey'
@@ -392,7 +463,7 @@ export function SurveyView() {
                 {committing
                   ? 'Saving…'
                   : isAccepted && hasPendingRemoved
-                    ? 'Apply Baselines'
+                    ? 'Apply Edits'
                     : 'Accept Sweep'}
               </button>
               <button
@@ -407,9 +478,16 @@ export function SurveyView() {
                 onClick={toggleBaselineMode}
                 disabled={!workspace.calibrated}
                 className={baselineMode ? 'active' : ''}
-                title="Click two points on the flux vs declination plot to replace the segment between them with a straight line. Click a point in the Removed plot to restore it."
+                title="Click two points on the flux vs declination plot to replace the segment between them with a straight line. Drag a declination range on the Removed plot to restore those samples."
               >
-                {baselineMode ? 'Baseline Segment (click…)' : 'Baseline Segment'}
+                {baselineMode ? 'Remove RFI (click…)' : 'Remove RFI'}
+              </button>
+              <button
+                onClick={handleUndo}
+                disabled={!canUndo}
+                title="Undo the most recent Remove RFI removal or restore on this sweep"
+              >
+                Undo
               </button>
               <div className="button-gap" />
               <button

@@ -182,7 +182,7 @@ export function RgbImagePlot({ image, meta, title = '', testId }: Props) {
     <div
       data-testid={testId ?? 'rgb-image-plot'}
       ref={ref}
-      style={{ width: '100%', height: 420 }}
+      style={{ width: '100%', height: '100%', minHeight: 420 }}
     />
   );
 }

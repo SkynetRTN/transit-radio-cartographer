@@ -1,0 +1,22 @@
+# Drop tutorial screenshots here.
+#
+# Suggested filenames (referenced in the section TSX files):
+#   scan-load.png, scan-calibrate-brackets.png, scan-cut-segment.png,
+#   scan-select-dec.png, scan-baseline.png, scan-determine-peak.png
+#   survey-load.png, survey-calibrate-brackets.png, survey-remove-rfi.png,
+#   survey-removed-restore.png, survey-accept-sweep.png
+#   preimage-smooth.png, preimage-baseline.png, preimage-align.png,
+#   preimage-makeimage.png
+#   image-palette.png, image-max-flux.png, image-save.png
+#   fluxcal-add-source.png, fluxcal-fit.png, fluxcal-save.png
+#
+# To embed a screenshot in a help section:
+#   1. Save the PNG here (with one of the names above, or any name you like).
+#   2. In the section .tsx file (e.g. sections/ScanSection.tsx), add at the
+#      top:   import shot from '../images/scan-load.png?url';
+#   3. Replace the `<p className="help-figure-placeholder">[Screenshot: …]</p>`
+#      with:
+#        <figure className="help-figure">
+#          <img src={shot} alt="..." />
+#          <figcaption>...</figcaption>
+#        </figure>

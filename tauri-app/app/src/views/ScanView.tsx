@@ -82,7 +82,12 @@ export function ScanView() {
 
   useEffect(() => {
     void loadView();
-  }, [loadView]);
+    // Re-fetch when flux calibration flips so the plotted data is redrawn in
+    // Jy as soon as a `.cal` is loaded. Without this the engine workspace is
+    // converted but the cached `view` state stays in GCU, and any subsequent
+    // Determine Peak fit (run on the engine in Jy) overlays a curve that
+    // doesn't sit on the visible points.
+  }, [loadView, overview?.flux_calibrated]);
 
   // Reset transient interaction state whenever the underlying view changes
   // (e.g. after a Cut / Baseline Source / Determine Peak completes).
@@ -217,7 +222,6 @@ export function ScanView() {
           );
           await Promise.all([loadView(), refreshOverview()]);
           markDirty();
-          setMode({ kind: 'idle' });
           setPendingBaselinePoint(null);
         } catch (e) {
           setError((e as Error).message);
@@ -265,7 +269,6 @@ export function ScanView() {
           return;
         }
         setDragRange(null);
-        setMode({ kind: 'idle' });
         try {
           if (activeMode === 'cut') {
             await rpcClient.cutScanSegment(handle, range.x0, range.x1);
@@ -328,7 +331,6 @@ export function ScanView() {
           return;
         }
         setDragDecRange(null);
-        setMode({ kind: 'idle' });
         try {
           await rpcClient.selectScanDeclination(handle, range.y0, range.y1);
           await Promise.all([loadView(), refreshOverview()]);
@@ -488,6 +490,7 @@ export function ScanView() {
                     dragAxis="y"
                     testId="scan-dec-plot"
                     height={200}
+                    xTickFormatter={formatRa}
                   />
                 )}
               </div>

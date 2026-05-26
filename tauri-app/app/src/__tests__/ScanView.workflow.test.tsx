@@ -113,7 +113,50 @@ const overviewRaw: ScanOverview = {
 
 const overviewCalibrated: ScanOverview = { ...overviewRaw, calibrated: true };
 
-vi.mock('../lib/plots/PointScatter', () => ({ PointScatter: () => null }));
+// Headless PointScatter mock that exposes the drag / click callbacks as
+// hidden buttons keyed off the plot's `testId`, so tests can drive a full
+// gesture (Cut Segment drag, Baseline Source two-click, etc.) without a
+// real Plotly render.
+vi.mock('../lib/plots/PointScatter', () => ({
+  PointScatter: (props: {
+    testId?: string;
+    onPointClick?: (p: { x: number; y: number; ra: number; dec: number; flux: number }) => void;
+    onEmptyClick?: () => void;
+    onDragStart?: (v: number) => void;
+    onDragUpdate?: (v: number) => void;
+    onDragEnd?: () => void;
+  }) => {
+    const id = props.testId ?? 'plot';
+    return (
+      <div data-testid={id}>
+        <button
+          data-testid={`${id}-point-a`}
+          onClick={() => props.onPointClick?.({ x: 5, y: 3, ra: 5, dec: 10, flux: 3 })}
+        />
+        <button
+          data-testid={`${id}-point-b`}
+          onClick={() => props.onPointClick?.({ x: 7, y: 5, ra: 7, dec: 12, flux: 5 })}
+        />
+        <button
+          data-testid={`${id}-empty`}
+          onClick={() => props.onEmptyClick?.()}
+        />
+        <button
+          data-testid={`${id}-drag-start`}
+          onClick={() => props.onDragStart?.(5)}
+        />
+        <button
+          data-testid={`${id}-drag-update`}
+          onClick={() => props.onDragUpdate?.(7)}
+        />
+        <button
+          data-testid={`${id}-drag-end`}
+          onClick={() => props.onDragEnd?.()}
+        />
+      </div>
+    );
+  },
+}));
 vi.mock('../lib/plots/ImagePlot', () => ({ ImagePlot: () => null }));
 
 function HydrateScan({ meta }: { meta: ScanMeta }) {
@@ -294,4 +337,167 @@ test('Calibrate Scan view applies calibration and routes back to ScanView', asyn
     expect(rpcClient.applyScanCalibration as unknown as ReturnType<typeof vi.fn>).toHaveBeenCalledWith(7),
   );
   await waitFor(() => expect(mode).toBe('scan'));
+});
+
+// FEAT-002 sticky-tool tests. Each renders a calibrated ScanView, exercises a
+// full gesture on the mocked PointScatter (via the drag/click helper buttons
+// it exposes), and asserts the tool button remains in its armed state.
+const calibratedView = {
+  name: 'CAS0A',
+  calibrated: true,
+  unit: 'gain',
+  source: { ra: [5, 6, 7], dec: [10, 11, 12], flux: [3, 4, 5], mask: [true, true, true] },
+  peak_flux: null,
+};
+
+function setupCalibratedScanView() {
+  // Two queued resolutions: initial load + reload after the action completes.
+  const getView = rpcClient.getScanView as unknown as ReturnType<typeof vi.fn>;
+  getView.mockResolvedValueOnce(calibratedView).mockResolvedValueOnce(calibratedView);
+  const getOverview = rpcClient.getScanOverview as unknown as ReturnType<typeof vi.fn>;
+  getOverview.mockResolvedValueOnce(overviewCalibrated);
+  return { ...baseMeta, overview: overviewCalibrated } as ScanMeta;
+}
+
+test('Cut Segment stays sticky after a cut (FEAT-002)', async () => {
+  const meta = setupCalibratedScanView();
+  await act(async () => {
+    render(
+      <ScanProvider>
+        <HydrateScan meta={meta} />
+        <ScanView />
+      </ScanProvider>,
+    );
+  });
+  await waitFor(() => expect(screen.getByText('Cut Segment')).toBeInTheDocument());
+  fireEvent.click(screen.getByText('Cut Segment'));
+  fireEvent.click(screen.getByTestId('scan-flux-plot-drag-start'));
+  fireEvent.click(screen.getByTestId('scan-flux-plot-drag-update'));
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('scan-flux-plot-drag-end'));
+  });
+  await waitFor(() =>
+    expect(rpcClient.cutScanSegment as unknown as ReturnType<typeof vi.fn>).toHaveBeenCalledWith(7, 5, 7),
+  );
+  expect(screen.getByText(/Cut Segment \(drag/)).toBeInTheDocument();
+});
+
+test('Select Declination stays sticky after a select (FEAT-002)', async () => {
+  const meta = setupCalibratedScanView();
+  await act(async () => {
+    render(
+      <ScanProvider>
+        <HydrateScan meta={meta} />
+        <ScanView />
+      </ScanProvider>,
+    );
+  });
+  await waitFor(() => expect(screen.getByText('Select Declination')).toBeInTheDocument());
+  fireEvent.click(screen.getByText('Select Declination'));
+  fireEvent.click(screen.getByTestId('scan-dec-plot-drag-start'));
+  fireEvent.click(screen.getByTestId('scan-dec-plot-drag-update'));
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('scan-dec-plot-drag-end'));
+  });
+  await waitFor(() =>
+    expect(
+      rpcClient.selectScanDeclination as unknown as ReturnType<typeof vi.fn>,
+    ).toHaveBeenCalledWith(7, 5, 7),
+  );
+  expect(screen.getByText(/Select Declination \(drag/)).toBeInTheDocument();
+});
+
+test('Baseline Source stays sticky after a two-click baseline (FEAT-002)', async () => {
+  const meta = setupCalibratedScanView();
+  await act(async () => {
+    render(
+      <ScanProvider>
+        <HydrateScan meta={meta} />
+        <ScanView />
+      </ScanProvider>,
+    );
+  });
+  await waitFor(() => expect(screen.getByText('Baseline Source')).toBeInTheDocument());
+  fireEvent.click(screen.getByText('Baseline Source'));
+  // First click sets the pending endpoint; second click triggers the RPC.
+  fireEvent.click(screen.getByTestId('scan-flux-plot-point-a'));
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('scan-flux-plot-point-b'));
+  });
+  await waitFor(() =>
+    expect(
+      rpcClient.baselineScanSource as unknown as ReturnType<typeof vi.fn>,
+    ).toHaveBeenCalledWith(7, 5, 3, 7, 5),
+  );
+  // Mode is still 'baseline' with no pending point → the no-pending click hint.
+  expect(screen.getByText(/Baseline Source \(click/)).toBeInTheDocument();
+});
+
+test('Determine Peak stays sticky after a peak fit (FEAT-002)', async () => {
+  const meta = setupCalibratedScanView();
+  await act(async () => {
+    render(
+      <ScanProvider>
+        <HydrateScan meta={meta} />
+        <ScanView />
+      </ScanProvider>,
+    );
+  });
+  await waitFor(() => expect(screen.getByText('Determine Peak')).toBeInTheDocument());
+  fireEvent.click(screen.getByText('Determine Peak'));
+  fireEvent.click(screen.getByTestId('scan-flux-plot-drag-start'));
+  fireEvent.click(screen.getByTestId('scan-flux-plot-drag-update'));
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('scan-flux-plot-drag-end'));
+  });
+  // peakFitDegree defaults to 0 → Gaussian fit RPC.
+  await waitFor(() =>
+    expect(
+      rpcClient.determineScanPeakGaussian as unknown as ReturnType<typeof vi.fn>,
+    ).toHaveBeenCalledWith(7, 5, 7),
+  );
+  expect(screen.getByText(/Determine Peak \(drag/)).toBeInTheDocument();
+});
+
+test('Switching tools deselects the previous one (FEAT-002)', async () => {
+  const meta = setupCalibratedScanView();
+  await act(async () => {
+    render(
+      <ScanProvider>
+        <HydrateScan meta={meta} />
+        <ScanView />
+      </ScanProvider>,
+    );
+  });
+  await waitFor(() => expect(screen.getByText('Cut Segment')).toBeInTheDocument());
+  fireEvent.click(screen.getByText('Cut Segment'));
+  expect(screen.getByText(/Cut Segment \(drag/)).toBeInTheDocument();
+  fireEvent.click(screen.getByText('Select Declination'));
+  // Cut Segment label snaps back to its idle form, Select Declination is now armed.
+  expect(screen.getByText('Cut Segment')).toBeInTheDocument();
+  expect(screen.getByText(/Select Declination \(drag/)).toBeInTheDocument();
+});
+
+test('CalibrateScanView Cut Segment stays sticky after a cut (FEAT-002)', async () => {
+  await act(async () => {
+    render(
+      <ScanProvider>
+        <HydrateScan meta={baseMeta} />
+        <CalibrateScanView />
+      </ScanProvider>,
+    );
+  });
+  await waitFor(() => expect(screen.getByText('Cut Segment')).toBeInTheDocument());
+  fireEvent.click(screen.getByText('Cut Segment'));
+  fireEvent.click(screen.getByTestId('scan-cal-flux-initial-drag-start'));
+  fireEvent.click(screen.getByTestId('scan-cal-flux-initial-drag-update'));
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('scan-cal-flux-initial-drag-end'));
+  });
+  await waitFor(() =>
+    expect(
+      rpcClient.cutScanCalibrationSegment as unknown as ReturnType<typeof vi.fn>,
+    ).toHaveBeenCalledWith(7, 5, 7),
+  );
+  expect(screen.getByText(/Cut Segment \(drag/)).toBeInTheDocument();
 });

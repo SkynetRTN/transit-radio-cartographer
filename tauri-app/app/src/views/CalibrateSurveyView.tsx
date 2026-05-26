@@ -191,7 +191,6 @@ export function CalibrateSurveyView() {
         return;
       }
       setDragRange(null);
-      setMode('idle');
       try {
         await rpcClient.cutCalibrationSegment(workspaceHandle, range.x0, range.x1);
         await Promise.all([loadView(), refreshWorkspace()]);
@@ -235,7 +234,6 @@ export function CalibrateSurveyView() {
         return;
       }
       setDragDecRange(null);
-      setMode('idle');
       try {
         await rpcClient.selectCalibrationDeclination(
           workspaceHandle,

@@ -176,7 +176,6 @@ export function CalibrateScanView() {
         return;
       }
       setDragRange(null);
-      setMode('idle');
       try {
         await rpcClient.cutScanCalibrationSegment(handle, range.x0, range.x1);
         await Promise.all([loadView(), refreshOverview()]);
@@ -212,7 +211,6 @@ export function CalibrateScanView() {
         return;
       }
       setDragDecRange(null);
-      setMode('idle');
       try {
         await rpcClient.selectScanCalibrationDeclination(handle, range.y0, range.y1, bracket);
         await Promise.all([loadView(), refreshOverview()]);

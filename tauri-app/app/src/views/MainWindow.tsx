@@ -13,6 +13,7 @@ import { NumericInputDialog, type NumericPrompt } from './dialogs/NumericInputDi
 import { YesNoCancelDialog } from './dialogs/YesNoCancelDialog';
 import { ColorPickDialog } from './dialogs/ColorPickDialog';
 import { ConfirmDialog } from './dialogs/ConfirmDialog';
+import { HelpDialog } from './help/HelpDialog';
 import { useSurvey } from '../state/survey-context';
 import { useScan } from '../state/scan-context';
 import { useFluxCal } from '../state/flux-cal-context';
@@ -24,6 +25,7 @@ type MenuKey = 'file' | 'image' | 'survey' | 'scan' | 'calibration' | null;
 export function MainWindow() {
   const [auxView, setAuxView] = useState<AuxView>(null);
   const [openMenu, setOpenMenu] = useState<MenuKey>(null);
+  const [helpOpen, setHelpOpen] = useState(false);
   const menuRef = useRef<HTMLElement | null>(null);
   const {
     survey,
@@ -1084,6 +1086,15 @@ export function MainWindow() {
               >
                 About OG Radio Cartographer
               </button>
+              <button
+                role="menuitem"
+                onClick={() => {
+                  setOpenMenu(null);
+                  setHelpOpen(true);
+                }}
+              >
+                Help / Tutorial…
+              </button>
               <div className="menu-sep" />
               <button
                 role="menuitem"
@@ -1509,6 +1520,7 @@ export function MainWindow() {
           {warning}
         </div>
       )}
+      {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
 
       <footer style={{ display: 'none' }}>
         {String(hasSurvey)}

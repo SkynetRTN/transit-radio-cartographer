@@ -37,7 +37,56 @@ vi.mock('../ipc/client', () => ({
 }));
 vi.mock('../lib/plots/SweepPlot', () => ({ SweepPlot: () => null }));
 vi.mock('../lib/plots/ImagePlot', () => ({ ImagePlot: () => null }));
-vi.mock('../lib/plots/PointScatter', () => ({ PointScatter: () => null }));
+// Headless PointScatter mock: exposes the per-panel point-click and drag
+// callbacks as hidden buttons keyed off `testId`. Lets the workflow tests
+// drive a Remove RFI baseline draw on the top panel and a restore-drag on
+// the bottom panel without a real Plotly render.
+vi.mock('../lib/plots/PointScatter', () => ({
+  PointScatter: (props: {
+    testId?: string;
+    onPointClick?: (p: {
+      x: number;
+      y: number;
+      ra: number;
+      dec: number;
+      flux: number;
+      sampleIndex?: number;
+    }) => void;
+    onDragStart?: (v: number) => void;
+    onDragUpdate?: (v: number) => void;
+    onDragEnd?: () => void;
+  }) => {
+    const id = props.testId ?? 'plot';
+    return (
+      <div data-testid={id}>
+        <button
+          data-testid={`${id}-click-first`}
+          onClick={() =>
+            props.onPointClick?.({ x: 10, y: 0.1, ra: 1, dec: 10, flux: 0.1, sampleIndex: 0 })
+          }
+        />
+        <button
+          data-testid={`${id}-click-second`}
+          onClick={() =>
+            props.onPointClick?.({ x: 12, y: 0.5, ra: 3, dec: 12, flux: 0.5, sampleIndex: 2 })
+          }
+        />
+        <button
+          data-testid={`${id}-drag-start`}
+          onClick={() => props.onDragStart?.(9)}
+        />
+        <button
+          data-testid={`${id}-drag-update`}
+          onClick={() => props.onDragUpdate?.(13)}
+        />
+        <button
+          data-testid={`${id}-drag-end`}
+          onClick={() => props.onDragEnd?.()}
+        />
+      </div>
+    );
+  },
+}));
 
 const workspaceOverview: WorkspaceOverview = {
   name: 'AND0A',
@@ -149,7 +198,7 @@ test('Accept Sweep is enabled after calibration and disabled per-sweep once acce
   );
 });
 
-test('Baseline Segment toggles the per-sweep baseline draw mode', async () => {
+test('Remove RFI toggles the per-sweep RFI draw mode (FEAT-004)', async () => {
   const calibrated: WorkspaceOverview = { ...workspaceOverview, calibrated: true };
   await act(async () => {
     render(
@@ -166,9 +215,124 @@ test('Baseline Segment toggles the per-sweep baseline draw mode', async () => {
       </SurveyProvider>,
     );
   });
-  await waitFor(() => expect(screen.getByText('Baseline Segment')).toBeInTheDocument());
-  fireEvent.click(screen.getByText('Baseline Segment'));
-  expect(screen.getByText(/Baseline Segment \(click/)).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByText('Remove RFI')).toBeInTheDocument());
+  fireEvent.click(screen.getByText('Remove RFI'));
+  expect(screen.getByText(/Remove RFI \(click/)).toBeInTheDocument();
+});
+
+test('Drag-region on Removed plot restores points while Remove RFI stays selected (BUG-004)', async () => {
+  const calibrated: WorkspaceOverview = { ...workspaceOverview, calibrated: true };
+  await act(async () => {
+    render(
+      <SurveyProvider>
+        <HydrateSurvey
+          meta={{
+            handle: 1,
+            metadata: { sweep_count: 9, path: '/tmp/and0a.md2' },
+            workspace_handle: 2,
+            workspace: calibrated,
+          }}
+        />
+        <SurveyView />
+      </SurveyProvider>,
+    );
+  });
+
+  await waitFor(() => expect(screen.getByText('Remove RFI')).toBeInTheDocument());
+  fireEvent.click(screen.getByText('Remove RFI'));
+
+  // Two clicks on the top sweep plot mark a baseline segment, which moves
+  // every sample in the dec window [10, 12] into the Removed map.
+  fireEvent.click(screen.getByTestId('survey-plot-click-first'));
+  fireEvent.click(screen.getByTestId('survey-plot-click-second'));
+
+  // Placeholder disappears once points land on the bottom panel.
+  await waitFor(() =>
+    expect(
+      screen.queryByText(/Removed samples appear here/),
+    ).not.toBeInTheDocument(),
+  );
+
+  // Drag a 9..13 region across the Removed panel — covers every removed sample.
+  fireEvent.click(screen.getByTestId('baseline-plot-drag-start'));
+  fireEvent.click(screen.getByTestId('baseline-plot-drag-update'));
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('baseline-plot-drag-end'));
+  });
+
+  // Placeholder is back → every removed sample was restored.
+  await waitFor(() =>
+    expect(
+      screen.getByText(/Removed samples appear here/),
+    ).toBeInTheDocument(),
+  );
+  // Tool stays armed the whole time.
+  expect(screen.getByText(/Remove RFI \(click/)).toBeInTheDocument();
+});
+
+test('Undo button reverts the last Remove RFI removal or restore', async () => {
+  const calibrated: WorkspaceOverview = { ...workspaceOverview, calibrated: true };
+  await act(async () => {
+    render(
+      <SurveyProvider>
+        <HydrateSurvey
+          meta={{
+            handle: 1,
+            metadata: { sweep_count: 9, path: '/tmp/and0a.md2' },
+            workspace_handle: 2,
+            workspace: calibrated,
+          }}
+        />
+        <SurveyView />
+      </SurveyProvider>,
+    );
+  });
+
+  await waitFor(() => expect(screen.getByText('Remove RFI')).toBeInTheDocument());
+  // Undo starts disabled — no operations on the stack yet.
+  expect(screen.getByText('Undo')).toBeDisabled();
+
+  fireEvent.click(screen.getByText('Remove RFI'));
+
+  // Removal: two clicks on the top plot drop samples into the Removed map.
+  fireEvent.click(screen.getByTestId('survey-plot-click-first'));
+  fireEvent.click(screen.getByTestId('survey-plot-click-second'));
+  await waitFor(() =>
+    expect(
+      screen.queryByText(/Removed samples appear here/),
+    ).not.toBeInTheDocument(),
+  );
+  expect(screen.getByText('Undo')).not.toBeDisabled();
+
+  // Drag-region restore wipes them back out.
+  fireEvent.click(screen.getByTestId('baseline-plot-drag-start'));
+  fireEvent.click(screen.getByTestId('baseline-plot-drag-update'));
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('baseline-plot-drag-end'));
+  });
+  await waitFor(() =>
+    expect(
+      screen.getByText(/Removed samples appear here/),
+    ).toBeInTheDocument(),
+  );
+
+  // Undo #1 → reverses the restore. Removed samples reappear on the bottom plot.
+  fireEvent.click(screen.getByText('Undo'));
+  await waitFor(() =>
+    expect(
+      screen.queryByText(/Removed samples appear here/),
+    ).not.toBeInTheDocument(),
+  );
+
+  // Undo #2 → reverses the removal. Bottom plot empties again and Undo
+  // disables itself (stack drained).
+  fireEvent.click(screen.getByText('Undo'));
+  await waitFor(() =>
+    expect(
+      screen.getByText(/Removed samples appear here/),
+    ).toBeInTheDocument(),
+  );
+  expect(screen.getByText('Undo')).toBeDisabled();
 });
 
 test('Prev/Next sweep nav advances the source sweep index', async () => {

@@ -9,7 +9,26 @@ vi.mock('../ipc/client', () => ({
     openSurvey: vi.fn(),
     closeHandle: vi.fn().mockResolvedValue({ closed: 1 }),
     getSweepInline: vi.fn(),
-    getWorkspaceOverview: vi.fn(),
+    // refreshWorkspace() calls this after every mutation; if it resolved to
+    // undefined the survey context would null out the workspace and the view
+    // would re-render to the "No survey workspace" empty state mid-test.
+    getWorkspaceOverview: vi.fn().mockResolvedValue({
+      name: 'AND0A',
+      path: '/tmp/and0a.md2',
+      source_count: 5,
+      initial_cal_samples: 120,
+      terminal_cal_samples: 120,
+      initial_kept: 120,
+      terminal_kept: 120,
+      cal1: 0.34,
+      cal2: 0.36,
+      calibrated: false,
+      initial_enabled: true,
+      terminal_enabled: true,
+      can_undo: true,
+      flux_calibrated: false,
+      flux_slope: null,
+    }),
     getSourceSweep: vi.fn(),
     getCalibrationView: vi.fn().mockResolvedValue({
       name: 'AND0A',
@@ -49,7 +68,35 @@ vi.mock('../ipc/client', () => ({
     getImagePixels: vi.fn(),
   },
 }));
-vi.mock('../lib/plots/PointScatter', () => ({ PointScatter: () => null }));
+// Headless PointScatter mock that exposes the drag callbacks as buttons keyed
+// off `testId`, so tests can drive a full Cut Segment / Select Declination
+// gesture without a real Plotly render.
+vi.mock('../lib/plots/PointScatter', () => ({
+  PointScatter: (props: {
+    testId?: string;
+    onDragStart?: (v: number) => void;
+    onDragUpdate?: (v: number) => void;
+    onDragEnd?: () => void;
+  }) => {
+    const id = props.testId ?? 'plot';
+    return (
+      <div data-testid={id}>
+        <button
+          data-testid={`${id}-drag-start`}
+          onClick={() => props.onDragStart?.(5)}
+        />
+        <button
+          data-testid={`${id}-drag-update`}
+          onClick={() => props.onDragUpdate?.(7)}
+        />
+        <button
+          data-testid={`${id}-drag-end`}
+          onClick={() => props.onDragEnd?.()}
+        />
+      </div>
+    );
+  },
+}));
 vi.mock('../lib/plots/SweepPlot', () => ({ SweepPlot: () => null }));
 vi.mock('../lib/plots/ImagePlot', () => ({ ImagePlot: () => null }));
 
@@ -80,7 +127,7 @@ function HydrateSurvey({ meta }: { meta: SurveyMeta }) {
   return null;
 }
 
-test('Cut Segment toggle enables drag-cut mode then exits after a cut', async () => {
+test('Cut Segment stays sticky after a cut (FEAT-002)', async () => {
   await act(async () => {
     render(
       <SurveyProvider>
@@ -97,10 +144,21 @@ test('Cut Segment toggle enables drag-cut mode then exits after a cut', async ()
     );
   });
   await waitFor(() => expect(screen.getByText('Cut Segment')).toBeInTheDocument());
-  const cutBtn = screen.getByText('Cut Segment');
-  fireEvent.click(cutBtn);
+  fireEvent.click(screen.getByText('Cut Segment'));
   expect(screen.getByText(/Cut Segment \(drag/)).toBeInTheDocument();
-  // Toggle back off
+  fireEvent.click(screen.getByTestId('cal-flux-initial-drag-start'));
+  fireEvent.click(screen.getByTestId('cal-flux-initial-drag-update'));
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('cal-flux-initial-drag-end'));
+  });
+  await waitFor(() =>
+    expect(
+      rpcClient.cutCalibrationSegment as unknown as ReturnType<typeof vi.fn>,
+    ).toHaveBeenCalledWith(2, 5, 7),
+  );
+  // Sticky: tool remains armed after the cut completes.
+  expect(screen.getByText(/Cut Segment \(drag/)).toBeInTheDocument();
+  // Clicking the armed tool again deselects it.
   fireEvent.click(screen.getByText(/Cut Segment \(drag/));
   expect(screen.getByText('Cut Segment')).toBeInTheDocument();
 });
@@ -138,7 +196,7 @@ test('Apply Calibration calls the gain calibration rpc and returns to survey vie
   await waitFor(() => expect(mode).toBe('survey'));
 });
 
-test('Select Declination toggle enables drag-select mode then exits when toggled off', async () => {
+test('Select Declination stays sticky after a select (FEAT-002)', async () => {
   await act(async () => {
     render(
       <SurveyProvider>
@@ -155,10 +213,21 @@ test('Select Declination toggle enables drag-select mode then exits when toggled
     );
   });
   await waitFor(() => expect(screen.getByText('Select Declination')).toBeInTheDocument());
-  const selBtn = screen.getByText('Select Declination');
-  fireEvent.click(selBtn);
+  fireEvent.click(screen.getByText('Select Declination'));
   expect(screen.getByText(/Select Declination \(drag/)).toBeInTheDocument();
-  // Toggle back off
+  fireEvent.click(screen.getByTestId('cal-dec-initial-drag-start'));
+  fireEvent.click(screen.getByTestId('cal-dec-initial-drag-update'));
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('cal-dec-initial-drag-end'));
+  });
+  await waitFor(() =>
+    expect(
+      rpcClient.selectCalibrationDeclination as unknown as ReturnType<typeof vi.fn>,
+    ).toHaveBeenCalledWith(2, 5, 7, 'initial'),
+  );
+  // Sticky: tool remains armed after the selection completes.
+  expect(screen.getByText(/Select Declination \(drag/)).toBeInTheDocument();
+  // Clicking the armed tool again deselects it.
   fireEvent.click(screen.getByText(/Select Declination \(drag/));
   expect(screen.getByText('Select Declination')).toBeInTheDocument();
 });

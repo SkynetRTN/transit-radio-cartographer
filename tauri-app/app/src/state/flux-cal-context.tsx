@@ -203,25 +203,44 @@ export function FluxCalibrationProvider({ children }: { children: ReactNode }) {
     [],
   );
 
-  const addEntry = useCallback(
-    async (entry: FluxCalEntry) => {
-      const base = table ?? { ...EMPTY_TABLE, entries: [] };
+  // Add/remove only mutate the local table; the fit runs only when the user clicks "Fit Calibration".
+  const addEntry = useCallback(async (entry: FluxCalEntry) => {
+    setTable((prev) => {
+      const base = prev ?? { ...EMPTY_TABLE, entries: [] };
       const nextEntries = [...base.entries, entry];
-      setDirty(true);
-      await refitWithEntries(base.caption, nextEntries);
-    },
-    [table, refitWithEntries],
-  );
+      return {
+        ...base,
+        entries: nextEntries,
+        max_measured_flux: Math.max(base.max_measured_flux, entry.measured_flux),
+        max_known_flux: Math.max(base.max_known_flux, entry.known_flux),
+        fit_annotation: '',
+        fit_result: '',
+      };
+    });
+    setSlope(null);
+    setError(null);
+    setDirty(true);
+  }, []);
 
-  const removeEntry = useCallback(
-    async (index: number) => {
-      if (!table) return;
-      const nextEntries = table.entries.filter((_, i) => i !== index);
-      setDirty(true);
-      await refitWithEntries(table.caption, nextEntries);
-    },
-    [table, refitWithEntries],
-  );
+  const removeEntry = useCallback(async (index: number) => {
+    setTable((prev) => {
+      if (!prev) return prev;
+      const nextEntries = prev.entries.filter((_, i) => i !== index);
+      const maxM = nextEntries.reduce((m, e) => Math.max(m, e.measured_flux), 0);
+      const maxK = nextEntries.reduce((m, e) => Math.max(m, e.known_flux), 0);
+      return {
+        ...prev,
+        entries: nextEntries,
+        max_measured_flux: maxM,
+        max_known_flux: maxK,
+        fit_annotation: '',
+        fit_result: '',
+      };
+    });
+    setSlope(null);
+    setError(null);
+    setDirty(true);
+  }, []);
 
   const refit = useCallback(async () => {
     if (!table) return;

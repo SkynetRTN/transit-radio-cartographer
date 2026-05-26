@@ -31,6 +31,13 @@ Claude to fix them.
 
 ## Fixed bugs
 
+- **BUG-004** — Restoring removed samples on the SurveyView "Removed" panel
+  is now a drag-region gesture (matches Select Declination) instead of
+  one-click-per-point. The Remove RFI tool stays selected throughout. See
+  the BUG-004 entry below for details.
+- **BUG-003** — Loading a `.cal` file now refreshes the scan/survey/pre-image
+  data state immediately instead of waiting for the next accept/cut. See the
+  BUG-003 entry below for details.
 - **BUG-001** — Determine Peak reworked into a polynomial-fit gesture.
   User now drags an RA range on the flux plot; the engine fits a polynomial
   (degree 2/3/4) to the kept source samples in that band, takes the fit's
@@ -186,5 +193,200 @@ Replaced the survey formatter with the same logic ScanView already uses.
 ### Acceptance
 Survey readout values for known points match the legacy app and the
 ScanView readout for the same RA/Dec.
+
+---
+
+## BUG-003 — Reload upon flux calibration selected
+
+- **Status:** Fixed
+- **Priority:** High
+- **Area:** UI
+- **Where:** [ScanView.tsx](../tauri-app/app/src/views/ScanView.tsx),
+  [SurveyView.tsx](../tauri-app/app/src/views/SurveyView.tsx),
+  [PreImageView.tsx](../tauri-app/app/src/views/PreImageView.tsx)
+
+### Resolution
+The flux-cal auto-apply effect in
+[flux-cal-context.tsx](../tauri-app/app/src/state/flux-cal-context.tsx) was
+already calling `refreshOverview` / `refreshWorkspace` after applying the
+slope on the engine, but only the workspace metadata picked that up. The
+plotted data (`ScanView.view`, `SurveyView.sweep`,
+`PreImageView.imageMeta`/`imagePixels`) was loaded by effects keyed only on
+the workspace handle, so they kept the cached GCU samples while the engine
+silently rescaled to Jy. Determine Peak then ran on the engine in Jy and
+overlaid a Jy curve onto GCU points, which is why the fit line looked
+detached from the data.
+
+Added `flux_calibrated` to the dependency arrays of those data-loading
+effects so each view re-fetches when a `.cal` is loaded (or removed). The
+existing reset-on-(re)calibrate logic in SurveyView was extended the same
+way.
+
+### Acceptance
+Load `fixtures/inputs/cas0a.md1`, calibrate, then Flux Calibration → Select
+Calibration… and pick a `.cal`. The plot redraws in Jy immediately (peak
+flux readout and axis values switch), and a fresh Determine Peak fit lays
+through the visible points instead of sitting in a different unit system.
+
+---
+
+## BUG-004 — Replace rfi removal
+
+- **Status:** Fixed
+- **Priority:** Medium
+- **Area:** UI
+- **Where:** [SurveyView.tsx](../tauri-app/app/src/views/SurveyView.tsx)
+
+### Repro
+1. Launch the app with `just dev` from [tauri-app/](../tauri-app/).
+2. Open Survey
+3. Calibrate Survey
+4. Remove RFI
+
+### Expected
+In the legacy tool restoring points removed through "baseline segment" can be restored with the same ui of selecting two points and restore all points between those selected. In the new tool I want it to behave like select declination, where you can highlight a region and those points get restored, the whole time the tool should remain selected
+
+### Actual
+You can only restore points by selecting them one at a time
+
+### Resolution
+The bottom "Removed" panel used a single-click-restore gesture
+(`handleRestoreClick`) keyed off each removed sample's `sampleIndex`. Wired
+the panel up to PointScatter's drag-on-x mechanism instead: a new
+`restoreDragRange` / `restoreDragOrigin` pair drives a blue highlight band
+(`highlightColor: '#3060c0'`, distinguishing it from the green Cut and
+yellow Select-Dec highlights) while the user drags, and on drag-end every
+removed sample whose `dec` falls inside `[x0, x1]` is dropped from
+`removedBySweep`. `dragEnabled` is bound to `hasPendingRemoved` so the
+gesture is only armed when there are actually points to restore. Critically
+the handler never touches `baselineMode`, so the Remove RFI tool stays
+selected across the entire restore cycle — matches the "the whole time the
+tool should remain selected" requirement.
+
+The old `handleRestoreClick` was removed (a zero-distance drag is treated
+as no-op rather than as a click), and the empty-state placeholder was
+updated to "Removed samples appear here. Drag a declination range to
+restore them."
+
+A new SurveyView workflow test drives the full gesture end-to-end through
+an upgraded PointScatter mock that exposes point-click and drag callbacks
+as hidden buttons.
+
+### Screenshots / attachments
+
+
+### Notes / suspected cause
+
+
+### Acceptance
+You can highlight points from the lower panel in sweep view to restore
+them. Verified by
+[SurveyView.workflow.test.tsx](../tauri-app/app/src/__tests__/SurveyView.workflow.test.tsx)
+"Drag-region on Removed plot restores points while Remove RFI stays
+selected (BUG-004)" — drags 9..13 across the Removed panel, asserts every
+sample in the dec window [10, 12] gets restored and the tool button still
+reads `Remove RFI (click…)`.
+
+---
+
+## BUG-005 — Fit Calibration Line
+
+- **Status:** Fixed
+- **Priority:** Medium
+- **Area:** UI
+- **Where:** [flux-cal-context.tsx](../tauri-app/app/src/state/flux-cal-context.tsx) (root cause), [CalibrationView.tsx](../tauri-app/app/src/views/CalibrationView.tsx) (rendering)
+
+### Fix
+`addEntry` and `removeEntry` in `flux-cal-context.tsx` were calling the
+`fluxCalFit` RPC, which populated `slope` and caused
+`CalibrationView`'s `fitLine` memo to render the line as soon as the
+first point was added. They now update the local table only and clear
+`slope`/`error`, so the fit line stays hidden until the user clicks
+**Fit Calibration** (which still runs through `refit` → `fluxCalFit`).
+### Repro
+1. Launch the app with `just dev` from [tauri-app/](../tauri-app/).
+2. From Flux Calibration, select new calibration.
+3. Add source from file
+
+### Expected
+Uploading the file only adds the point to the plot, the fit line doesn't appear until "Fit Calibration" is clicked
+
+### Actual
+As soon as the point it rendered, the fit line is as well
+
+
+### Notes / suspected cause
+Calculation is being performed as soon as data is available
+
+### Acceptance
+Re-running the repro shows only the point on the plot, and hitting "Fit Calibration" fits the least squares line and causes it to appear on the graph as well as stores the conversion factor (slope of the line)
+
+---
+
+## BUG-006 — RA in Scan View
+
+- **Status:** Fixed
+- **Priority:** High
+- **Area:** UI
+- **Where:** [ScanView.tsx](../tauri-app/app/src/views/ScanView.tsx), [PointScatter.tsx](../tauri-app/app/src/lib/plots/PointScatter.tsx)
+
+### Fix
+`PointScatter` now accepts an optional `xTickFormatter`. When supplied it
+stamps ~5 evenly-spaced ticks across the visible X range and renders the
+labels via the formatter (same `sexagesimalTicks` pattern as
+[ImagePlot.tsx](../tauri-app/app/src/lib/plots/ImagePlot.tsx)). The Scan
+View's declination panel — the one plot that displays the RA axis —
+passes `formatRa`, so the axis now reads `20:01:30` instead of `72.05k`.
+
+### Repro
+1. Open App
+2. Scan -> Open/New Scan
+
+### Expected
+RA values along bottom axis are in HH:MM:SS format like it is for the image plots and the side view that lists the RA
+
+### Actual
+Is converting somehow resulting in an axis reading 72K, 72.05K ect
+
+
+
+### Screenshots / attachments
+- docs\bug_screenshots\raaxis.png
+
+### Notes / suspected cause
+Some conversion is happening that switches the formatting
+### Acceptance
+The RA axis, when available is always in the standard format that we use elsewhere. 
+
+---
+
+## BUG-007 — Gray Space
+
+- **Status:** Open 
+- **Priority:** High 
+- **Area:** UI 
+- **Where:** 
+
+### Repro
+1. Open App
+2. Open scan, sweep or image
+
+
+### Expected
+Fill the screen save for a small gray outline
+
+### Actual
+Empty gray space at the bottom of the window
+
+
+
+### Screenshots / attachments
+- docs\legacy_ui_reference\screenshots\grayspace.png
+
+### Notes / suspected cause
+Just has a set size
+
+### Acceptance
+You should be able to resize the window and have the survey or image or scan fill most of the window, leaving a small gray outline, the size of what is currently defaulted on the top and sides.
 
 ---

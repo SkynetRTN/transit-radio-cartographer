@@ -56,7 +56,10 @@ export function PreImageView() {
 
   useEffect(() => {
     void generateImage(DEFAULT_PIX);
-  }, [generateImage]);
+    // Rebuild the preview when flux calibration flips, so loading a `.cal`
+    // while sitting on the Pre Image refreshes the gridded image in Jy
+    // instead of leaving the GCU preview on screen.
+  }, [generateImage, workspace?.flux_calibrated]);
 
   const openMakeImagePrompt = useCallback(() => {
     if (!survey) return;

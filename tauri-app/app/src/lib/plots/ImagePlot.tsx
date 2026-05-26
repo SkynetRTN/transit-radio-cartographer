@@ -348,7 +348,11 @@ export function ImagePlot({
       data-testid={testId ?? 'image-plot'}
       ref={ref}
       onContextMenu={handleContextMenu}
-      style={{ width: '100%', height: fixedHeight ?? 420 }}
+      style={
+        fixedHeight !== undefined
+          ? { width: '100%', height: fixedHeight }
+          : { width: '100%', height: '100%', minHeight: 420 }
+      }
     />
   );
 }

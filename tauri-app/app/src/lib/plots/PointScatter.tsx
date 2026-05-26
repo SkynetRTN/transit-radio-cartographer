@@ -53,6 +53,11 @@ interface Props {
   fixedXRange?: [number, number];
   fixedYRange?: [number, number];
   showXTicks?: boolean;
+  // Custom X-axis tick labelling. When set, ~5 evenly-spaced ticks are stamped
+  // across the visible data range and rendered with `xTickFormatter`. Used by
+  // the scan/survey views to show RA in HH:MM:SS instead of Plotly's default
+  // SI-suffix numeric labels (which read as "72k" for arc-time seconds).
+  xTickFormatter?: (value: number) => string;
 }
 
 type LayoutInternal = {
@@ -142,6 +147,7 @@ export function PointScatter({
   fixedXRange,
   fixedYRange,
   showXTicks = true,
+  xTickFormatter,
 }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
   const hoverRef = useRef(onHover);
@@ -237,6 +243,27 @@ export function PointScatter({
       }
     }
 
+    // Custom HH:MM:SS-style X ticks. Plotly's `tickformat` only knows numeric /
+    // date formats, so when an RA formatter is supplied we sample ~5 evenly-
+    // spaced points across the visible X range and feed them in as explicit
+    // tickvals/ticktext (same approach as `sexagesimalTicks` in ImagePlot).
+    let xTickArrays: { tickvals: number[]; ticktext: string[] } | null = null;
+    if (xTickFormatter && showXTicks) {
+      const lo = fixedXRange ? fixedXRange[0] : Math.min(...series.flatMap((s) => s.points.map((p) => p.x)));
+      const hi = fixedXRange ? fixedXRange[1] : Math.max(...series.flatMap((s) => s.points.map((p) => p.x)));
+      if (Number.isFinite(lo) && Number.isFinite(hi) && hi > lo) {
+        const count = 5;
+        const tickvals: number[] = [];
+        const ticktext: string[] = [];
+        for (let i = 0; i < count; i++) {
+          const v = lo + ((hi - lo) * i) / (count - 1);
+          tickvals.push(v);
+          ticktext.push(xTickFormatter(v));
+        }
+        xTickArrays = { tickvals, ticktext };
+      }
+    }
+
     const layout: Partial<Plotly.Layout> = {
       margin: { l: 56, r: 16, t: 8, b: showXTicks ? 36 : 16 },
       paper_bgcolor: '#ffffff',
@@ -245,17 +272,24 @@ export function PointScatter({
       xaxis: {
         title: { text: xAxisLabel, font: { size: 12 } },
         zeroline: false,
-        showgrid: false,
+        showgrid: true,
+        gridcolor: '#e6e6e6',
+        gridwidth: 1,
         ticks: showXTicks ? 'outside' : '',
         showticklabels: showXTicks,
         linecolor: '#000',
         mirror: true,
         ...(fixedXRange ? { range: fixedXRange, autorange: false } : {}),
+        ...(xTickArrays
+          ? { tickmode: 'array' as const, tickvals: xTickArrays.tickvals, ticktext: xTickArrays.ticktext }
+          : {}),
       },
       yaxis: {
         title: { text: yAxisLabel, font: { size: 12 } },
         zeroline: false,
-        showgrid: false,
+        showgrid: true,
+        gridcolor: '#e6e6e6',
+        gridwidth: 1,
         ticks: 'outside',
         linecolor: '#000',
         mirror: true,
@@ -325,7 +359,7 @@ export function PointScatter({
       node.removeEventListener('click', onDomClick);
       Plotly.purge(node);
     };
-  }, [series, xAxisLabel, yAxisLabel, fixedXRange, fixedYRange, showXTicks, pinnedPoint, overlayLines]);
+  }, [series, xAxisLabel, yAxisLabel, fixedXRange, fixedYRange, showXTicks, pinnedPoint, overlayLines, xTickFormatter]);
 
   // ── Effect 2: cheap shape-only updates via relayout. This is what makes the
   //   drag-highlight follow the cursor smoothly without rebuilding the plot.
@@ -449,7 +483,8 @@ export function PointScatter({
       ref={ref}
       style={{
         width: '100%',
-        height: `${height}px`,
+        height: '100%',
+        minHeight: `${height}px`,
         cursor: dragEnabled ? 'crosshair' : 'default',
       }}
     />
