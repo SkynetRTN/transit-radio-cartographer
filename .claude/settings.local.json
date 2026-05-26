@@ -13,7 +13,8 @@
       "Bash(Select-Object -First 5)",
       "Bash(c:/Users/leesnow/skynet2/ogrc/tauri-app/.venv/Scripts/python.exe -m pytest tests/numerics/test_flux_calibration.py tests/rpc/test_rpc_flux_cal.py -x --tb=short)",
       "Bash(pdftotext \"c:\\\\Users\\\\leesnow\\\\skynet2\\\\ogrc\\\\docs\\\\Radio Cartographer Tutorial.docx.pdf\" \"/tmp/tutorial.txt\")",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Bash(just sidecar *)"
     ]
   }
 }

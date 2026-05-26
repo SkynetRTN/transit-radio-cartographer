@@ -72,12 +72,23 @@ _dev-unix:
     fi
     exec npm run tauri dev
 
-# Engine — produce a standalone sidecar binary via PyInstaller.
-# The spec file lands in Phase 3; until then this just prints a TODO.
+# Engine — produce a standalone sidecar binary via PyInstaller and rename
+# to the target-triple convention Tauri's externalBin expects.
 sidecar:
-    @echo "TODO(phase 3): uv run pyinstaller engine/sidecar.spec --distpath app/src-tauri/binaries/"
+    @ {{ if os_name == "windows" { "just _sidecar-windows" } else { "just _sidecar-unix" } }}
 
-# Whole app — build the bundled Tauri artifact (.msi/.dmg/.AppImage).
+_sidecar-windows:
+    uv run pyinstaller engine/sidecar.spec --distpath app/src-tauri/binaries/ --noconfirm
+    pwsh -NoProfile -Command "Move-Item -Force app/src-tauri/binaries/radio-cartographer-engine.exe app/src-tauri/binaries/radio-cartographer-engine-x86_64-pc-windows-msvc.exe"
+
+_sidecar-unix:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    uv run pyinstaller engine/sidecar.spec --distpath app/src-tauri/binaries/ --noconfirm
+    TRIPLE=$(rustc -vV | sed -n 's|host: ||p')
+    mv -f "app/src-tauri/binaries/radio-cartographer-engine" "app/src-tauri/binaries/radio-cartographer-engine-${TRIPLE}"
+
+# Whole app — build the bundled Tauri artifact (.exe setup / .dmg / .AppImage).
 # Bundling depends on the sidecar binary, so `just sidecar` must succeed first.
 package: sidecar build
     cd app && npm run tauri build
