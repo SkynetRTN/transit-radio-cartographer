@@ -58,5 +58,10 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,
+    # console=False builds a windowed-subsystem exe so Windows does not allocate
+    # a console window when the Tauri shell spawns this sidecar. stdin/stdout
+    # pipes still function for JSON-RPC because they are independent of console
+    # allocation. Trade-off: if the sidecar ever crashes hard, its stderr is
+    # discarded; users only see Tauri's `sidecar_eof` / `spawn_failed` toast.
+    console=False,
 )
