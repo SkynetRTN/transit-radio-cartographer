@@ -12,7 +12,17 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let workspace_dir = workspace_dir();
-            app.manage(SidecarBridge::new(workspace_dir));
+            let bundled_exe = std::env::current_exe().ok().and_then(|p| {
+                p.parent().map(|d| {
+                    let name = if cfg!(windows) {
+                        "radio-cartographer-engine.exe"
+                    } else {
+                        "radio-cartographer-engine"
+                    };
+                    d.join(name)
+                })
+            });
+            app.manage(SidecarBridge::new(workspace_dir, bundled_exe));
             Ok(())
         })
         .on_window_event(|window, event| {

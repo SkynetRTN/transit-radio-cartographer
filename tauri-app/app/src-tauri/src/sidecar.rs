@@ -45,12 +45,13 @@ struct ChildIo {
 
 pub struct PythonSidecar {
     workspace_dir: PathBuf,
+    bundled_exe: Option<PathBuf>,
     command_override: Option<Vec<String>>,
     io: Option<ChildIo>,
 }
 
 impl PythonSidecar {
-    pub fn new(workspace_dir: PathBuf) -> Self {
+    pub fn new(workspace_dir: PathBuf, bundled_exe: Option<PathBuf>) -> Self {
         let command_override = std::env::var("RADIO_CART_SIDECAR_CMD")
             .ok()
             .and_then(|raw| {
@@ -66,22 +67,29 @@ impl PythonSidecar {
             });
         Self {
             workspace_dir,
+            bundled_exe,
             command_override,
             io: None,
         }
     }
 
     fn build_command(&self) -> Command {
+        // Priority: explicit test override > bundled PyInstaller binary > dev `uv run`.
+        // The bundled binary lives alongside the main exe (Tauri externalBin convention);
+        // it is self-contained, so we deliberately do not set current_dir for it.
         let mut cmd = if let Some(parts) = &self.command_override {
             let mut c = Command::new(&parts[0]);
             c.args(&parts[1..]);
+            c.current_dir(&self.workspace_dir);
             c
+        } else if let Some(exe) = self.bundled_exe.as_ref().filter(|p| p.exists()) {
+            Command::new(exe)
         } else {
             let mut c = Command::new("uv");
             c.args(["run", "python", "-m", "radio_cartographer.rpc"]);
+            c.current_dir(&self.workspace_dir);
             c
         };
-        cmd.current_dir(&self.workspace_dir);
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -191,9 +199,9 @@ pub struct SidecarBridge {
 }
 
 impl SidecarBridge {
-    pub fn new(workspace_dir: PathBuf) -> Self {
+    pub fn new(workspace_dir: PathBuf, bundled_exe: Option<PathBuf>) -> Self {
         Self {
-            inner: Mutex::new(PythonSidecar::new(workspace_dir)),
+            inner: Mutex::new(PythonSidecar::new(workspace_dir, bundled_exe)),
         }
     }
 
