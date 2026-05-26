@@ -20,6 +20,11 @@ target/
 tauri-app/app/src-tauri/gen/
 tauri-app/app/src-tauri/binaries/
 
+# PyInstaller intermediate build cache (do NOT commit — multi-MB binaries)
+tauri-app/build/
+tauri-app/engine/build/
+*.spec.bak
+
 # Editors
 .vscode/*
 !.vscode/extensions.json
