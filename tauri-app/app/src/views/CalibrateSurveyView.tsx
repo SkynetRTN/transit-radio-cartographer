@@ -107,14 +107,19 @@ export function CalibrateSurveyView() {
   const [view, setView] = useState<CalibrationView | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState<'idle' | 'cut'>('idle');
+  const [mode, setMode] = useState<'idle' | 'cut' | 'select-dec'>('idle');
   const [dragRange, setDragRange] = useState<
     | { bracket: 'initial' | 'terminal'; x0: number; x1: number }
+    | null
+  >(null);
+  const [dragDecRange, setDragDecRange] = useState<
+    | { bracket: 'initial' | 'terminal'; y0: number; y1: number }
     | null
   >(null);
   const [hoverPoint, setHoverPoint] = useState<Point | null>(null);
   const [stickyPoint, setStickyPoint] = useState<Point | null>(null);
   const dragOrigin = useRef<{ bracket: 'initial' | 'terminal'; x: number } | null>(null);
+  const dragDecOrigin = useRef<{ bracket: 'initial' | 'terminal'; y: number } | null>(null);
 
   const loadView = useCallback(async () => {
     if (workspaceHandle === null) return;
@@ -186,9 +191,56 @@ export function CalibrateSurveyView() {
         return;
       }
       setDragRange(null);
-      setMode('idle');
       try {
         await rpcClient.cutCalibrationSegment(workspaceHandle, range.x0, range.x1);
+        await Promise.all([loadView(), refreshWorkspace()]);
+      } catch (e) {
+        setError((e as Error).message);
+      }
+    },
+  });
+
+  const makeDecDragHandlers = (bracket: 'initial' | 'terminal') => ({
+    onDragStart: (y: number) => {
+      if (mode !== 'select-dec') return;
+      dragDecOrigin.current = { bracket, y };
+      setDragDecRange({ bracket, y0: y, y1: y });
+    },
+    onDragUpdate: (y: number) => {
+      if (
+        mode !== 'select-dec' ||
+        !dragDecOrigin.current ||
+        dragDecOrigin.current.bracket !== bracket
+      ) {
+        return;
+      }
+      const origin = dragDecOrigin.current.y;
+      setDragDecRange({ bracket, y0: Math.min(origin, y), y1: Math.max(origin, y) });
+    },
+    onDragEnd: async () => {
+      const range = dragDecRange;
+      dragDecOrigin.current = null;
+      if (
+        mode !== 'select-dec' ||
+        !range ||
+        range.bracket !== bracket ||
+        workspaceHandle === null
+      ) {
+        setDragDecRange(null);
+        return;
+      }
+      if (range.y0 === range.y1) {
+        setDragDecRange(null);
+        return;
+      }
+      setDragDecRange(null);
+      try {
+        await rpcClient.selectCalibrationDeclination(
+          workspaceHandle,
+          range.y0,
+          range.y1,
+          bracket,
+        );
         await Promise.all([loadView(), refreshWorkspace()]);
       } catch (e) {
         setError((e as Error).message);
@@ -246,6 +298,8 @@ export function CalibrateSurveyView() {
   const readoutPoint = stickyPoint ?? hoverPoint;
   const initialDrag = makeDragHandlers('initial');
   const terminalDrag = makeDragHandlers('terminal');
+  const initialDecDrag = makeDecDragHandlers('initial');
+  const terminalDecDrag = makeDecDragHandlers('terminal');
 
   return (
     <div className="survey-view workspace calibrate-view">
@@ -347,7 +401,17 @@ export function CalibrateSurveyView() {
                       highlightRange={
                         dragRange?.bracket === 'initial' ? dragRange : null
                       }
+                      highlightYRange={
+                        mode === 'select-dec' && dragDecRange?.bracket === 'initial'
+                          ? dragDecRange
+                          : null
+                      }
                       verticalLines={[initialLayout.separator]}
+                      onDragStart={initialDecDrag.onDragStart}
+                      onDragUpdate={initialDecDrag.onDragUpdate}
+                      onDragEnd={initialDecDrag.onDragEnd}
+                      dragEnabled={mode === 'select-dec'}
+                      dragAxis="y"
                       testId="cal-dec-initial"
                       height={180}
                       fixedXRange={initialLayout.xRange}
@@ -373,7 +437,17 @@ export function CalibrateSurveyView() {
                       highlightRange={
                         dragRange?.bracket === 'terminal' ? dragRange : null
                       }
+                      highlightYRange={
+                        mode === 'select-dec' && dragDecRange?.bracket === 'terminal'
+                          ? dragDecRange
+                          : null
+                      }
                       verticalLines={[terminalLayout.separator]}
+                      onDragStart={terminalDecDrag.onDragStart}
+                      onDragUpdate={terminalDecDrag.onDragUpdate}
+                      onDragEnd={terminalDecDrag.onDragEnd}
+                      dragEnabled={mode === 'select-dec'}
+                      dragAxis="y"
                       testId="cal-dec-terminal"
                       height={180}
                       fixedXRange={terminalLayout.xRange}
@@ -400,14 +474,20 @@ export function CalibrateSurveyView() {
                 {mode === 'cut' ? 'Cut Segment (drag…)' : 'Cut Segment'}
               </button>
               <button
+                onClick={() =>
+                  setMode((m) => (m === 'select-dec' ? 'idle' : 'select-dec'))
+                }
+                className={mode === 'select-dec' ? 'active' : ''}
+                title="Drag a horizontal band on either declination panel to keep only cal samples inside that Dec range"
+              >
+                {mode === 'select-dec' ? 'Select Declination (drag…)' : 'Select Declination'}
+              </button>
+              <button
                 onClick={() => void handleUndo()}
                 disabled={!view?.can_undo}
-                title="Restore the most recent cut"
+                title="Restore the most recent cut or declination selection"
               >
                 Undo
-              </button>
-              <button disabled title="Select Declination (not implemented yet)">
-                Select Declination
               </button>
               <button onClick={() => setViewMode('survey')}>Cancel</button>
             </div>

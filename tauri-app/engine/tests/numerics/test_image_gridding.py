@@ -33,6 +33,21 @@ def test_makeimage_default_parameters_match_legacy(intermediates_dir, outputs_di
     assert int(np.count_nonzero(grid.pixels)) > 100
 
 
+def test_makeimage_honors_pix_for_grid_shape(intermediates_dir) -> None:
+    survey = read_srv(intermediates_dir / "and0a.srv")
+
+    # vb/survform.frm:1509 — when the user first opens "Make Image" the
+    # default Pix prompt is "2", which produces a coarser, blocky grid.
+    grid_pix2 = make_image(survey, pix=2)
+    assert grid_pix2.pixels.shape == _legacy_shape(pix=2)
+
+    # vb/survform.frm:1513 — non-integer or non-positive pix is refused.
+    # Larger pix → fewer cells.
+    grid_pix4 = make_image(survey, pix=4)
+    assert grid_pix4.pixels.shape == _legacy_shape(pix=4)
+    assert grid_pix4.pixels.size < grid_pix2.pixels.size
+
+
 def test_makeimage_pixel_scale_inverts_correctly(intermediates_dir) -> None:
     survey = read_srv(intermediates_dir / "and0a.srv")
     grid = make_image(survey, pix=1)
@@ -67,3 +82,22 @@ def test_makeimage_pixel_scale_inverts_correctly(intermediates_dir) -> None:
     dec_at_centre = w.crval2 + (w.crpix2 - w.crpix2) * w.cdelt2
     assert abs(ra_at_centre - w.crval1) < IMAGE_ATOL
     assert abs(dec_at_centre - w.crval2) < IMAGE_ATOL
+
+
+def test_makeimage_fills_between_adjacent_sweeps(intermediates_dir) -> None:
+    # vb/survform.frm:1651-1799 — the legacy Pre-Image walks the region
+    # *between* adjacent sweeps and paints each cell with interpolated flux.
+    # A bare-bin grid leaves most cells at 0; the strip-fill must produce a
+    # substantially denser coverage, otherwise the pre-image renders as a
+    # mostly-black sweep map rather than the filled mosaic in
+    # docs/legacy_ui_reference/screenshots/preimagecygnus.png.
+    survey = read_srv(intermediates_dir / "and0a.srv")
+    grid = make_image(survey, pix=2)
+    nonzero = int(np.count_nonzero(grid.pixels))
+    total = int(grid.pixels.size)
+    # At pix=2 the grid is ~160x200 cells; the swept region should cover at
+    # least ~25% after strip-fill, far above what binning alone would yield.
+    assert nonzero / total > 0.25, (
+        f"strip-fill only covered {nonzero}/{total} cells "
+        f"(expected >25% — legacy pre-image fills most of the swept region)"
+    )

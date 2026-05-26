@@ -5,23 +5,73 @@ import json
 import struct
 import sys
 import traceback
-from dataclasses import asdict
+from dataclasses import asdict, replace as replace_dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from ._handles import HandleRegistry, UnknownHandleError
-from .image import GriddedImage, make_image
+from .flux_calibration import default_known_jy, fit_counts_to_jy, fit_error, read_scn_peak
+from .image import (
+    GriddedImage,
+    RgbGriddedImage,
+    WCSMetadata,
+    apply_flux_calibration_image,
+    make_image,
+    revert_flux_calibration_image,
+)
+from .image_compose import (
+    append_images,
+    bicolor_compose,
+    extend_rgb_compose,
+    superimpose_images,
+    tricolor_compose,
+)
+from .io.bmp import write_bmp_from_rgb
+from .io.cal import read_cal, write_cal
+from .io.fits import read_fits, write_fits
+from .io.img import read_img, write_img
+from .io.md1 import read_md1
 from .io.md2 import read_md2
-from .models import Survey
+from .io.pal import read_pal, write_pal
+from .io.scn import read_scn, write_scn
+from .io.srv import read_srv, write_srv
+from .models import CalibrationEntry, CalibrationTable, Image, Palette, PaletteStop, Survey, Sweep
+from .palette import apply_palette
+from .scan_workspace import (
+    ScanWorkspace,
+    apply_flux_calibration_scan,
+    apply_scan_calibration,
+    baseline_scan_source,
+    build_scan_workspace,
+    current_source_flux as scan_current_source_flux,
+    cut_calibration_segment_scan,
+    cut_scan_segment,
+    determine_peak,
+    determine_peak_fit,
+    determine_peak_gaussian,
+    revert_flux_calibration_scan,
+    scan_from_scn,
+    select_calibration_declination_scan,
+    select_scan_declination,
+    set_bracket_enabled_scan,
+    undo_scan,
+    workspace_to_scan,
+)
 from .survey import apply_to_survey, reduce_raw_sweep
 from .workspace import (
     SurveyWorkspace,
+    apply_flux_calibration,
     apply_gain_calibration,
+    apply_workspace_reduction,
     build_workspace,
     cut_calibration_segment,
+    revert_flux_calibration,
+    select_calibration_declination,
+    survey_from_srv,
     undo_cut,
+    workspace_to_survey,
 )
 
 
@@ -33,6 +83,203 @@ def _maybe_downsample(
         return ra, dec, flux
     step = max(1, n // max_points)
     return ra[::step], dec[::step], flux[::step]
+
+
+def _survey_from_workspace_sources(ws: "SurveyWorkspace") -> Survey:
+    """Build an in-memory Survey containing only the workspace's source sweeps.
+
+    Skips the initial and terminal cal brackets so pre-image bounds and pixels
+    reflect the *swept region*, not the calibrator's RA/Dec. Pre-image
+    reductions win over calibration which wins over raw — for both flux
+    (Smooth/Baseline) and dec (Align Sweeps).
+    """
+    if ws.reduced_source_flux is not None:
+        flux_arrays = ws.reduced_source_flux
+    elif ws.calibrated and ws.calibrated_source_flux is not None:
+        flux_arrays = ws.calibrated_source_flux
+    else:
+        flux_arrays = tuple(np.asarray(raw.flux, dtype=np.float64) for raw in ws.source_sweeps)
+    if ws.reduced_source_dec is not None:
+        dec_arrays = ws.reduced_source_dec
+    else:
+        dec_arrays = tuple(np.asarray(raw.dec, dtype=np.float64) for raw in ws.source_sweeps)
+    sweeps: list[Sweep] = []
+    for raw, dec, flux in zip(ws.source_sweeps, dec_arrays, flux_arrays):
+        sweeps.append(
+            Sweep(
+                ra=np.asarray(raw.ra, dtype=np.float64),
+                dec=np.asarray(dec, dtype=np.float64),
+                flux=np.asarray(flux, dtype=np.float64),
+            )
+        )
+    return Survey(
+        label1=ws.name,
+        label2="",
+        sweep_count=len(sweeps),
+        swp=0,
+        sweep0=sweeps[0],
+        sweeps=tuple(sweeps),
+    )
+
+
+def _image_to_gridded(image: Image) -> GriddedImage:
+    """Convert a legacy `.img` Image (int16 + palette) to a GriddedImage.
+
+    Legacy quantizes flux into 5000 buckets:
+    `Clr = Int((f - MinFluxPI) / (MaxFluxPI - MinFluxPI) * 5000) + 1`
+    (vb/survform.frm:1706). Invert with `(Clr - 1) / 4999`. Pixels carrying
+    `Clr = 0` are unpainted background; legacy renders them at MinFluxPI, so
+    we clamp negatives back to that floor here.
+    """
+    pixels_f = np.asarray(image.pixels, dtype=np.float64)
+    p_lo = float(image.min_flux_p)
+    p_hi = float(image.max_flux_p)
+    if p_hi > p_lo and pixels_f.size:
+        pixels_f = p_lo + ((pixels_f - 1.0) / 4999.0) * (p_hi - p_lo)
+        pixels_f = np.clip(pixels_f, p_lo, p_hi)
+    height, width = pixels_f.shape
+    cdelt1 = -(image.max_ra - image.min_ra) / max(width - 1, 1)
+    cdelt2 = (image.max_dec - image.min_dec) / max(height - 1, 1)
+    wcs = WCSMetadata(
+        ctype1="RA---TAN",
+        ctype2="DEC--TAN",
+        crval1=(image.min_ra + image.max_ra) / 2.0,
+        crval2=(image.min_dec + image.max_dec) / 2.0,
+        crpix1=(width + 1) / 2.0,
+        crpix2=(height + 1) / 2.0,
+        cdelt1=cdelt1,
+        cdelt2=cdelt2,
+    )
+    return GriddedImage(
+        pixels=pixels_f,
+        wcs=wcs,
+        min_ra=float(image.min_ra),
+        max_ra=float(image.max_ra),
+        min_dec=float(image.min_dec),
+        max_dec=float(image.max_dec),
+        unit=image.unit,
+        # Infer flux state from the on-disk unit suffix. Legacy files
+        # without a suffix are treated as GCU (not flux-calibrated) so
+        # the auto-apply effect can promote them to Jy when a `.cal`
+        # is loaded.
+        flux_calibrated=(image.unit == "Jy"),
+        flux_slope=None,
+    )
+
+
+def _gridded_to_image(
+    image: GriddedImage,
+    *,
+    palette: "Palette | None",
+    flux_min: float,
+    flux_max: float,
+    name: str,
+    pix: int,
+    unit: str | None = None,
+) -> Image:
+    """Pack a GriddedImage as a legacy `.img` Image with int16 pixels.
+
+    Legacy quantizes flux into 5000 buckets (`Clr = Int((f - lo) / (hi - lo)
+    * 5000) + 1`, vb/survform.frm:1706), so files produced here load
+    correctly in the legacy viewer's flux readout. Callers supply the flux
+    range (the palette's "stretch") and a palette; we fall back to the
+    8-stop default if no palette is given.
+    """
+    pal = palette if palette is not None else _default_palette()
+    if flux_max <= flux_min:
+        flux_max = flux_min + 1e-9
+    norm = (image.pixels - flux_min) / (flux_max - flux_min)
+    norm = np.clip(norm, 0.0, 1.0)
+    int_pixels = ((norm * 4999.0).round() + 1.0).astype(np.int16)
+    return Image(
+        name=name,
+        min_ra=float(image.min_ra),
+        max_ra=float(image.max_ra),
+        min_dec=float(image.min_dec),
+        max_dec=float(image.max_dec),
+        min_flux=float(np.min(image.pixels)) if image.pixels.size else 0.0,
+        max_flux=float(np.max(image.pixels)) if image.pixels.size else 0.0,
+        min_ra_p=float(image.min_ra),
+        max_ra_p=float(image.max_ra),
+        min_dec_p=float(image.min_dec),
+        max_dec_p=float(image.max_dec),
+        min_flux_p=float(flux_min),
+        max_flux_p=float(flux_max),
+        pix=int(pix),
+        palette=pal,
+        pixels=int_pixels,
+        unit=unit,
+    )
+
+
+def _palette_stops_payload(palette: "Palette") -> list[dict[str, float]]:
+    return [
+        {"anchor": float(s.anchor), "r": float(s.r), "g": float(s.g), "b": float(s.b)}
+        for s in palette.stops
+    ]
+
+
+def _palette_from_stops(stops_payload: Any) -> "Palette | None":
+    if not stops_payload:
+        return None
+    if not isinstance(stops_payload, list):
+        raise RpcError(ERR_INVALID_PARAMS, "palette stops must be a list")
+    stops: list[PaletteStop] = []
+    for entry in stops_payload:
+        try:
+            stops.append(
+                PaletteStop(
+                    anchor=float(entry["anchor"]),
+                    r=float(entry["r"]),
+                    g=float(entry["g"]),
+                    b=float(entry["b"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, f"invalid palette stop: {entry!r}") from exc
+    return Palette(stops=tuple(stops))
+
+
+def _default_palette() -> "Palette":
+    """The legacy 8-stop ramp (vb/survform.frm:1518-1550).
+
+    Returned anchors are in [0, 255] to match the .pal/.img convention.
+    """
+    return Palette(
+        stops=(
+            PaletteStop(anchor=0.0, r=0, g=0, b=0),
+            PaletteStop(anchor=255.0 / 7.0, r=255, g=0, b=255),
+            PaletteStop(anchor=255.0 * 2 / 7.0, r=0, g=0, b=255),
+            PaletteStop(anchor=255.0 * 3 / 7.0, r=0, g=255, b=255),
+            PaletteStop(anchor=255.0 * 4 / 7.0, r=0, g=255, b=0),
+            PaletteStop(anchor=255.0 * 5 / 7.0, r=255, g=255, b=0),
+            PaletteStop(anchor=255.0 * 6 / 7.0, r=255, g=0, b=0),
+            PaletteStop(anchor=255.0, r=255, g=255, b=255),
+        )
+    )
+
+
+def _flux_range_from_params(params: dict[str, Any], image: GriddedImage) -> tuple[float, float]:
+    if "flux_min" in params and "flux_max" in params:
+        try:
+            return float(params["flux_min"]), float(params["flux_max"])
+        except (TypeError, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, "flux_min/flux_max must be numeric") from exc
+    if image.pixels.size:
+        return float(np.min(image.pixels)), float(np.max(image.pixels))
+    return 0.0, 1.0
+
+
+def _open_image_path(path: str) -> GriddedImage:
+    ext = Path(path).suffix.lower()
+    if ext == ".img":
+        return _image_to_gridded(read_img(path))
+    if ext in (".fits", ".fit"):
+        return read_fits(path)
+    raise RpcError(
+        ERR_INVALID_PARAMS,
+        f"unsupported image extension {ext!r}; expected .img/.fits/.fit",
+    )
 
 
 _REDUCTION_PARAMS: dict[str, tuple[str, str, float]] = {
@@ -97,6 +344,8 @@ class RpcServer:
                 result = {"ok": True}
             elif method == "open_survey":
                 result = self._open_survey(params)
+            elif method == "open_saved_survey":
+                result = self._open_saved_survey(params)
             elif method == "get_sweep":
                 result = self._get_sweep(params)
             elif method == "get_sweep_inline":
@@ -111,22 +360,115 @@ class RpcServer:
                 result = self._make_image(params)
             elif method == "get_image_pixels":
                 result = self._get_image_pixels(params)
+            elif method == "open_image":
+                result = self._open_image(params)
+            elif method == "save_image":
+                result = self._save_image(params)
+            elif method == "save_bitmap":
+                result = self._save_bitmap(params)
+            elif method == "append_image":
+                result = self._append_image(params)
+            elif method == "superimpose_image":
+                result = self._superimpose_image(params)
+            elif method == "bicolor_image":
+                result = self._bicolor_image(params)
+            elif method == "tricolor_image":
+                result = self._tricolor_image(params)
+            elif method == "extend_rgb_image":
+                result = self._extend_rgb_image(params)
+            elif method == "get_rgb_image_pixels":
+                result = self._get_rgb_image_pixels(params)
+            elif method == "open_palette":
+                result = self._open_palette(params)
+            elif method == "save_palette":
+                result = self._save_palette(params)
             elif method == "get_workspace_overview":
                 result = self._get_workspace_overview(params)
             elif method == "get_source_sweep":
                 result = self._get_source_sweep(params)
+            elif method == "set_source_sweep_flux":
+                result = self._set_source_sweep_flux(params)
             elif method == "get_calibration_view":
                 result = self._get_calibration_view(params)
             elif method == "cut_calibration_segment":
                 result = self._cut_calibration_segment(params)
+            elif method == "select_calibration_declination":
+                result = self._select_calibration_declination(params)
             elif method == "undo_calibration_cut":
                 result = self._undo_calibration_cut(params)
             elif method == "apply_gain_calibration":
                 result = self._apply_gain_calibration(params)
             elif method == "set_bracket_enabled":
                 result = self._set_bracket_enabled(params)
+            elif method == "open_scan":
+                result = self._open_scan(params)
+            elif method == "open_saved_scan":
+                result = self._open_saved_scan(params)
+            elif method == "get_scan_overview":
+                result = self._get_scan_overview(params)
+            elif method == "get_scan_view":
+                result = self._get_scan_view(params)
+            elif method == "get_scan_calibration_view":
+                result = self._get_scan_calibration_view(params)
+            elif method == "cut_scan_calibration_segment":
+                result = self._cut_scan_calibration_segment(params)
+            elif method == "select_scan_calibration_declination":
+                result = self._select_scan_calibration_declination(params)
+            elif method == "apply_scan_calibration":
+                result = self._apply_scan_calibration(params)
+            elif method == "set_scan_bracket_enabled":
+                result = self._set_scan_bracket_enabled(params)
+            elif method == "select_scan_declination":
+                result = self._select_scan_declination(params)
+            elif method == "cut_scan_segment":
+                result = self._cut_scan_segment(params)
+            elif method == "baseline_scan_source":
+                result = self._baseline_scan_source(params)
+            elif method == "determine_scan_peak":
+                result = self._determine_scan_peak(params)
+            elif method == "determine_scan_peak_fit":
+                result = self._determine_scan_peak_fit(params)
+            elif method == "determine_scan_peak_gaussian":
+                result = self._determine_scan_peak_gaussian(params)
+            elif method == "undo_scan":
+                result = self._undo_scan(params)
+            elif method == "save_scan":
+                result = self._save_scan(params)
+            elif method == "save_survey":
+                result = self._save_survey(params)
+            elif method == "flux_cal_read_file":
+                result = self._flux_cal_read_file(params)
+            elif method == "flux_cal_write_file":
+                result = self._flux_cal_write_file(params)
+            elif method == "flux_cal_fit":
+                result = self._flux_cal_fit(params)
+            elif method == "flux_cal_read_scn_peak":
+                result = self._flux_cal_read_scn_peak(params)
+            elif method == "flux_cal_default_known_jy":
+                result = self._flux_cal_default_known_jy(params)
+            elif method == "flux_cal_apply_to_survey":
+                result = self._flux_cal_apply_to_survey(params)
+            elif method == "flux_cal_revert_from_survey":
+                result = self._flux_cal_revert_from_survey(params)
+            elif method == "flux_cal_apply_to_scan":
+                result = self._flux_cal_apply_to_scan(params)
+            elif method == "flux_cal_revert_from_scan":
+                result = self._flux_cal_revert_from_scan(params)
+            elif method == "flux_cal_apply_to_image":
+                result = self._flux_cal_apply_to_image(params)
+            elif method == "flux_cal_revert_from_image":
+                result = self._flux_cal_revert_from_image(params)
             elif method == "export_fits":
-                raise RpcError(ERR_INVALID_PARAMS, "export_fits is not implemented in Phase 3")
+                # Legacy hook from the Phase 3 stub — `save_image` is now the
+                # canonical FITS write path (dispatch is by file extension).
+                params_with_fits = dict(params)
+                path = params_with_fits.get("path", "")
+                if not str(path).lower().endswith((".fits", ".fit")):
+                    raise RpcError(
+                        ERR_INVALID_PARAMS,
+                        "export_fits requires a .fits/.fit path; use save_image for .img",
+                    )
+                result = self._save_image(params_with_fits)
             else:
                 raise RpcError(ERR_UNKNOWN_METHOD, f"Unknown method: {method}")
             return {"jsonrpc": "2.0", "id": req_id, "result": result}
@@ -182,6 +524,28 @@ class RpcServer:
         result["workspace_handle"] = ws_handle
         result["workspace"] = self._workspace_overview(workspace)
         return result
+
+    def _open_saved_survey(self, params: dict[str, Any]) -> dict[str, Any]:
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        try:
+            survey = read_srv(Path(path))
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to open survey: {exc}") from exc
+        try:
+            workspace, accepted_indices = survey_from_srv(survey, str(path))
+        except ValueError as exc:
+            raise RpcError(ERR_IO, f"failed to open survey: {exc}") from exc
+        survey_handle = self._handles.create(survey)
+        ws_handle = self._handles.create(workspace)
+        return {
+            "handle": survey_handle,
+            "metadata": {"sweep_count": survey.swp, "path": str(path)},
+            "workspace_handle": ws_handle,
+            "workspace": self._workspace_overview(workspace),
+            "accepted_sweeps": [int(i) for i in accepted_indices],
+        }
 
     def _get_sweep(self, params: dict[str, Any]) -> dict[str, Any]:
         handle = int(params.get("handle", -1))
@@ -258,8 +622,6 @@ class RpcServer:
         return obj
 
     def _reduce(self, op: str, params: dict[str, Any]) -> dict[str, Any]:
-        handle = int(params.get("handle", -1))
-        survey = self._resolve_survey(handle)
         rpc_key, kwarg_name, default = _REDUCTION_PARAMS[op]
         raw_value = params.get(rpc_key, default)
         try:
@@ -269,6 +631,23 @@ class RpcServer:
                 ERR_INVALID_PARAMS, f"{op}: {rpc_key} must be numeric, got {raw_value!r}"
             ) from exc
         kwargs: dict[str, float | int] = {kwarg_name: int(value) if op != "align" else value}
+        # Workspace-aware path: when the caller passes `workspace_handle`, the
+        # reduction lands on the workspace's source sweeps so the next
+        # `make_image(workspace_handle=...)` call grids the reduced flux.
+        # This is what the Pre Image screen's Smooth/Baseline/Align buttons
+        # use — operating on a detached `Survey` would leave the pre-image
+        # untouched because that path is driven by `workspace.source_sweeps`.
+        ws_handle = params.get("workspace_handle")
+        if ws_handle is not None:
+            ws = self._resolve_workspace(int(ws_handle))
+            apply_workspace_reduction(ws, op, **kwargs)
+            return {
+                "op": op,
+                "sweep_count": int(ws.source_count),
+                "overview": self._workspace_overview(ws),
+            }
+        handle = int(params.get("handle", -1))
+        survey = self._resolve_survey(handle)
         reduced = apply_to_survey(survey, op, **kwargs)
         new_handle = self._handles.create(reduced)
         return {
@@ -278,26 +657,46 @@ class RpcServer:
         }
 
     def _make_image(self, params: dict[str, Any]) -> dict[str, Any]:
-        handle = int(params.get("handle", -1))
-        survey = self._resolve_survey(handle)
         try:
             pix = int(params.get("pix", 1))
         except (TypeError, ValueError) as exc:
             raise RpcError(ERR_INVALID_PARAMS, "pix must be an integer") from exc
+        ws_handle = params.get("workspace_handle")
+        unit: str | None = None
+        flux_calibrated = False
+        flux_slope: float | None = None
+        if ws_handle is not None:
+            # Pre-image is built from source sweeps only — the cal brackets
+            # point at a different calibrator, so including them stretches the
+            # RA/Dec extent and dumps cal-voltage samples onto an unrelated
+            # part of the sky. After Apply Gain Calibration the workspace's
+            # `calibrated_source_flux` is in gain units; we prefer those.
+            ws = self._resolve_workspace(int(ws_handle))
+            survey = _survey_from_workspace_sources(ws)
+            # An image always implies at least gain-calibration (you can't
+            # make a sensible image from raw volts). Reflect Jy after flux
+            # calibration, otherwise GCU. When the workspace was flux-cal'd,
+            # carry the slope onto the image so the auto-apply effect treats
+            # it as already-calibrated (and doesn't try to multiply again).
+            if ws.flux_calibrated:
+                unit = "Jy"
+                flux_calibrated = True
+                flux_slope = ws.flux_slope
+            else:
+                unit = "GCU"
+        else:
+            handle = int(params.get("handle", -1))
+            survey = self._resolve_survey(handle)
         image = make_image(survey, pix=pix)
+        if unit is not None or flux_calibrated:
+            image = replace_dataclass(
+                image,
+                unit=unit if unit is not None else image.unit,
+                flux_calibrated=flux_calibrated,
+                flux_slope=flux_slope,
+            )
         new_handle = self._handles.create(image)
-        height, width = image.pixels.shape
-        return {
-            "handle": new_handle,
-            "width": int(width),
-            "height": int(height),
-            "min_ra": float(image.min_ra),
-            "max_ra": float(image.max_ra),
-            "min_dec": float(image.min_dec),
-            "max_dec": float(image.max_dec),
-            "min_flux": float(np.min(image.pixels)),
-            "max_flux": float(np.max(image.pixels)),
-        }
+        return self._image_meta(image, new_handle)
 
     def _get_image_pixels(self, params: dict[str, Any]) -> dict[str, Any]:
         handle = int(params.get("handle", -1))
@@ -320,6 +719,295 @@ class RpcServer:
             "width": int(width),
             "height": int(height),
         }
+
+    def _image_meta(self, image: GriddedImage, handle: int) -> dict[str, Any]:
+        height, width = image.pixels.shape
+        return {
+            "handle": handle,
+            "width": int(width),
+            "height": int(height),
+            "min_ra": float(image.min_ra),
+            "max_ra": float(image.max_ra),
+            "min_dec": float(image.min_dec),
+            "max_dec": float(image.max_dec),
+            "min_flux": float(np.min(image.pixels)) if image.pixels.size else 0.0,
+            "max_flux": float(np.max(image.pixels)) if image.pixels.size else 0.0,
+            "unit": image.unit,
+            "flux_calibrated": bool(image.flux_calibrated),
+            "flux_slope": (
+                float(image.flux_slope) if image.flux_slope is not None else None
+            ),
+        }
+
+    def _open_image(self, params: dict[str, Any]) -> dict[str, Any]:
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        ext = Path(str(path)).suffix.lower()
+        try:
+            if ext == ".img":
+                legacy = read_img(str(path))
+                image = _image_to_gridded(legacy)
+                palette_stops = _palette_stops_payload(legacy.palette)
+            elif ext in (".fits", ".fit"):
+                image = read_fits(str(path))
+                palette_stops = None
+            else:
+                raise RpcError(
+                    ERR_INVALID_PARAMS,
+                    f"unsupported image extension {ext!r}; expected .img/.fits/.fit",
+                )
+        except RpcError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to open image: {exc}") from exc
+        handle = self._handles.create(image)
+        result = self._image_meta(image, handle)
+        if palette_stops is not None:
+            result["palette"] = palette_stops
+        return result
+
+    def _save_image(self, params: dict[str, Any]) -> dict[str, Any]:
+        handle = int(params.get("handle", -1))
+        image = self._resolve_image(handle)
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        ext = Path(str(path)).suffix.lower()
+        try:
+            if ext == ".img":
+                palette = _palette_from_stops(params.get("palette"))
+                flux_min, flux_max = _flux_range_from_params(params, image)
+                # Unit precedence: explicit `unit` param wins; otherwise fall
+                # back to whatever the GriddedImage carries (loaded from disk
+                # or set by `make_image` from the workspace).
+                unit_param = params.get("unit")
+                unit = (
+                    str(unit_param) if isinstance(unit_param, str) and unit_param else image.unit
+                )
+                legacy = _gridded_to_image(
+                    image,
+                    palette=palette,
+                    flux_min=flux_min,
+                    flux_max=flux_max,
+                    name=str(params.get("name", "image")),
+                    pix=int(params.get("pix", 1)),
+                    unit=unit,
+                )
+                write_img(legacy, str(path))
+            elif ext in (".fits", ".fit"):
+                write_fits(
+                    image,
+                    str(path),
+                    name=str(params.get("name")) if params.get("name") is not None else None,
+                    pix=int(params["pix"]) if params.get("pix") is not None else None,
+                )
+            else:
+                raise RpcError(
+                    ERR_INVALID_PARAMS,
+                    f"unsupported image extension {ext!r}; expected .img/.fits/.fit",
+                )
+        except RpcError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to save image: {exc}") from exc
+        return {"path": str(path), "bytes_written": int(Path(str(path)).stat().st_size)}
+
+    def _save_bitmap(self, params: dict[str, Any]) -> dict[str, Any]:
+        handle = int(params.get("handle", -1))
+        image = self._resolve_image(handle)
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        palette = _palette_from_stops(params.get("palette")) or _default_palette()
+        flux_min, flux_max = _flux_range_from_params(params, image)
+        rgb = apply_palette(image.pixels, palette, flux_min, flux_max)
+        try:
+            write_bmp_from_rgb(rgb, str(path))
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to save bitmap: {exc}") from exc
+        return {"path": str(path), "bytes_written": int(Path(str(path)).stat().st_size)}
+
+    def _append_image(self, params: dict[str, Any]) -> dict[str, Any]:
+        primary = self._resolve_image(int(params.get("handle", -1)))
+        other_path = params.get("other_path")
+        if not other_path:
+            raise RpcError(ERR_INVALID_PARAMS, "other_path is required")
+        secondary = _open_image_path(str(other_path))
+        ra_shift = float(params.get("ra_shift_seconds", 0.0))
+        dec_shift = float(params.get("dec_shift_degrees", 0.0))
+        pix = params.get("pix")
+        pix_int = int(pix) if pix is not None else None
+        composed = append_images(
+            primary, secondary, pix=pix_int, ra_shift_seconds=ra_shift, dec_shift_degrees=dec_shift
+        )
+        new_handle = self._handles.create(composed)
+        return self._image_meta(composed, new_handle)
+
+    def _resolve_rgb_image(self, handle: int) -> RgbGriddedImage:
+        try:
+            obj = self._handles.get(handle)
+        except UnknownHandleError as exc:
+            raise RpcError(ERR_INVALID_HANDLE, f"unknown handle: {handle}") from exc
+        if not isinstance(obj, RgbGriddedImage):
+            raise RpcError(ERR_INVALID_HANDLE, f"handle {handle} is not an RGB image")
+        return obj
+
+    def _rgb_image_meta(self, image: RgbGriddedImage, handle: int) -> dict[str, Any]:
+        height, width = image.pixels_r.shape
+        return {
+            "handle": handle,
+            "kind": "rgb",
+            "width": int(width),
+            "height": int(height),
+            "min_ra": float(image.min_ra),
+            "max_ra": float(image.max_ra),
+            "min_dec": float(image.min_dec),
+            "max_dec": float(image.max_dec),
+        }
+
+    def _bicolor_image(self, params: dict[str, Any]) -> dict[str, Any]:
+        primary = self._resolve_image(int(params.get("handle", -1)))
+        other_path = params.get("other_path")
+        if not other_path:
+            raise RpcError(ERR_INVALID_PARAMS, "other_path is required")
+        secondary = _open_image_path(str(other_path))
+        primary_channel = str(params.get("primary_channel", "r")).lower()
+        secondary_channel = str(params.get("secondary_channel", "g")).lower()
+        ra_shift = float(params.get("ra_shift_seconds", 0.0))
+        dec_shift = float(params.get("dec_shift_degrees", 0.0))
+        pix = params.get("pix")
+        pix_int = int(pix) if pix is not None else None
+        try:
+            composed = bicolor_compose(
+                primary,
+                secondary,
+                primary_channel=primary_channel,
+                secondary_channel=secondary_channel,
+                pix=pix_int,
+                ra_shift_seconds=ra_shift,
+                dec_shift_degrees=dec_shift,
+            )
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        new_handle = self._handles.create(composed)
+        return self._rgb_image_meta(composed, new_handle)
+
+    def _tricolor_image(self, params: dict[str, Any]) -> dict[str, Any]:
+        primary = self._resolve_image(int(params.get("handle", -1)))
+        second_path = params.get("second_path")
+        third_path = params.get("third_path")
+        if not second_path or not third_path:
+            raise RpcError(ERR_INVALID_PARAMS, "second_path and third_path are required")
+        secondary = _open_image_path(str(second_path))
+        tertiary = _open_image_path(str(third_path))
+        ra_shift = float(params.get("ra_shift_seconds", 0.0))
+        dec_shift = float(params.get("dec_shift_degrees", 0.0))
+        pix = params.get("pix")
+        pix_int = int(pix) if pix is not None else None
+        composed = tricolor_compose(
+            primary,
+            secondary,
+            tertiary,
+            pix=pix_int,
+            ra_shift_seconds=ra_shift,
+            dec_shift_degrees=dec_shift,
+        )
+        new_handle = self._handles.create(composed)
+        return self._rgb_image_meta(composed, new_handle)
+
+    def _extend_rgb_image(self, params: dict[str, Any]) -> dict[str, Any]:
+        rgb = self._resolve_rgb_image(int(params.get("handle", -1)))
+        other_path = params.get("other_path")
+        if not other_path:
+            raise RpcError(ERR_INVALID_PARAMS, "other_path is required")
+        other = _open_image_path(str(other_path))
+        ra_shift = float(params.get("ra_shift_seconds", 0.0))
+        dec_shift = float(params.get("dec_shift_degrees", 0.0))
+        try:
+            composed = extend_rgb_compose(
+                rgb, other, ra_shift_seconds=ra_shift, dec_shift_degrees=dec_shift
+            )
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        new_handle = self._handles.create(composed)
+        return self._rgb_image_meta(composed, new_handle)
+
+    def _get_rgb_image_pixels(self, params: dict[str, Any]) -> dict[str, Any]:
+        handle = int(params.get("handle", -1))
+        image = self._resolve_rgb_image(handle)
+        try:
+            max_dim = int(params.get("max_dim", 400))
+        except (TypeError, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, "max_dim must be an integer") from exc
+        r = image.pixels_r
+        g = image.pixels_g
+        b = image.pixels_b
+        height, width = r.shape
+        if max_dim > 0:
+            longest = max(height, width)
+            step = -(-longest // max_dim)
+            step = max(1, step)
+            if step > 1:
+                r = r[::step, ::step]
+                g = g[::step, ::step]
+                b = b[::step, ::step]
+                height, width = r.shape
+        return {
+            "r": r.tolist(),
+            "g": g.tolist(),
+            "b": b.tolist(),
+            "width": int(width),
+            "height": int(height),
+        }
+
+    def _superimpose_image(self, params: dict[str, Any]) -> dict[str, Any]:
+        primary = self._resolve_image(int(params.get("handle", -1)))
+        other_path = params.get("other_path")
+        if not other_path:
+            raise RpcError(ERR_INVALID_PARAMS, "other_path is required")
+        secondary = _open_image_path(str(other_path))
+        ra_shift = float(params.get("ra_shift_seconds", 0.0))
+        dec_shift = float(params.get("dec_shift_degrees", 0.0))
+        weight = float(params.get("weight", 0.5))
+        pix = params.get("pix")
+        pix_int = int(pix) if pix is not None else None
+        try:
+            composed = superimpose_images(
+                primary,
+                secondary,
+                weight=weight,
+                pix=pix_int,
+                ra_shift_seconds=ra_shift,
+                dec_shift_degrees=dec_shift,
+            )
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        new_handle = self._handles.create(composed)
+        return self._image_meta(composed, new_handle)
+
+    def _open_palette(self, params: dict[str, Any]) -> dict[str, Any]:
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        try:
+            palette = read_pal(str(path))
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to open palette: {exc}") from exc
+        return {"stops": _palette_stops_payload(palette), "path": str(path)}
+
+    def _save_palette(self, params: dict[str, Any]) -> dict[str, Any]:
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        palette = _palette_from_stops(params.get("stops"))
+        if palette is None:
+            raise RpcError(ERR_INVALID_PARAMS, "stops is required")
+        try:
+            write_pal(palette, str(path))
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to save palette: {exc}") from exc
+        return {"path": str(path), "bytes_written": int(Path(str(path)).stat().st_size)}
 
     def _resolve_workspace(self, handle: int) -> SurveyWorkspace:
         try:
@@ -345,6 +1033,8 @@ class RpcServer:
             "initial_enabled": bool(ws.initial_enabled),
             "terminal_enabled": bool(ws.terminal_enabled),
             "can_undo": bool(ws.undo_stack),
+            "flux_calibrated": bool(ws.flux_calibrated),
+            "flux_slope": float(ws.flux_slope) if ws.flux_slope is not None else None,
         }
 
     def _get_workspace_overview(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -365,7 +1055,7 @@ class RpcServer:
             # raw_volts / cal_volts — dimensionless. The legacy app didn't
             # label this state; we call it "gain calibration units" until a
             # `.cal` file (flux calibration) converts the survey to janskies.
-            unit = "gain"
+            unit = "jy" if ws.flux_calibrated else "gain"
         else:
             flux = raw.flux
             unit = "volts"
@@ -383,6 +1073,43 @@ class RpcServer:
             "label": f"{ws.name} - Sweep {index + 1}",
             "calibrated": bool(ws.calibrated),
         }
+
+    def _set_source_sweep_flux(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_workspace(int(params.get("handle", -1)))
+        index = int(params.get("index", -1))
+        if index < 0 or index >= ws.source_count:
+            raise RpcError(
+                ERR_INVALID_PARAMS,
+                f"source sweep index out of range: {index} (0..{ws.source_count - 1})",
+            )
+        raw_flux = params.get("flux")
+        if not isinstance(raw_flux, list):
+            raise RpcError(ERR_INVALID_PARAMS, "flux must be a list of numbers")
+        try:
+            flux_arr = np.asarray(raw_flux, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, "flux must be numeric") from exc
+        expected = int(ws.source_sweeps[index].ra.shape[0])
+        if flux_arr.shape[0] != expected:
+            raise RpcError(
+                ERR_INVALID_PARAMS,
+                f"flux length {flux_arr.shape[0]} does not match sweep sample count {expected}",
+            )
+        # Write into whichever layer current_source_flux reads from so the
+        # next get_source_sweep / save_survey sees the update.
+        if ws.reduced_source_flux is not None:
+            as_list = list(ws.reduced_source_flux)
+            as_list[index] = flux_arr
+            ws.reduced_source_flux = tuple(as_list)
+        elif ws.calibrated_source_flux is not None:
+            as_list = list(ws.calibrated_source_flux)
+            as_list[index] = flux_arr
+            ws.calibrated_source_flux = tuple(as_list)
+        else:
+            raise RpcError(
+                ERR_INVALID_PARAMS, "sweep must be calibrated before flux edits"
+            )
+        return {"overview": self._workspace_overview(ws)}
 
     def _get_calibration_view(self, params: dict[str, Any]) -> dict[str, Any]:
         ws = self._resolve_workspace(int(params.get("handle", -1)))
@@ -437,6 +1164,21 @@ class RpcServer:
         removed = cut_calibration_segment(ws, ra_min, ra_max)
         return {"removed": int(removed), "overview": self._workspace_overview(ws)}
 
+    def _select_calibration_declination(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_workspace(int(params.get("handle", -1)))
+        try:
+            dec_min = float(params["dec_min"])
+            dec_max = float(params["dec_max"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RpcError(
+                ERR_INVALID_PARAMS, "dec_min and dec_max are required numbers"
+            ) from exc
+        bracket = params.get("bracket")
+        if bracket not in ("initial", "terminal"):
+            raise RpcError(ERR_INVALID_PARAMS, "bracket must be 'initial' or 'terminal'")
+        removed = select_calibration_declination(ws, dec_min, dec_max, bracket)
+        return {"removed": int(removed), "overview": self._workspace_overview(ws)}
+
     def _undo_calibration_cut(self, params: dict[str, Any]) -> dict[str, Any]:
         ws = self._resolve_workspace(int(params.get("handle", -1)))
         undone = undo_cut(ws)
@@ -461,6 +1203,562 @@ class RpcServer:
         else:
             ws.terminal_enabled = enabled
         return self._workspace_overview(ws)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Scan pipeline (Scan menu → New Scan → MD1 → calibrate → reductions)
+    # The shape mirrors the Survey workspace but the underlying state is a
+    # `ScanWorkspace` — one continuous sweep with 240 cal samples bracketing
+    # the source, not a tuple of sweeps.
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _resolve_scan_workspace(self, handle: int) -> ScanWorkspace:
+        try:
+            obj = self._handles.get(handle)
+        except UnknownHandleError as exc:
+            raise RpcError(ERR_INVALID_HANDLE, f"unknown handle: {handle}") from exc
+        if not isinstance(obj, ScanWorkspace):
+            raise RpcError(ERR_INVALID_HANDLE, f"handle {handle} is not a scan workspace")
+        return obj
+
+    def _scan_overview(self, ws: ScanWorkspace) -> dict[str, Any]:
+        return {
+            "name": ws.name,
+            "path": ws.path,
+            "source_count": int(ws.source_count),
+            "source_kept": int(ws.kept_count()),
+            "initial_cal_samples": int(ws.initial.on_flux.shape[0] + ws.initial.off_flux.shape[0]),
+            "terminal_cal_samples": int(ws.terminal.on_flux.shape[0] + ws.terminal.off_flux.shape[0]),
+            "initial_kept": int(int(ws.initial.on_mask.sum()) + int(ws.initial.off_mask.sum())),
+            "terminal_kept": int(int(ws.terminal.on_mask.sum()) + int(ws.terminal.off_mask.sum())),
+            "cal1": float(ws.cal1()),
+            "cal2": float(ws.cal2()),
+            "calibrated": bool(ws.calibrated),
+            "initial_enabled": bool(ws.initial_enabled),
+            "terminal_enabled": bool(ws.terminal_enabled),
+            "can_undo": bool(ws.undo_stack),
+            "peak_flux": float(ws.peak_flux) if ws.peak_flux is not None else None,
+            "flux_calibrated": bool(ws.flux_calibrated),
+            "flux_slope": float(ws.flux_slope) if ws.flux_slope is not None else None,
+        }
+
+    def _open_scan(self, params: dict[str, Any]) -> dict[str, Any]:
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        try:
+            md1 = read_md1(str(path))
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to open scan: {exc}") from exc
+        try:
+            workspace = build_scan_workspace(str(path), md1)
+        except ValueError as exc:
+            raise RpcError(ERR_IO, f"failed to open scan: {exc}") from exc
+        handle = self._handles.create(workspace)
+        return {
+            "handle": handle,
+            "metadata": {
+                "path": str(path),
+                "source_count": int(workspace.source_count),
+            },
+            "overview": self._scan_overview(workspace),
+        }
+
+    def _open_saved_scan(self, params: dict[str, Any]) -> dict[str, Any]:
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        try:
+            scan = read_scn(Path(path))
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to open scan: {exc}") from exc
+        try:
+            workspace = scan_from_scn(scan, str(path))
+        except ValueError as exc:
+            raise RpcError(ERR_IO, f"failed to open scan: {exc}") from exc
+        handle = self._handles.create(workspace)
+        return {
+            "handle": handle,
+            "metadata": {
+                "path": str(path),
+                "source_count": int(workspace.source_count),
+            },
+            "overview": self._scan_overview(workspace),
+        }
+
+    def _get_scan_overview(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        return self._scan_overview(ws)
+
+    def _get_scan_view(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return the full-scan view payload — pre-cal shows cal + source, post-cal shows source only."""
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        flux = scan_current_source_flux(ws)
+        if ws.calibrated:
+            return {
+                "name": ws.name,
+                "calibrated": True,
+                "unit": "jy" if ws.flux_calibrated else "gain",
+                "source": {
+                    "ra": ws.source_ra.tolist(),
+                    "dec": ws.source_dec.tolist(),
+                    "flux": flux.tolist(),
+                    "mask": ws.source_mask.astype(bool).tolist(),
+                },
+                "peak_flux": float(ws.peak_flux) if ws.peak_flux is not None else None,
+            }
+        # Pre-cal: serve initial cal, source, terminal cal as three contiguous
+        # blocks so the front-end can paint vertical separator lines at the
+        # boundaries (legacy `vb/scanform.frm:1385-1396`).
+        return {
+            "name": ws.name,
+            "calibrated": False,
+            "unit": "volts",
+            "initial_on": {
+                "ra": ws.initial.on_ra.tolist(),
+                "dec": ws.initial.on_dec.tolist(),
+                "flux": ws.initial.on_flux.tolist(),
+                "mask": ws.initial.on_mask.astype(bool).tolist(),
+            },
+            "initial_off": {
+                "ra": ws.initial.off_ra.tolist(),
+                "dec": ws.initial.off_dec.tolist(),
+                "flux": ws.initial.off_flux.tolist(),
+                "mask": ws.initial.off_mask.astype(bool).tolist(),
+            },
+            "source": {
+                "ra": ws.source_ra.tolist(),
+                "dec": ws.source_dec.tolist(),
+                "flux": ws.source_flux.tolist(),
+                "mask": ws.source_mask.astype(bool).tolist(),
+            },
+            "terminal_on": {
+                "ra": ws.terminal.on_ra.tolist(),
+                "dec": ws.terminal.on_dec.tolist(),
+                "flux": ws.terminal.on_flux.tolist(),
+                "mask": ws.terminal.on_mask.astype(bool).tolist(),
+            },
+            "terminal_off": {
+                "ra": ws.terminal.off_ra.tolist(),
+                "dec": ws.terminal.off_dec.tolist(),
+                "flux": ws.terminal.off_flux.tolist(),
+                "mask": ws.terminal.off_mask.astype(bool).tolist(),
+            },
+        }
+
+    def _get_scan_calibration_view(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Split-bracket view used by the Calibrate Scan screen."""
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+
+        def bracket(label: str, br) -> dict[str, Any]:
+            return {
+                "label": label,
+                "on": {
+                    "ra": br.on_ra.tolist(),
+                    "dec": br.on_dec.tolist(),
+                    "flux": br.on_flux.tolist(),
+                    "mask": br.on_mask.astype(bool).tolist(),
+                },
+                "off": {
+                    "ra": br.off_ra.tolist(),
+                    "dec": br.off_dec.tolist(),
+                    "flux": br.off_flux.tolist(),
+                    "mask": br.off_mask.astype(bool).tolist(),
+                },
+            }
+
+        return {
+            "name": ws.name,
+            "initial": bracket("initial", ws.initial),
+            "terminal": bracket("terminal", ws.terminal),
+            "cal1": float(ws.cal1()),
+            "cal2": float(ws.cal2()),
+            "initial_enabled": bool(ws.initial_enabled),
+            "terminal_enabled": bool(ws.terminal_enabled),
+            "can_undo": bool(ws.undo_stack),
+        }
+
+    def _cut_scan_calibration_segment(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        try:
+            ra_min = float(params["ra_min"])
+            ra_max = float(params["ra_max"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, "ra_min and ra_max are required numbers") from exc
+        removed = cut_calibration_segment_scan(ws, ra_min, ra_max)
+        return {"removed": int(removed), "overview": self._scan_overview(ws)}
+
+    def _select_scan_calibration_declination(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        try:
+            dec_min = float(params["dec_min"])
+            dec_max = float(params["dec_max"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, "dec_min and dec_max are required numbers") from exc
+        bracket = params.get("bracket")
+        if bracket not in ("initial", "terminal"):
+            raise RpcError(ERR_INVALID_PARAMS, "bracket must be 'initial' or 'terminal'")
+        try:
+            removed = select_calibration_declination_scan(ws, dec_min, dec_max, bracket)
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        return {"removed": int(removed), "overview": self._scan_overview(ws)}
+
+    def _apply_scan_calibration(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        try:
+            apply_scan_calibration(ws)
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        return self._scan_overview(ws)
+
+    def _set_scan_bracket_enabled(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        which = params.get("bracket")
+        if which not in ("initial", "terminal"):
+            raise RpcError(ERR_INVALID_PARAMS, "bracket must be 'initial' or 'terminal'")
+        enabled = bool(params.get("enabled", True))
+        try:
+            set_bracket_enabled_scan(ws, str(which), enabled)
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        return self._scan_overview(ws)
+
+    def _select_scan_declination(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        try:
+            dec_min = float(params["dec_min"])
+            dec_max = float(params["dec_max"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, "dec_min and dec_max are required numbers") from exc
+        if not ws.calibrated:
+            raise RpcError(ERR_INVALID_PARAMS, "scan must be calibrated before source reductions")
+        removed = select_scan_declination(ws, dec_min, dec_max)
+        return {"removed": int(removed), "overview": self._scan_overview(ws)}
+
+    def _cut_scan_segment(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        try:
+            ra_min = float(params["ra_min"])
+            ra_max = float(params["ra_max"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, "ra_min and ra_max are required numbers") from exc
+        if not ws.calibrated:
+            raise RpcError(ERR_INVALID_PARAMS, "scan must be calibrated before source reductions")
+        removed = cut_scan_segment(ws, ra_min, ra_max)
+        return {"removed": int(removed), "overview": self._scan_overview(ws)}
+
+    def _baseline_scan_source(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        try:
+            ra0 = float(params["ra0"])
+            flux0 = float(params["flux0"])
+            ra1 = float(params["ra1"])
+            flux1 = float(params["flux1"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RpcError(
+                ERR_INVALID_PARAMS, "ra0/flux0/ra1/flux1 are required numbers"
+            ) from exc
+        if not ws.calibrated:
+            raise RpcError(ERR_INVALID_PARAMS, "scan must be calibrated before source reductions")
+        try:
+            baseline_scan_source(ws, ra0, flux0, ra1, flux1)
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        return {"overview": self._scan_overview(ws)}
+
+    def _determine_scan_peak(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        try:
+            flux_y = float(params["flux"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, "flux is required and must be numeric") from exc
+        if not ws.calibrated:
+            raise RpcError(ERR_INVALID_PARAMS, "scan must be calibrated before determining peak")
+        peak = determine_peak(ws, flux_y)
+        return {"peak_flux": float(peak), "overview": self._scan_overview(ws)}
+
+    def _determine_scan_peak_fit(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        try:
+            ra_min = float(params["ra_min"])
+            ra_max = float(params["ra_max"])
+            degree = int(params.get("degree", 2))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RpcError(
+                ERR_INVALID_PARAMS,
+                "ra_min/ra_max are required numbers and degree must be an integer",
+            ) from exc
+        if not ws.calibrated:
+            raise RpcError(ERR_INVALID_PARAMS, "scan must be calibrated before determining peak")
+        try:
+            peak_flux, ra_grid, flux_grid, peak_ra = determine_peak_fit(
+                ws, ra_min, ra_max, degree
+            )
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        return {
+            "peak_flux": float(peak_flux),
+            "peak_ra": float(peak_ra),
+            "fit_ra": [float(x) for x in ra_grid],
+            "fit_flux": [float(x) for x in flux_grid],
+            "overview": self._scan_overview(ws),
+        }
+
+    def _determine_scan_peak_gaussian(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        try:
+            ra_min = float(params["ra_min"])
+            ra_max = float(params["ra_max"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RpcError(
+                ERR_INVALID_PARAMS, "ra_min/ra_max are required numbers"
+            ) from exc
+        if not ws.calibrated:
+            raise RpcError(ERR_INVALID_PARAMS, "scan must be calibrated before determining peak")
+        try:
+            peak_flux, ra_grid, flux_grid, peak_ra = determine_peak_gaussian(
+                ws, ra_min, ra_max
+            )
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        return {
+            "peak_flux": float(peak_flux),
+            "peak_ra": float(peak_ra),
+            "fit_ra": [float(x) for x in ra_grid],
+            "fit_flux": [float(x) for x in flux_grid],
+            "overview": self._scan_overview(ws),
+        }
+
+    def _undo_scan(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        undone = undo_scan(ws)
+        return {"undone": bool(undone), "overview": self._scan_overview(ws)}
+
+    def _save_scan(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        path_str = params.get("path")
+        if not path_str:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        path = Path(str(path_str))
+        if not path.parent.exists():
+            raise RpcError(ERR_IO, f"directory does not exist: {path.parent}")
+        scan = workspace_to_scan(ws)
+        try:
+            write_scn(scan, path)
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to save scan: {exc}") from exc
+        return {"path": str(path), "bytes_written": path.stat().st_size}
+
+    def _save_survey(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_workspace(int(params.get("handle", -1)))
+        path_str = params.get("path")
+        if not path_str:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        path = Path(str(path_str))
+        if not path.parent.exists():
+            raise RpcError(ERR_IO, f"directory does not exist: {path.parent}")
+        raw_accepted = params.get("accepted_sweeps")
+        accepted_sweeps: list[int] | None
+        if raw_accepted is None:
+            accepted_sweeps = None
+        else:
+            try:
+                accepted_sweeps = [int(i) for i in raw_accepted]
+            except (TypeError, ValueError) as exc:
+                raise RpcError(
+                    ERR_INVALID_PARAMS, "accepted_sweeps must be a list of ints"
+                ) from exc
+        survey = workspace_to_survey(ws, accepted_sweeps=accepted_sweeps)
+        try:
+            write_srv(survey, path)
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to save survey: {exc}") from exc
+        return {"path": str(path), "bytes_written": path.stat().st_size}
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Flux calibration (.cal file → Jy/GCU slope → applied to workspace)
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _serialize_cal_table(self, table: CalibrationTable) -> dict[str, Any]:
+        return {
+            "caption": table.caption,
+            "fit_annotation": table.fit_annotation,
+            "fit_result": table.fit_result,
+            "max_measured_flux": float(table.max_measured_flux),
+            "max_known_flux": float(table.max_known_flux),
+            "entries": [
+                {
+                    "name": e.name,
+                    "measured_flux": float(e.measured_flux),
+                    "known_flux": float(e.known_flux),
+                }
+                for e in table.entries
+            ],
+        }
+
+    def _build_cal_table_from_params(
+        self, caption: str, entries_param: Any
+    ) -> CalibrationTable:
+        if not isinstance(entries_param, list):
+            raise RpcError(ERR_INVALID_PARAMS, "entries must be a list")
+        built: list[CalibrationEntry] = []
+        for raw in entries_param:
+            if not isinstance(raw, dict):
+                raise RpcError(ERR_INVALID_PARAMS, "each entry must be an object")
+            try:
+                built.append(
+                    CalibrationEntry(
+                        name=str(raw.get("name", "")),
+                        measured_flux=float(raw.get("measured_flux", 0.0)),
+                        known_flux=float(raw.get("known_flux", 0.0)),
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                raise RpcError(
+                    ERR_INVALID_PARAMS, f"invalid entry payload: {raw!r}"
+                ) from exc
+        max_mf = max((e.measured_flux for e in built), default=0.0)
+        max_kf = max((e.known_flux for e in built), default=0.0)
+        # Fit_annotation/fit_result will be overwritten with the live fit
+        # below so the .cal file we write reflects the current entries.
+        table = CalibrationTable(
+            caption=caption,
+            fit_annotation="",
+            fit_result="",
+            max_measured_flux=max_mf,
+            max_known_flux=max_kf,
+            entries=tuple(built),
+            raw_bytes=None,
+        )
+        slope = fit_counts_to_jy(table)
+        err = fit_error(table)
+        return CalibrationTable(
+            caption=caption,
+            fit_annotation=f"Slope: {slope:g} Jy",
+            fit_result=f"Error: {err:g} Jy" if table.count > 1 else "",
+            max_measured_flux=max_mf,
+            max_known_flux=max_kf,
+            entries=tuple(built),
+            raw_bytes=None,
+        )
+
+    def _flux_cal_read_file(self, params: dict[str, Any]) -> dict[str, Any]:
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        try:
+            table = read_cal(str(path))
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to read calibration: {exc}") from exc
+        return {
+            "path": str(path),
+            "table": self._serialize_cal_table(table),
+            "slope": float(fit_counts_to_jy(table)),
+            "error": float(fit_error(table)),
+        }
+
+    def _flux_cal_write_file(self, params: dict[str, Any]) -> dict[str, Any]:
+        path_str = params.get("path")
+        if not path_str:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        path = Path(str(path_str))
+        if not path.parent.exists():
+            raise RpcError(ERR_IO, f"directory does not exist: {path.parent}")
+        caption = str(params.get("caption", ""))
+        table = self._build_cal_table_from_params(caption, params.get("entries", []))
+        try:
+            write_cal(table, path)
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to write calibration: {exc}") from exc
+        return {
+            "path": str(path),
+            "bytes_written": path.stat().st_size,
+            "table": self._serialize_cal_table(table),
+            "slope": float(fit_counts_to_jy(table)),
+            "error": float(fit_error(table)),
+        }
+
+    def _flux_cal_fit(self, params: dict[str, Any]) -> dict[str, Any]:
+        caption = str(params.get("caption", ""))
+        table = self._build_cal_table_from_params(caption, params.get("entries", []))
+        return {
+            "slope": float(fit_counts_to_jy(table)),
+            "error": float(fit_error(table)),
+            "table": self._serialize_cal_table(table),
+        }
+
+    def _flux_cal_read_scn_peak(self, params: dict[str, Any]) -> dict[str, Any]:
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        try:
+            name, peak = read_scn_peak(str(path))
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to read scan: {exc}") from exc
+        return {
+            "name": name,
+            "peak_flux": float(peak),
+            "default_known_jy": float(default_known_jy(name)),
+        }
+
+    def _flux_cal_default_known_jy(self, params: dict[str, Any]) -> dict[str, Any]:
+        name = str(params.get("name", ""))
+        return {"name": name, "default_known_jy": float(default_known_jy(name))}
+
+    def _flux_cal_apply_to_survey(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_workspace(int(params.get("handle", -1)))
+        try:
+            slope = float(params["slope"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, "slope is required and must be numeric") from exc
+        try:
+            apply_flux_calibration(ws, slope)
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        return self._workspace_overview(ws)
+
+    def _flux_cal_revert_from_survey(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_workspace(int(params.get("handle", -1)))
+        revert_flux_calibration(ws)
+        return self._workspace_overview(ws)
+
+    def _flux_cal_apply_to_scan(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        try:
+            slope = float(params["slope"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, "slope is required and must be numeric") from exc
+        try:
+            apply_flux_calibration_scan(ws, slope)
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        return self._scan_overview(ws)
+
+    def _flux_cal_revert_from_scan(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        revert_flux_calibration_scan(ws)
+        return self._scan_overview(ws)
+
+    def _flux_cal_apply_to_image(self, params: dict[str, Any]) -> dict[str, Any]:
+        handle = int(params.get("handle", -1))
+        image = self._resolve_image(handle)
+        try:
+            slope = float(params["slope"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, "slope is required and must be numeric") from exc
+        try:
+            updated = apply_flux_calibration_image(image, slope)
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        self._handles.set(handle, updated)
+        return self._image_meta(updated, handle)
+
+    def _flux_cal_revert_from_image(self, params: dict[str, Any]) -> dict[str, Any]:
+        handle = int(params.get("handle", -1))
+        image = self._resolve_image(handle)
+        updated = revert_flux_calibration_image(image)
+        self._handles.set(handle, updated)
+        return self._image_meta(updated, handle)
 
     def _echo_array(self, params: dict[str, Any]) -> dict[str, Any]:
         token = params.get("token")

@@ -81,6 +81,57 @@ def test_cut_calibration_segment_then_undo() -> None:
     assert abs(undone["result"]["overview"]["cal1"] - cal1_pre) < 1e-12
 
 
+def test_select_calibration_declination_only_affects_one_bracket() -> None:
+    server = RpcServer()
+    ws_handle, overview = _open(server)
+
+    view = call(server, "get_calibration_view", {"handle": ws_handle})
+    # The legacy "Select Declination" gesture drags a horizontal band on the
+    # dec-vs-RA plot of ONE bracket panel. Initial and terminal brackets sit
+    # at different declinations, so applying one panel's band to both would
+    # over-cut — we scope to the panel the user dragged on.
+    decs = view["result"]["initial"]["on"]["dec"]
+    lo = min(decs)
+    hi = max(decs)
+    span = hi - lo
+    sel_lo = lo + 0.25 * span
+    sel_hi = hi - 0.25 * span
+
+    selected = call(
+        server,
+        "select_calibration_declination",
+        {
+            "handle": ws_handle,
+            "dec_min": sel_lo,
+            "dec_max": sel_hi,
+            "bracket": "initial",
+        },
+    )
+    assert "error" not in selected
+    assert selected["result"]["removed"] > 0
+    overview_post = selected["result"]["overview"]
+    assert overview_post["can_undo"] is True
+    # Only the initial bracket should have shrunk.
+    assert overview_post["initial_kept"] < overview["initial_kept"]
+    assert overview_post["terminal_kept"] == overview["terminal_kept"]
+
+    undone = call(server, "undo_calibration_cut", {"handle": ws_handle})
+    assert undone["result"]["undone"] is True
+    assert undone["result"]["overview"]["initial_kept"] == overview["initial_kept"]
+
+
+def test_select_calibration_declination_rejects_unknown_bracket() -> None:
+    server = RpcServer()
+    ws_handle, _ = _open(server)
+    resp = call(
+        server,
+        "select_calibration_declination",
+        {"handle": ws_handle, "dec_min": 0, "dec_max": 1, "bracket": "middle"},
+    )
+    assert "error" in resp
+    assert resp["error"]["code"] == -32602
+
+
 def test_undo_when_stack_empty_is_safe() -> None:
     server = RpcServer()
     ws_handle, _ = _open(server)
@@ -121,3 +172,87 @@ def test_set_bracket_enabled_toggles_cal_value() -> None:
     enabled = call(server, "set_bracket_enabled", {"handle": ws_handle, "bracket": "initial", "enabled": True})
     assert "error" not in enabled
     assert abs(enabled["result"]["cal1"] - cal1_pre) < 1e-12
+
+
+def _open_calibrated(server: RpcServer) -> int:
+    ws_handle, _ = _open(server)
+    cal = call(server, "apply_gain_calibration", {"handle": ws_handle})
+    assert "error" not in cal, cal
+    return ws_handle
+
+
+def test_set_source_sweep_flux_writes_to_calibrated_layer(tmp_path: Path) -> None:
+    server = RpcServer()
+    ws_handle = _open_calibrated(server)
+    sweep = call(server, "get_source_sweep", {"handle": ws_handle, "index": 1, "max_points": 0})
+    n = sweep["result"]["sample_count"]
+    new_flux = [0.5] * n
+    resp = call(
+        server,
+        "set_source_sweep_flux",
+        {"handle": ws_handle, "index": 1, "flux": new_flux},
+    )
+    assert "error" not in resp, resp
+    # The workspace's calibrated layer for that sweep should match what we sent.
+    ws = server._handles.get(ws_handle)
+    assert isinstance(ws, SurveyWorkspace)
+    assert ws.calibrated_source_flux is not None
+    np.testing.assert_allclose(ws.calibrated_source_flux[1], np.asarray(new_flux))
+
+
+def test_set_source_sweep_flux_round_trips_through_save_and_load(tmp_path: Path) -> None:
+    server = RpcServer()
+    ws_handle = _open_calibrated(server)
+    sweep = call(server, "get_source_sweep", {"handle": ws_handle, "index": 2, "max_points": 0})
+    n = sweep["result"]["sample_count"]
+    # Use a non-trivial pattern so the round-trip can't accidentally pass via
+    # an unrelated constant value.
+    new_flux = [float(i % 7) * 0.1 for i in range(n)]
+
+    set_resp = call(
+        server,
+        "set_source_sweep_flux",
+        {"handle": ws_handle, "index": 2, "flux": new_flux},
+    )
+    assert "error" not in set_resp, set_resp
+
+    out = tmp_path / "round.srv"
+    save = call(server, "save_survey", {"handle": ws_handle, "path": str(out)})
+    assert "error" not in save, save
+
+    reopen = call(server, "open_saved_survey", {"path": str(out)})
+    assert "error" not in reopen, reopen
+    reloaded_ws = int(reopen["result"]["workspace_handle"])
+    reloaded_sweep = call(
+        server, "get_source_sweep", {"handle": reloaded_ws, "index": 2, "max_points": 0}
+    )
+    # Round-trip through the .srv format truncates to 4 decimal places (#.####).
+    np.testing.assert_allclose(
+        reloaded_sweep["result"]["flux"], new_flux, atol=5e-4
+    )
+
+
+def test_set_source_sweep_flux_rejects_wrong_length() -> None:
+    server = RpcServer()
+    ws_handle = _open_calibrated(server)
+    resp = call(
+        server,
+        "set_source_sweep_flux",
+        {"handle": ws_handle, "index": 0, "flux": [1.0, 2.0, 3.0]},
+    )
+    assert "error" in resp
+    assert resp["error"]["code"] == -32602  # ERR_INVALID_PARAMS
+
+
+def test_set_source_sweep_flux_rejects_uncalibrated_workspace() -> None:
+    server = RpcServer()
+    ws_handle, _ = _open(server)
+    sweep = call(server, "get_source_sweep", {"handle": ws_handle, "index": 0, "max_points": 0})
+    n = sweep["result"]["sample_count"]
+    resp = call(
+        server,
+        "set_source_sweep_flux",
+        {"handle": ws_handle, "index": 0, "flux": [0.0] * n},
+    )
+    assert "error" in resp
+    assert resp["error"]["code"] == -32602

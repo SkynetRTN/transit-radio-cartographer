@@ -16,9 +16,16 @@ default:
 sync:
     uv sync
 
-# Python — run the engine test suite
-test:
+# Run every test suite: engine (pytest) and front-end (vitest).
+test: test-engine test-app
+
+# Engine only — pytest over `engine/tests/`.
+test-engine:
     uv run pytest
+
+# Front-end only — vitest in CI mode over `app/src/__tests__/`.
+test-app:
+    cd app && npm test
 
 # Python — lint and format check
 lint:

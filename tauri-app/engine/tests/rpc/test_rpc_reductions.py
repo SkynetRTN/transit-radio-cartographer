@@ -127,3 +127,108 @@ def test_smooth_with_invalid_handle_returns_structured_error() -> None:
     resp = call(server, "smooth", {"handle": 9999, "width": 5})
     assert "error" in resp
     assert resp["error"]["code"] == 1001
+
+
+def test_make_image_with_workspace_excludes_cal_sweeps() -> None:
+    # Pre-image must reflect the *swept region* — the legacy app paints
+    # source sweeps only, never the cal brackets (their RA/Dec point at a
+    # different calibrator). When `workspace_handle` is provided the engine
+    # builds the grid from source sweeps only, so the bounds tighten relative
+    # to the full-survey grid.
+    server = RpcServer()
+    opened = call(server, "open_survey", {"path": str(FIXTURE)})
+    assert "error" not in opened, opened
+    survey_handle = int(opened["result"]["handle"])
+    ws_handle = int(opened["result"]["workspace_handle"])
+
+    full = call(server, "make_image", {"handle": survey_handle, "pix": 1})
+    src_only = call(
+        server,
+        "make_image",
+        {"handle": survey_handle, "workspace_handle": ws_handle, "pix": 1},
+    )
+    assert "error" not in full, full
+    assert "error" not in src_only, src_only
+
+    # The cal brackets at the head and tail of and0a.md2 sit at different
+    # Dec (≈31° and ≈52°) than the source sweeps (≈33.5°-48.5°). Source-only
+    # bounds must land strictly inside the full-survey bounds.
+    assert src_only["result"]["min_dec"] > full["result"]["min_dec"]
+    assert src_only["result"]["max_dec"] < full["result"]["max_dec"]
+    assert src_only["result"]["min_ra"] > full["result"]["min_ra"]
+    assert src_only["result"]["max_ra"] < full["result"]["max_ra"]
+
+
+def test_reductions_with_workspace_handle_change_pre_image() -> None:
+    # Smoke test for the Pre Image screen wiring: calling smooth/baseline/
+    # align with `workspace_handle` must mutate the workspace's source flux
+    # so the next `make_image(workspace_handle=...)` returns a different
+    # grid. Without this path the UI buttons fire but the rendered image is
+    # unchanged.
+    server = RpcServer()
+    opened = call(server, "open_survey", {"path": str(FIXTURE)})
+    survey_handle = int(opened["result"]["handle"])
+    ws_handle = int(opened["result"]["workspace_handle"])
+
+    baseline_img = call(
+        server,
+        "make_image",
+        {"handle": survey_handle, "workspace_handle": ws_handle, "pix": 1},
+    )
+    assert "error" not in baseline_img, baseline_img
+    baseline_pix = call(
+        server,
+        "get_image_pixels",
+        {"handle": int(baseline_img["result"]["handle"]), "max_dim": 0},
+    )
+    before = np.asarray(baseline_pix["result"]["pixels"], dtype=np.float64)
+
+    reduce_resp = call(
+        server,
+        "smooth",
+        {"handle": survey_handle, "workspace_handle": ws_handle, "width": 11},
+    )
+    assert "error" not in reduce_resp, reduce_resp
+    # Workspace-aware reductions don't mint a new survey handle — the
+    # mutation lives on the workspace and is picked up by the next
+    # `make_image`.
+    assert "handle" not in reduce_resp["result"]
+    assert reduce_resp["result"]["op"] == "smooth"
+    assert "overview" in reduce_resp["result"]
+
+    after_img = call(
+        server,
+        "make_image",
+        {"handle": survey_handle, "workspace_handle": ws_handle, "pix": 1},
+    )
+    after_pix = call(
+        server,
+        "get_image_pixels",
+        {"handle": int(after_img["result"]["handle"]), "max_dim": 0},
+    )
+    after = np.asarray(after_pix["result"]["pixels"], dtype=np.float64)
+
+    assert before.shape == after.shape
+    assert not np.allclose(before, after)
+
+    # Baseline subtraction stacks on top of the smoothing — the mean of the
+    # gridded image should drop sharply once a per-sweep linear baseline is
+    # removed.
+    base_resp = call(
+        server,
+        "baseline",
+        {"handle": survey_handle, "workspace_handle": ws_handle, "degree": 1},
+    )
+    assert "error" not in base_resp, base_resp
+    baselined_img = call(
+        server,
+        "make_image",
+        {"handle": survey_handle, "workspace_handle": ws_handle, "pix": 1},
+    )
+    baselined_pix = call(
+        server,
+        "get_image_pixels",
+        {"handle": int(baselined_img["result"]["handle"]), "max_dim": 0},
+    )
+    baselined = np.asarray(baselined_pix["result"]["pixels"], dtype=np.float64)
+    assert abs(float(baselined.mean())) < abs(float(after.mean()))

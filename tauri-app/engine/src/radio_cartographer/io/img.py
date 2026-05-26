@@ -91,13 +91,31 @@ def _parse_img(raw: bytes) -> Image:
     pixel_count = rows * cols
     expected_bytes = pixel_count * 2
     remaining = len(raw) - cursor
-    if remaining != expected_bytes:
+    if remaining < expected_bytes:
         raise ValueError(
-            f".img grid size mismatch: expected {expected_bytes} bytes for "
+            f".img grid size mismatch: expected at least {expected_bytes} bytes for "
             f"a ({rows},{cols}) grid at Pix={pix}, got {remaining}"
         )
     pixels = np.frombuffer(raw, dtype="<i2", count=pixel_count, offset=cursor)
-    pixels = pixels.reshape((rows, cols)).copy()
+    # Legacy on-disk row order is MaxDec → MinDec (the legacy paint loop draws
+    # `Clr(Num, Cnt=1)` at y=0, top of the picture, and the builder maps high
+    # Dec to low `Cnt` indices — see vb/survform.frm:1697, 4805). Our internal
+    # convention is row 0 = MinDec (matches the heatmap's `ys[0] = min_dec`),
+    # so we flip vertically here. `_serialize_img` flips back when writing,
+    # which keeps the on-disk bytes legacy-compatible and round-trip-stable.
+    pixels = pixels.reshape((rows, cols))[::-1].copy()
+    cursor += expected_bytes
+
+    # Optional unit string appended after the pixel grid — our extension to
+    # the legacy format. Legacy `.img` files end at the pixel grid, so a
+    # missing unit just means `unit=None`. Format: same length-prefixed ASCII
+    # as the header strings.
+    unit: str | None = None
+    if cursor + 2 <= len(raw):
+        u_len = struct.unpack_from("<h", raw, cursor)[0]
+        if u_len >= 0 and cursor + 2 + u_len <= len(raw):
+            cursor += 2
+            unit = raw[cursor : cursor + u_len].decode("ascii", errors="strict")
 
     return Image(
         name=name,
@@ -116,6 +134,7 @@ def _parse_img(raw: bytes) -> Image:
         pix=pix,
         palette=palette,
         pixels=pixels,
+        unit=unit,
         raw_bytes=raw,
     )
 
@@ -153,5 +172,13 @@ def _serialize_img(image: Image) -> bytes:
     for stop in image.palette.stops:
         for value in (stop.anchor, stop.r, stop.g, stop.b):
             write_prefixed_string(vb_str(_compact(float(value))))
-    out.extend(image.pixels.astype("<i2", copy=False).tobytes(order="C"))
+    # Flip rows back to legacy on-disk order (MaxDec first); see `_parse_img`
+    # for the matching read-side flip.
+    out.extend(image.pixels[::-1].astype("<i2", copy=False).tobytes(order="C"))
+    # Optional unit suffix — only appended when set so legacy files round-trip
+    # byte-exact (read returns unit=None → write skips the suffix).
+    if image.unit:
+        encoded = image.unit.encode("ascii", errors="strict")
+        out.extend(struct.pack("<h", len(encoded)))
+        out.extend(encoded)
     return bytes(out)

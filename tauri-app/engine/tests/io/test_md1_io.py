@@ -45,24 +45,21 @@ def test_read_full_md1_trailing_metadata_preserved(inputs_dir: Path) -> None:
     "name",
     ["mw_08b.md1", "mw_67b.md1", "pulsar1b.md1"],
 )
-def test_rejects_b_channel(inputs_dir: Path, name: str) -> None:
-    with pytest.raises(ValueError, match="Channel-B"):
-        read_md1(inputs_dir / name)
+def test_b_channel_files_load(inputs_dir: Path, name: str) -> None:
+    """B-channel `.md1` files load through the same path as A-channel ones.
 
-
-def test_rejects_b_channel_substring_safe(tmp_path: Path) -> None:
-    """The guard inspects the stem, not the full path or extension.
-
-    Files in a `b`-suffixed *directory* — e.g. `mybatch/some_a.md1` — must
-    still parse, even though the path contains `b`. Only the stem's final
-    character is consulted.
+    The earlier `reject_b_channel` gate has been removed — the legacy app
+    accepted these files and the pipeline (`RawSweep` / `ScanWorkspace`)
+    is channel-agnostic, so blocking them was stricter than the original
+    and hid usable data. The check here is just "no exception, RA/Dec/Flux
+    arrays the same shape, ≥240 cal samples".
     """
-    sub = tmp_path / "anybatch"
-    sub.mkdir()
-    p = sub / "some_a.md1"
-    p.write_bytes(b"1\r\n2\r\n3\r\n")
-    doc = read_md1(p)
-    assert doc.samples.ra.size == 1
+    doc = read_md1(inputs_dir / name)
+    samples = doc.samples
+    assert samples.ra.shape == samples.dec.shape == samples.flux.shape
+    # The scan layout is 60 cal-on + 60 cal-off + ≥1 source + 60 cal-on +
+    # 60 cal-off, so any valid `.md1` has at least 241 samples.
+    assert samples.ra.size >= 241
 
 
 def test_malformed_truncated_file_raises(tmp_path: Path) -> None:

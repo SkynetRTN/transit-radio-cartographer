@@ -68,6 +68,7 @@ class Survey:
     sweep0: Sweep
     sweeps: tuple[Sweep, ...]
     raw_bytes: bytes | None = None
+    accepted: tuple[bool, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -185,6 +186,11 @@ class Image:
     pix: int
     palette: Palette
     pixels: NDArray[np.int16]
+    # Flux unit string ("Jy" / "GCU" / None). Legacy `.img` files don't carry
+    # this on disk — `read_img` reads it from an optional trailing string and
+    # leaves it as `None` for legacy files. `write_img` only appends the
+    # suffix when this is set, so legacy fixtures round-trip byte-exact.
+    unit: str | None = None
     raw_bytes: bytes | None = None
 
 

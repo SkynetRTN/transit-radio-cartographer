@@ -1,7 +1,19 @@
 {
   "permissions": {
     "allow": [
-      "Bash(uv run *)"
+      "Bash(uv run *)",
+      "Bash(npm run *)",
+      "Bash(npm test *)",
+      "Bash(just test *)",
+      "Bash(python -c ' *)",
+      "Bash(npx tsc *)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\leesnow\\\\skynet2\\\\ogrc\" -Recurse -Name)",
+      "Bash(Select-Object -First 30)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\leesnow\\\\skynet2\\\\ogrc\" -Recurse -Directory -Filter \"tauri-app\")",
+      "Bash(Select-Object -First 5)",
+      "Bash(c:/Users/leesnow/skynet2/ogrc/tauri-app/.venv/Scripts/python.exe -m pytest tests/numerics/test_flux_calibration.py tests/rpc/test_rpc_flux_cal.py -x --tb=short)",
+      "Bash(pdftotext \"c:\\\\Users\\\\leesnow\\\\skynet2\\\\ogrc\\\\docs\\\\Radio Cartographer Tutorial.docx.pdf\" \"/tmp/tutorial.txt\")",
+      "Read(//tmp/**)"
     ]
   }
 }
