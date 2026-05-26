@@ -93,6 +93,16 @@ impl PythonSidecar {
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        // Suppress the console flash on Windows. The PyInstaller exe is built
+        // with console=False, but the uv-run dev fallback would otherwise still
+        // open a window; this also protects against any future console-mode
+        // sidecar reverts.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
         cmd
     }
 
