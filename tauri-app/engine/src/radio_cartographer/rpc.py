@@ -400,6 +400,8 @@ class RpcServer:
                 result = self._apply_gain_calibration(params)
             elif method == "set_bracket_enabled":
                 result = self._set_bracket_enabled(params)
+            elif method == "set_workspace_name":
+                result = self._set_workspace_name(params)
             elif method == "open_scan":
                 result = self._open_scan(params)
             elif method == "open_saved_scan":
@@ -418,6 +420,8 @@ class RpcServer:
                 result = self._apply_scan_calibration(params)
             elif method == "set_scan_bracket_enabled":
                 result = self._set_scan_bracket_enabled(params)
+            elif method == "set_scan_workspace_name":
+                result = self._set_scan_workspace_name(params)
             elif method == "select_scan_declination":
                 result = self._select_scan_declination(params)
             elif method == "cut_scan_segment":
@@ -1204,6 +1208,17 @@ class RpcServer:
             ws.terminal_enabled = enabled
         return self._workspace_overview(ws)
 
+    def _set_workspace_name(self, params: dict[str, Any]) -> dict[str, Any]:
+        # User-facing rename. The workspace name is what gets serialised into
+        # the .srv `label2` on save, so changing it here is enough to persist
+        # across save → close → reopen.
+        ws = self._resolve_workspace(int(params.get("handle", -1)))
+        name = params.get("name")
+        if not isinstance(name, str):
+            raise RpcError(ERR_INVALID_PARAMS, "name must be a string")
+        ws.name = name
+        return self._workspace_overview(ws)
+
     # ─────────────────────────────────────────────────────────────────────
     # Scan pipeline (Scan menu → New Scan → MD1 → calibrate → reductions)
     # The shape mirrors the Survey workspace but the underlying state is a
@@ -1421,6 +1436,17 @@ class RpcServer:
             set_bracket_enabled_scan(ws, str(which), enabled)
         except ValueError as exc:
             raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        return self._scan_overview(ws)
+
+    def _set_scan_workspace_name(self, params: dict[str, Any]) -> dict[str, Any]:
+        # Mirrors `_set_workspace_name` for the scan side. `workspace_to_scan`
+        # serialises this name into the .scn file's `Scan.name`, which is what
+        # `scan_from_scn` reads back on reopen.
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        name = params.get("name")
+        if not isinstance(name, str):
+            raise RpcError(ERR_INVALID_PARAMS, "name must be a string")
+        ws.name = name
         return self._scan_overview(ws)
 
     def _select_scan_declination(self, params: dict[str, Any]) -> dict[str, Any]:

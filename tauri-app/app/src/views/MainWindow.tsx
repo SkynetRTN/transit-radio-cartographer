@@ -10,6 +10,7 @@ import { AboutBox } from './AboutBox';
 import { PreImageView } from './PreImageView';
 import { ImageView } from './ImageView';
 import { NumericInputDialog, type NumericPrompt } from './dialogs/NumericInputDialog';
+import { TextInputDialog, type TextPrompt } from './dialogs/TextInputDialog';
 import { YesNoCancelDialog } from './dialogs/YesNoCancelDialog';
 import { ColorPickDialog } from './dialogs/ColorPickDialog';
 import { ConfirmDialog } from './dialogs/ConfirmDialog';
@@ -47,6 +48,7 @@ export function MainWindow() {
     imageName,
     imageSavePath,
     saveImage,
+    setSurveyName,
     magnifierHalfSize,
     setMagnifierHalfSize,
   } = useSurvey();
@@ -61,6 +63,7 @@ export function MainWindow() {
     savePath: scanSavePath,
     dirty: scanDirty,
     save: saveScan,
+    setScanName,
     peakFitDegree,
     setPeakFitDegree,
   } = useScan();
@@ -154,6 +157,7 @@ export function MainWindow() {
   } | null>(null);
 
   const [numericPrompt, setNumericPrompt] = useState<NumericPrompt | null>(null);
+  const [textPrompt, setTextPrompt] = useState<TextPrompt | null>(null);
   const [yesNoPrompt, setYesNoPrompt] = useState<{
     title: string;
     message: string;
@@ -1050,9 +1054,58 @@ export function MainWindow() {
   const handleChangeCalibrationName = useCallback(() => {
     setOpenMenu(null);
     if (!fluxCal.table) return;
-    const next = window.prompt('Calibration name:', fluxCal.table.caption);
-    if (next !== null) fluxCal.setCaption(next);
+    setTextPrompt({
+      title: 'Change Calibration Name',
+      label: 'Calibration name:',
+      defaultValue: fluxCal.table.caption,
+      onSubmit: (value) => {
+        setTextPrompt(null);
+        fluxCal.setCaption(value);
+      },
+    });
   }, [fluxCal]);
+
+  const handleChangeImageName = useCallback(() => {
+    setOpenMenu(null);
+    if (!image) return;
+    setTextPrompt({
+      title: 'Change Image Name',
+      label: 'Image name:',
+      defaultValue: imageName,
+      onSubmit: (value) => {
+        setTextPrompt(null);
+        setImageName(value);
+      },
+    });
+  }, [image, imageName, setImageName]);
+
+  const handleChangeSurveyName = useCallback(() => {
+    setOpenMenu(null);
+    if (!workspace) return;
+    setTextPrompt({
+      title: 'Change Survey Name',
+      label: 'Survey name:',
+      defaultValue: workspace.name,
+      onSubmit: (value) => {
+        setTextPrompt(null);
+        void setSurveyName(value);
+      },
+    });
+  }, [workspace, setSurveyName]);
+
+  const handleChangeScanName = useCallback(() => {
+    setOpenMenu(null);
+    if (!scanOverview) return;
+    setTextPrompt({
+      title: 'Change Scan Name',
+      label: 'Scan name:',
+      defaultValue: scanOverview.name,
+      onSubmit: (value) => {
+        setTextPrompt(null);
+        void setScanName(value);
+      },
+    });
+  }, [scanOverview, setScanName]);
 
   const toggleMenu = (key: MenuKey) =>
     setOpenMenu((current) => (current === key ? null : key));
@@ -1222,12 +1275,7 @@ export function MainWindow() {
               <button
                 role="menuitem"
                 disabled={!hasImage}
-                onClick={() => {
-                  setOpenMenu(null);
-                  if (!image) return;
-                  const next = window.prompt('Image name:', imageName);
-                  if (next !== null) setImageName(next);
-                }}
+                onClick={handleChangeImageName}
                 title={hasImage ? undefined : 'Available after you build or upload an image'}
               >
                 Change Image Name…
@@ -1267,7 +1315,11 @@ export function MainWindow() {
                 Save Survey As…
               </button>
               <div className="menu-sep" />
-              <button role="menuitem" disabled={!hasSurvey}>
+              <button
+                role="menuitem"
+                disabled={!hasSurvey}
+                onClick={handleChangeSurveyName}
+              >
                 Change Survey Name…
               </button>
             </div>
@@ -1309,7 +1361,11 @@ export function MainWindow() {
                 Append Scan…
               </button>
               <div className="menu-sep" />
-              <button role="menuitem" disabled={!hasScan}>
+              <button
+                role="menuitem"
+                disabled={!hasScan}
+                onClick={handleChangeScanName}
+              >
                 Change Scan Name…
               </button>
               <div className="menu-sep" />
@@ -1483,6 +1539,9 @@ export function MainWindow() {
             cancelColorCompose();
           }}
         />
+      )}
+      {textPrompt && (
+        <TextInputDialog prompt={textPrompt} onCancel={() => setTextPrompt(null)} />
       )}
       {colorPrompt && (
         <ColorPickDialog

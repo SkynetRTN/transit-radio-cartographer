@@ -344,6 +344,9 @@ export class RpcClient {
       enabled,
     });
   }
+  setWorkspaceName(handle: number, name: string) {
+    return this.request<WorkspaceOverview>('set_workspace_name', { handle, name });
+  }
   smooth(handle: number, width = 5, workspaceHandle?: number | null) {
     return this.request<ReductionResult>('smooth', this._reductionParams(handle, { width }, workspaceHandle));
   }
@@ -553,6 +556,9 @@ export class RpcClient {
       bracket,
       enabled,
     });
+  }
+  setScanWorkspaceName(handle: number, name: string) {
+    return this.request<ScanOverview>('set_scan_workspace_name', { handle, name });
   }
   selectScanDeclination(handle: number, decMin: number, decMax: number) {
     return this.request<{ removed: number; overview: ScanOverview }>(

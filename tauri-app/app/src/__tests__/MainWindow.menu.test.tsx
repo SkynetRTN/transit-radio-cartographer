@@ -53,6 +53,8 @@ vi.mock('../ipc/client', () => ({
     undoScan: vi.fn(),
     saveScan: vi.fn(),
     saveSurvey: vi.fn(),
+    setWorkspaceName: vi.fn(),
+    setScanWorkspaceName: vi.fn(),
     fluxCalReadFile: vi.fn(),
     fluxCalWriteFile: vi.fn(),
     fluxCalFit: vi.fn(),
@@ -223,6 +225,73 @@ test('save scan as opens save dialog and invokes saveScan rpc', async () => {
   fireEvent.click(screen.getByText('Scan'));
   await vi.waitFor(() => {
     expect(screen.getByRole('menuitem', { name: 'Save Scan' })).not.toBeDisabled();
+  });
+});
+
+test('Change Scan Name opens a text prompt and calls set_scan_workspace_name', async () => {
+  const dialog = await import('@tauri-apps/plugin-dialog');
+  const client = await import('../ipc/client');
+  (dialog.open as unknown as ReturnType<typeof vi.fn>).mockResolvedValue('/tmp/cyg0a.md1');
+  (client.rpcClient.openScan as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+    handle: 31,
+    metadata: { path: '/tmp/cyg0a.md1', source_count: 200 },
+    overview: {
+      name: 'CYG0A',
+      path: '/tmp/cyg0a.md1',
+      source_count: 200,
+      source_kept: 200,
+      initial_cal_samples: 120,
+      terminal_cal_samples: 120,
+      initial_kept: 120,
+      terminal_kept: 120,
+      cal1: 0.34,
+      cal2: 0.36,
+      calibrated: false,
+      initial_enabled: true,
+      terminal_enabled: true,
+      can_undo: false,
+      peak_flux: null,
+    },
+  });
+  (client.rpcClient.setScanWorkspaceName as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+    name: 'Renamed Scan',
+    path: '/tmp/cyg0a.md1',
+    source_count: 200,
+    source_kept: 200,
+    initial_cal_samples: 120,
+    terminal_cal_samples: 120,
+    initial_kept: 120,
+    terminal_kept: 120,
+    cal1: 0.34,
+    cal2: 0.36,
+    calibrated: false,
+    initial_enabled: true,
+    terminal_enabled: true,
+    can_undo: false,
+    peak_flux: null,
+  });
+
+  renderApp();
+  fireEvent.click(screen.getByText('Scan'));
+  // Disabled before a scan is loaded.
+  expect(screen.getByRole('menuitem', { name: 'Change Scan Name…' })).toBeDisabled();
+  fireEvent.click(screen.getByRole('menuitem', { name: 'New Scan…' }));
+  await vi.waitFor(() => {
+    expect(client.rpcClient.openScan).toHaveBeenCalledWith('/tmp/cyg0a.md1');
+  });
+
+  fireEvent.click(screen.getByText('Scan'));
+  await vi.waitFor(() => {
+    expect(screen.getByRole('menuitem', { name: 'Change Scan Name…' })).not.toBeDisabled();
+  });
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Change Scan Name…' }));
+
+  const input = await screen.findByLabelText('Scan name:');
+  fireEvent.change(input, { target: { value: 'Renamed Scan' } });
+  fireEvent.click(screen.getByRole('button', { name: 'OK' }));
+
+  await vi.waitFor(() => {
+    expect(client.rpcClient.setScanWorkspaceName).toHaveBeenCalledWith(31, 'Renamed Scan');
   });
 });
 

@@ -389,4 +389,123 @@ Just has a set size
 ### Acceptance
 You should be able to resize the window and have the survey or image or scan fill most of the window, leaving a small gray outline, the size of what is currently defaulted on the top and sides.
 
+### BUG-008 — Right click preimage flips axis
+
+- **Status:** Open
+- **Priority:**  Medium 
+- **Area:** UI 
+- **Where:** tauri-app\app\src\views\PreImageView.tsx
+
+### Repro
+1. Open App
+2. Load Survey
+3. Approve all sweeps, generate preimage
+
+### Expected
+Right click does nothing on preimage
+
+### Actual
+Right clicking on the preimage zooms in and then when a user zooms back out, the RA axis flips
+
+
+### Notes / suspected cause
+Something about doing a right click zoom resets the plot and gets rid of the correct RA axis
+
+### Acceptance
+A user can right click on a preimage and nothing will happen. 
+
+---
+
+## BUG-009 — Can't append  with .fits file
+
+- **Status:** Open 
+- **Priority:** High 
+- **Area:** UI | Engine 
+- **Where:** 
+
+### Repro
+1. Open app
+2. Open .fits file as image
+
+### Expected
+User should be able to append and superimpose image with a fits file
+
+### Actual
+When user tries to append or superimpose, either a .img file or .fits file with the base image being a .fits file, it fails and generates two errors shown below:
+
+'Error: 1001:unknown handle: 29 '
+'-32603':Unable to allocate 660. GiB for an array with shape (5269, 16803921) and data type float64
+
+
+### Notes / suspected cause
+The fits file that is being generated outside of OG RC has additional data in it that is causing either incorrect or incongruent coordinates or just too large of a file to append
+
+### Acceptance
+Append and superimpose works with either .img files or .fits files. Tests should be created to ensure uploading two files is possible with a .fits file loaded. 
+
+---
+
+## BUG-010 — Change Name
+
+- **Status:** Resolved
+- **Priority:** Medium 
+- **Area:** UI | Engine 
+- **Where:** tauri-app/app/src/views/MainWindow.tsx, tauri-app/app/src/views/dialogs/TextInputDialog.tsx, tauri-app/app/src/state/{survey,scan}-context.tsx, tauri-app/app/src/ipc/client.ts, tauri-app/engine/src/radio_cartographer/rpc.py
+
+### Repro
+1. Any Change name button
+
+### Expected
+Chnage name button should open a pop up text box that allows you to change the "name" of the image, calibration, scan or survey that is displayed on the top left of the UI. This is not the same as the file name, though the default if there isn't something else should be the file name. You should be able to change the name and it persist if you save the file, close and reopen it. 
+
+### Actual
+Buttons don't do anything currently
+
+
+### Notes / suspected cause
+Just hasn't been implemented yet, is being used essentially as a file name field 
+
+### Acceptance
+Using the change name button allows you to input text that will be displayed in the upper left of the window (where it currently is) that will be persistant through saving, closing and reopening of a file. 
+
+---
+
+
+## BUG-### — <short title>
+
+- **Status:** Open | In Progress | Fixed | Won't fix | Needs more info
+- **Priority:** High | Medium | Low
+- **Area:** UI | Engine | RPC | Build | Workflow | Other
+- **Where:** *file paths as markdown links, view names, function names —
+  the more specific the better*
+
+### Repro
+1. *Step-by-step. Start from a known state (e.g. "Open app, load
+   `fixtures/inputs/cas0awpeak.scn`").*
+2. *...*
+
+### Expected
+*What you thought would happen, or what the legacy app does.*
+
+### Actual
+*What actually happens. Paste console errors, Python tracebacks, or RPC
+payloads verbatim in a fenced code block. Note which terminal they came
+from (browser devtools, `just dev` engine output, Tauri shell).*
+
+```
+<paste logs / errors / tracebacks here, or delete this block>
+```
+
+### Screenshots / attachments
+- *Relative path(s) to images, e.g. `docs/bugs/bug-001-palette-mismatch.png`*
+
+### Notes / suspected cause
+*Optional — your hypothesis, related commits, things you already ruled
+out. Helps Claude skip dead ends.*
+
+### Acceptance
+*How we know it's fixed. e.g. "Re-running the repro shows the violet
+baseline line in the corrected panel" or "Test added in
+`test_baseline_segment.py` passes".*
+
 ---

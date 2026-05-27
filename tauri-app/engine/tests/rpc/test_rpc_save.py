@@ -110,3 +110,48 @@ def test_save_survey_after_reduction(tmp_path: Path) -> None:
     # workspace.swp == source_count → sweeps list length == source_count
     assert len(parsed.sweeps) == parsed.swp
     assert parsed.label2  # workspace name carried through
+
+
+def test_set_workspace_name_persists_through_save(tmp_path: Path) -> None:
+    server = RpcServer()
+    opened = call(server, "open_survey", {"path": str(FIXTURES / "and0a.md2")})
+    ws_handle = int(opened["result"]["workspace_handle"])
+
+    renamed = call(
+        server, "set_workspace_name", {"handle": ws_handle, "name": "My Survey"}
+    )
+    assert "error" not in renamed, renamed
+    assert renamed["result"]["name"] == "My Survey"
+
+    target = tmp_path / "renamed.srv"
+    saved = call(server, "save_survey", {"handle": ws_handle, "path": str(target)})
+    assert "error" not in saved, saved
+    parsed = read_srv(target)
+    assert parsed.label2 == "My Survey"
+
+
+def test_set_scan_workspace_name_persists_through_save(tmp_path: Path) -> None:
+    server = RpcServer()
+    opened = call(server, "open_scan", {"path": str(FIXTURES / "cyg0a.md1")})
+    handle = int(opened["result"]["handle"])
+
+    renamed = call(
+        server, "set_scan_workspace_name", {"handle": handle, "name": "Cygnus Run"}
+    )
+    assert "error" not in renamed, renamed
+    assert renamed["result"]["name"] == "Cygnus Run"
+
+    target = tmp_path / "renamed.scn"
+    saved = call(server, "save_scan", {"handle": handle, "path": str(target)})
+    assert "error" not in saved, saved
+    parsed = read_scn(target)
+    assert parsed.name == "Cygnus Run"
+
+
+def test_set_workspace_name_rejects_non_string() -> None:
+    server = RpcServer()
+    opened = call(server, "open_survey", {"path": str(FIXTURES / "and0a.md2")})
+    ws_handle = int(opened["result"]["workspace_handle"])
+    resp = call(server, "set_workspace_name", {"handle": ws_handle, "name": 42})
+    assert "error" in resp
+    assert resp["error"]["code"] == -32602

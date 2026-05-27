@@ -26,6 +26,7 @@ export interface ScanState {
   close: () => Promise<void>;
   setViewMode: (mode: ScanViewMode) => void;
   setOverview: (overview: ScanOverview) => void;
+  setScanName: (name: string) => Promise<void>;
   markDirty: () => void;
   refreshOverview: () => Promise<void>;
   save: (path?: string) => Promise<string | null>;
@@ -107,6 +108,18 @@ export function ScanProvider({ children }: { children: ReactNode }) {
     setDirty(true);
   }, []);
 
+  const setScanName = useCallback(async (name: string) => {
+    const h = handleRef.current;
+    if (h === null) return;
+    try {
+      const overview = await rpcClient.setScanWorkspaceName(h, name);
+      setOverview(overview);
+      setDirty(true);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }, []);
+
   const refreshOverview = useCallback(async () => {
     const h = handleRef.current;
     if (h === null) return;
@@ -153,6 +166,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       close,
       setViewMode,
       setOverview,
+      setScanName,
       markDirty,
       refreshOverview,
       save,
@@ -171,6 +185,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       saving,
       open,
       close,
+      setScanName,
       markDirty,
       refreshOverview,
       save,
