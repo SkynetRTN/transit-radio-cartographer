@@ -12,6 +12,8 @@ hiddenimports = collect_submodules("radio_cartographer")
 
 block_cipher = None
 
+apple_identity = os.environ.get('APPLE_SIGNING_IDENTITY', None)
+
 a = Analysis(
     ["sidecar_entry.py"],
     pathex=[os.path.join(SPEC_DIR, "src")],
@@ -64,4 +66,5 @@ exe = EXE(
     # allocation. Trade-off: if the sidecar ever crashes hard, its stderr is
     # discarded; users only see Tauri's `sidecar_eof` / `spawn_failed` toast.
     console=False,
+    codesign_identity=apple_identity
 )

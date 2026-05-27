@@ -31,6 +31,9 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "signingIdentity": "E463F242A70C9EE4CB90B9FA8FB6AB1825F065B4"
+    }
   }
 }
