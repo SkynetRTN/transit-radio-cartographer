@@ -151,6 +151,7 @@ export function ImageView() {
   const [hoverPoint, setHoverPoint] = useState<ImagePoint | null>(null);
   const [pinnedPoint, setPinnedPoint] = useState<ImagePoint | null>(null);
   const [magnifierCenter, setMagnifierCenter] = useState<ImagePoint | null>(null);
+  const [lockAspect, setLockAspect] = useState(true);
 
   const handleBack = useCallback(() => {
     setViewMode('pre-image');
@@ -254,6 +255,7 @@ export function ImageView() {
                 onClick={handleClick}
                 onContextMenu={handleContextMenu}
                 boxOverlay={magnifier?.overlay ?? null}
+                lockAspectRatio={lockAspect}
               />
             ) : (
               // RGB composite (bi/tri-color). Magnifier/pin features are
@@ -278,6 +280,15 @@ export function ImageView() {
             <div className="side-buttons">
               {workspace && (
                 <button onClick={handleBack}>Back to Pre Image</button>
+              )}
+              {hasScalar && (
+                <button
+                  onClick={() => setLockAspect((v) => !v)}
+                  className={lockAspect ? 'active' : ''}
+                  title="Keep the image pixel grid at its true aspect ratio when the window is resized"
+                >
+                  Lock Aspect
+                </button>
               )}
               {magnifierCenter && (
                 <button onClick={() => setMagnifierCenter(null)}>
@@ -330,6 +341,7 @@ export function ImageView() {
                   onClick={handleClick}
                   showColorBar={false}
                   fixedHeight={200}
+                  lockAspectRatio={lockAspect}
                 />
               </div>
             )}

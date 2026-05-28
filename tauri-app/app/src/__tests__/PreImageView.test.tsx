@@ -38,7 +38,13 @@ vi.mock('../ipc/client', () => ({
     }),
   },
 }));
-vi.mock('../lib/plots/ImagePlot', () => ({ ImagePlot: () => null }));
+const imagePlotProps: Array<Record<string, unknown>> = [];
+vi.mock('../lib/plots/ImagePlot', () => ({
+  ImagePlot: (props: Record<string, unknown>) => {
+    imagePlotProps.push(props);
+    return null;
+  },
+}));
 vi.mock('../lib/plots/PointScatter', () => ({ PointScatter: () => null }));
 
 const workspaceOverview: WorkspaceOverview = {
@@ -250,6 +256,48 @@ test('Baseline Sweeps opens a dialog with default 5 and submits to baseline rpc'
   await waitFor(() =>
     expect(rpcClient.baseline as unknown as ReturnType<typeof vi.fn>).toHaveBeenCalledWith(1, 5, 2),
   );
+});
+
+test('Lock Aspect button defaults to active and toggles the prop on ImagePlot', async () => {
+  imagePlotProps.length = 0;
+  await act(async () => {
+    render(
+      <SurveyProvider>
+        <HydrateSurvey
+          meta={{
+            handle: 1,
+            metadata: { sweep_count: 1, path: '/tmp/and0a.md2' },
+            workspace_handle: 2,
+            workspace: workspaceOverview,
+          }}
+        />
+        <PreImageView />
+      </SurveyProvider>,
+    );
+  });
+  await waitFor(() => expect(screen.getByText('Lock Aspect')).toBeTruthy());
+  const lockBtn = screen.getByRole('button', { name: 'Lock Aspect' });
+  // Default ON — button carries the `.active` class and ImagePlot receives
+  // `lockAspectRatio: true`.
+  expect(lockBtn.className).toMatch(/active/);
+  await waitFor(() => {
+    const last = imagePlotProps[imagePlotProps.length - 1];
+    expect(last?.lockAspectRatio).toBe(true);
+  });
+  // Click toggles to OFF.
+  fireEvent.click(lockBtn);
+  await waitFor(() => {
+    expect(screen.getByRole('button', { name: 'Lock Aspect' }).className).not.toMatch(/active/);
+  });
+  await waitFor(() => {
+    const last = imagePlotProps[imagePlotProps.length - 1];
+    expect(last?.lockAspectRatio).toBe(false);
+  });
+  // Click again toggles back ON.
+  fireEvent.click(screen.getByRole('button', { name: 'Lock Aspect' }));
+  await waitFor(() => {
+    expect(screen.getByRole('button', { name: 'Lock Aspect' }).className).toMatch(/active/);
+  });
 });
 
 test('Align Sweeps opens a dialog with default 0.5 and submits to align rpc', async () => {

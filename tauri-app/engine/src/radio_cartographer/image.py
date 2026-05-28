@@ -172,6 +172,33 @@ def make_image(
 
     ra_all = np.concatenate([s.ra for s in sweeps])
     dec_all = np.concatenate([s.dec for s in sweeps])
+
+    # FEAT-009: detect surveys whose RA samples straddle the 0h↔24h sidereal
+    # boundary (e.g. Cassiopeia A, RA ~23h, observed across midnight). Naive
+    # min/max would produce a 24h-wide grid with a huge empty middle band.
+    # Algorithm: sort RA samples and find the largest gap, plus the wrap-gap
+    # (last_sample → first_sample + 86400). If a middle gap is larger than
+    # both the wrap gap and a 6h threshold, declare wrap and shift early-side
+    # samples into a contiguous range that extends past 86400. The frontend
+    # already mods RA back into [0, 86400) for tick labels and readouts
+    # (ImagePlot.tsx formatRaSeconds), so the unwrapped storage values do not
+    # leak to the user.
+    cutoff: float | None = None
+    if ra_all.size >= 2:
+        ra_sorted = np.sort(ra_all)
+        middle_gaps = np.diff(ra_sorted)
+        wrap_gap = (float(ra_sorted[0]) + 86400.0) - float(ra_sorted[-1])
+        max_middle_idx = int(np.argmax(middle_gaps))
+        max_middle_gap = float(middle_gaps[max_middle_idx])
+        if max_middle_gap > 21600.0 and max_middle_gap > wrap_gap:
+            cutoff = float(ra_sorted[max_middle_idx])
+
+    def unwrap_ra(ra: NDArray[np.float64]) -> NDArray[np.float64]:
+        if cutoff is None:
+            return ra
+        return np.where(ra <= cutoff, ra + 86400.0, ra)
+
+    ra_all = unwrap_ra(ra_all)
     min_ra, max_ra = float(np.min(ra_all)), float(np.max(ra_all))
     min_dec, max_dec = float(np.min(dec_all)), float(np.max(dec_all))
     ra_range = max(max_ra - min_ra, np.finfo(float).eps)
@@ -183,8 +210,11 @@ def make_image(
     def to_col(ra: NDArray[np.float64]) -> NDArray[np.int64]:
         # Column 0 corresponds to max_ra so the rendered image carries the
         # FITS-standard cdelt1 < 0 (RA decreases with sample index) advertised
-        # by the WCS below.
-        c = ((max_ra - np.asarray(ra, dtype=np.float64)) / ra_range) * (width - 1)
+        # by the WCS below. `unwrap_ra` is a no-op for non-wrapping surveys
+        # and idempotent on already-unwrapped values, so callers can pass raw
+        # sweep RA or pre-unwrapped interpolated RA either way.
+        ra_uw = unwrap_ra(np.asarray(ra, dtype=np.float64))
+        c = ((max_ra - ra_uw) / ra_range) * (width - 1)
         return np.clip(np.rint(c).astype(np.int64), 0, width - 1)
 
     def to_row(dec: NDArray[np.float64]) -> NDArray[np.int64]:
@@ -207,8 +237,11 @@ def make_image(
             continue
         o1 = np.argsort(s1.dec)
         o2 = np.argsort(s2.dec)
-        dec1, ra1, f1 = s1.dec[o1], s1.ra[o1], s1.flux[o1]
-        dec2, ra2, f2 = s2.dec[o2], s2.ra[o2], s2.flux[o2]
+        # Unwrap the per-sweep RA arrays before interp — a single sweep that
+        # crosses the wrap point would otherwise interpolate across the
+        # 86400 → 0 jump and emit garbage.
+        dec1, ra1, f1 = s1.dec[o1], unwrap_ra(s1.ra[o1]), s1.flux[o1]
+        dec2, ra2, f2 = s2.dec[o2], unwrap_ra(s2.ra[o2]), s2.flux[o2]
         dec_lo = max(float(dec1[0]), float(dec2[0]))
         dec_hi = min(float(dec1[-1]), float(dec2[-1]))
         if dec_hi <= dec_lo:

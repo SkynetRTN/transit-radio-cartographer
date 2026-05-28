@@ -32,6 +32,9 @@ interface Props {
   boxOverlay?: BoxOverlay | null;
   showColorBar?: boolean;
   fixedHeight?: number;
+  // When true, the plot keeps the pixel grid at its intrinsic aspect ratio
+  // (letterboxing/pillarboxing the container) instead of stretching to fill.
+  lockAspectRatio?: boolean;
 }
 
 function paletteToColorscale(stops: PaletteStop[]): Array<[number, string]> {
@@ -146,6 +149,7 @@ export function ImagePlot({
   boxOverlay,
   showColorBar = true,
   fixedHeight,
+  lockAspectRatio = true,
 }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
   // Keep the most recent hovered cell so the container's onContextMenu handler
@@ -240,16 +244,40 @@ export function ImagePlot({
     // a standard sky image. Reverse the x-axis so xs[0]=max_ra (col 0 of the
     // pixel grid) renders on the left.
     //
-    // Do NOT scaleanchor when we have real bounds: RA is stored in sidereal
-    // seconds (range ~thousands) and Dec in degrees (range ~tens), so 1:1
-    // data-unit scaling collapses the image to a single horizontal line.
-    // Each axis fills the available area independently — the grid shape
-    // (legacy `width × height`) already encodes the intended aspect ratio.
+    // Aspect-lock branching: in RA/Dec mode a naive `scaleanchor: 'y'` with
+    // the default `scaleratio: 1` collapses the image to a horizontal line
+    // because RA is stored in sidereal seconds (range ~thousands) and Dec in
+    // degrees (range ~tens). When `lockAspectRatio` is on we use
+    // `scaleratio: cos(dec_center) / 240`:
+    //   - `1/240` converts RA-seconds to RA-degrees (24h of RA = 360°, so
+    //     1 RA-sec = 15" = 1/240°).
+    //   - `cos(dec_center)` accounts for RA-line convergence toward the
+    //     poles — at dec=0° one RA-degree equals one Dec-degree of sky-arc,
+    //     but at dec=60° it's only half. This is the standard rectangular
+    //     projection used by DS9 and most FITS viewers, accurate at the
+    //     image center and increasingly approximate toward top/bottom.
+    //     The legacy VB app (vb/survform.frm:1606-1714) skips this
+    //     correction; FEAT-008 v3 adds it back as a deliberate improvement.
+    // In pixel mode the default `scaleratio: 1` already does the right thing
+    // (one data unit = one pixel cell on each axis).
+    const decCenter = hasBounds ? (meta!.min_dec + meta!.max_dec) / 2 : 0;
+    const lockBounded: Partial<Plotly.LayoutAxis> =
+      hasBounds && lockAspectRatio
+        ? {
+            scaleanchor: 'y' as const,
+            scaleratio: Math.cos((decCenter * Math.PI) / 180) / 240,
+            constrain: 'domain' as const,
+          }
+        : {};
+    const lockPixel: Partial<Plotly.LayoutAxis> =
+      !hasBounds && lockAspectRatio
+        ? { scaleanchor: 'y' as const, constrain: 'domain' as const }
+        : {};
     const xaxis: Partial<Plotly.LayoutAxis> = {
       title: { text: 'Right Ascension' },
-      ...(hasBounds
-        ? { autorange: 'reversed' as const }
-        : { scaleanchor: 'y' as const, constrain: 'domain' as const }),
+      ...(hasBounds ? { autorange: 'reversed' as const } : {}),
+      ...lockBounded,
+      ...lockPixel,
       ...(raTicks
         ? { tickmode: 'array', tickvals: raTicks.tickvals, ticktext: raTicks.ticktext }
         : {}),
@@ -257,6 +285,7 @@ export function ImagePlot({
     const yaxis: Partial<Plotly.LayoutAxis> = {
       title: { text: 'Declination' },
       ...(hasBounds ? {} : { autorange: 'reversed' as const }),
+      ...(lockAspectRatio ? { constrain: 'domain' as const } : {}),
       ...(decTicks
         ? { tickmode: 'array', tickvals: decTicks.tickvals, ticktext: decTicks.ticktext }
         : {}),
@@ -367,7 +396,7 @@ export function ImagePlot({
       plotEl.removeAllListeners?.('plotly_relayout');
       Plotly.purge(node);
     };
-  }, [image, meta, title, palette, fluxRange, boxOverlay, showColorBar, onHover, onClick]);
+  }, [image, meta, title, palette, fluxRange, boxOverlay, showColorBar, lockAspectRatio, onHover, onClick]);
 
   const handleContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
     // Always suppress the browser context menu on the heatmap. Without this,

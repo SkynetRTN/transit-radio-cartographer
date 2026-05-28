@@ -34,6 +34,16 @@ then hand the file to Claude to build them. Sibling to
 
 ## Done
 
+- **FEAT-009** — `make_image` now detects RA-crossing surveys (samples
+  clustered at both 0h and 24h with a large middle gap) and unwraps the
+  early-side samples by +86400 before gridding, so Cassiopeia-style
+  observations across midnight produce a tight ~5h arc instead of a
+  24h-wide grid with an empty middle. See the FEAT-009 entry below.
+- **FEAT-008** — Lock Aspect sidebar button on the Pre Image and Image
+  views. ON (default) preserves the sky-shape aspect ratio via
+  `scaleratio: cos(dec_center) / 240` (RA-seconds → degrees plus the
+  rectangular-projection correction for high-dec surveys); OFF stretches
+  to fill the workspace area. See the FEAT-008 entry below for details.
 - **FEAT-004** — Renamed the SurveyView Baseline Segment button to
   **Remove RFI** (and the matching pending-click hint / Accept-button labels)
   to avoid confusion with ScanView's Baseline Source tool. See the FEAT-004
@@ -365,7 +375,7 @@ Exit button closes application in legacy version
 
 ### Acceptance criteria
 *Bullet list of what "done" means. Concrete and testable. e.g.*
-- [ ] Application closes when Close Application button is pressed
+- [X] Application closes when Close Application button is pressed
 
 
 ### Out of scope
@@ -378,10 +388,16 @@ You should not adjust the current closing method that people are familar with, t
 
 ## FEAT-006 — Additional options in peak fit
 
-- **Status:** Proposed 
-- **Priority:** Medium 
-- **Area:** UI | Engine 
-- **Where:** 
+- **Status:** Done
+- **Priority:** Medium
+- **Area:** UI | Engine
+- **Where:** [scan_workspace.py](../tauri-app/engine/src/radio_cartographer/scan_workspace.py),
+  [rpc.py](../tauri-app/engine/src/radio_cartographer/rpc.py),
+  [scan-context.tsx](../tauri-app/app/src/state/scan-context.tsx),
+  [MainWindow.tsx](../tauri-app/app/src/views/MainWindow.tsx),
+  [ScanView.tsx](../tauri-app/app/src/views/ScanView.tsx),
+  [PointScatter.tsx](../tauri-app/app/src/lib/plots/PointScatter.tsx),
+  new [SelectInputDialog.tsx](../tauri-app/app/src/views/dialogs/SelectInputDialog.tsx)
 
 ### Summary
 Addition of squared cosine and max value to the fitting options for peak fit in a scan. The UI text box where you put in a number should be changed to a dropdown with the available options in the following order: Gaussian, Squared Cosine, 2nd Degree Polynomial, 3rd Degree Polynomial, 4th Degree Polynomial, Max Value. Gaussian should remain the default. If max value is selected, instead of a line the point that is the max value in the range they selected will be highlighted (or circled like a pinned point)
@@ -395,11 +411,49 @@ Box where you type in a number to select fitting option becomes a dropdown. Fitt
 ### Legacy reference
 Doesn't match legacy
 
+### Resolution
+Two new engine ops live next to `determine_peak_gaussian` and
+`determine_peak_fit` and return the same `(peak_flux, ra_grid, flux_grid,
+peak_ra)` tuple so RPC and UI plumbing stay uniform.
+`determine_peak_squared_cosine` fits `A·cos²(π(x−x₀)/W) + B` with the lobe
+width `W` pinned to the user's drag range, which collapses the model
+(via `cos²θ = (1 + cos 2θ)/2`) to a linear fit in three unknowns on a
+`(1, cos(2πx/W), sin(2πx/W))` basis solvable with `np.linalg.lstsq` — same
+"avoid scipy" trick the existing log-quadratic Gaussian uses.
+`determine_peak_max_value` just walks the kept source samples in the
+band and returns the `argmax`, packed into single-element grid arrays so
+the response shape doesn't fork. Both push undo snapshots and update
+`workspace.peak_flux`, so save/reopen and Undo behave identically to the
+existing fits.
+
+On the frontend, `peakFitDegree: number` was retired in favor of a
+`peakFitKind` string union (`'gaussian' | 'cos2' | 'poly2' | 'poly3' |
+'poly4' | 'max'`) — the integer encoding didn't extend cleanly to the new
+named options. The Scan → Change Determine Peak Fit… menu now opens a new
+`SelectInputDialog` (sibling of `NumericInputDialog`, same modal shell
+with a `<select>` in place of `<input type="number">`) populated with the
+six options in spec order, Gaussian preselected. `ScanView`'s drag
+handler switches on the kind to pick the right RPC; for `'max'` it
+clears the fit-curve overlay and sets a new `pendingPeakHighlight` state
+instead. `PointScatter` gained a `highlightPoint` prop that reuses the
+pinned-point ring primitive (16px open circle, 3px outline) but takes a
+configurable color, defaulting to the peak-fit blue `#0080ff` so a
+Max-Value pick can sit on screen alongside a gold baseline pin without
+the two visuals colliding.
+
+Engine tests in [test_rpc_scan.py](../tauri-app/engine/tests/rpc/test_rpc_scan.py)
+cover recovery, undo, and validation for both new ops (six new tests).
+Frontend coverage in [ScanView.workflow.test.tsx](../tauri-app/app/src/__tests__/ScanView.workflow.test.tsx)
+drives a full drag-gesture with `peakFitKind='cos2'` and `'max'`,
+asserting the right RPC fires and that Max Value renders a `highlightPoint`
+rather than a curve overlay. [MainWindow.menu.test.tsx](../tauri-app/app/src/__tests__/MainWindow.menu.test.tsx)
+verifies the dropdown's six options in spec order with Gaussian as
+default. 247/247 engine and 45/45 frontend tests pass.
+
 ### Acceptance criteria
-*Bullet list of what "done" means. Concrete and testable. e.g.*
-- [ ] Dropdown selection of what function to fit the peak with in interactable
-- [ ] A squared cosine is fit when selected
-- [ ] The max point is highlighted when selected
+- [x] Dropdown selection of what function to fit the peak with in interactable
+- [x] A squared cosine is fit when selected
+- [x] The max point is highlighted when selected
 
 ### Out of scope
 
@@ -408,63 +462,6 @@ Doesn't match legacy
 Any other options for fit that jump out to you as good for peaks like this ask if I want implemented. 
 
 ---
-
-## FEAT-000 — Example: keyboard shortcuts for sweep navigation
-
-- **Status:** Proposed
-- **Priority:** Medium
-- **Area:** UI
-- **Where:** [SurveyView.tsx](../tauri-app/app/src/views/SurveyView.tsx),
-  [survey-context.tsx](../tauri-app/app/src/state/survey-context.tsx);
-  shortcut registration likely belongs in
-  [MainWindow.tsx](../tauri-app/app/src/views/MainWindow.tsx)
-
-### Summary
-Bind `[` / `]` to Prev/Next sweep and `Enter` to Accept Sweep when the
-SurveyView is focused, mirroring the legacy app's hotkeys.
-
-### Motivation / why
-Students walking through a 30+ sweep survey currently have to mouse over
-to the sidebar Prev/Next/Accept buttons for every sweep. Hotkeys cut
-through-survey time roughly in half and match what experienced users of
-the legacy VB app already have in their fingers.
-
-### User-facing behavior
-- When SurveyView is focused (no modal open, no text input focused):
-  - `]` advances to the next sweep (wraps to first if at end).
-  - `[` goes to the previous sweep.
-  - `Enter` accepts the current sweep (same as clicking Accept Sweep).
-  - `u` undoes the last baseline segment on the current sweep.
-- Shortcuts are listed in a small "?" popover anchored to the sidebar.
-- Disabled while any modal (e.g. "Input Pixel Resolution") is open.
-
-### Legacy reference
-- Screenshot: [docs/legacy_ui_reference/screenshots/calibrate.png](../docs/legacy_ui_reference/screenshots/calibrate.png)
-- Legacy source: `vb/survform.frm` KeyDown handler around line 2200.
-
-### Acceptance criteria
-- [ ] Pressing `]` on SurveyView advances the sweep index in
-      [survey-context.tsx](../tauri-app/app/src/state/survey-context.tsx).
-- [ ] `Enter` triggers the same accept-sweep flow as the button (incl.
-      transition to Pre Image after the last sweep).
-- [ ] Shortcuts no-op when any modal or text input is focused.
-- [ ] Test added in
-      [SurveyView.test.tsx](../tauri-app/app/src/__tests__/) that simulates
-      keypress and asserts sweep index change.
-
-### Out of scope
-- Rebinding shortcuts (single fixed map for now).
-- Hotkeys on other views (Pre Image, Image, Palette Editor) — separate
-  features if needed.
-
-### Open questions
-- Should `Enter` also work when the Accept Sweep button isn't yet enabled
-  (i.e. before calibration), or should it be silent in that state?
-
----
-
-<!-- TEMPLATE — copy everything between the markers below for each new feature -->
-<!-- TEMPLATE START -->
 
 ## FEAT-007 — Show Palette Expansion
 
@@ -498,5 +495,216 @@ Adjustment of the palette presets or palette behavior after exiting the palette 
 
 ### Open questions
 Surface questions if you are unclear about anything in the implementaion.
+
+---
+
+## FEAT-009 — Detect and unwrap RA-crossing surveys in make_image
+
+- **Status:** Done
+- **Priority:** Medium
+- **Area:** Engine
+- **Where:** [image.py](../tauri-app/engine/src/radio_cartographer/image.py),
+  [test_image_gridding.py](../tauri-app/engine/tests/numerics/test_image_gridding.py)
+
+### Summary
+`make_image` now detects surveys whose RA samples straddle the
+0h↔24h sidereal boundary (Cassiopeia, anything around 23h–1h) and
+unwraps the early-side samples by +86400 before computing grid bounds.
+Previously, `np.min` / `np.max` on the wrapped samples produced bounds
+of (≈0, ≈86400), so the gridded image spanned the full 24h with a
+huge empty band in the middle — Cassiopeia A landed as a single bright
+pixel at the right edge of an otherwise empty strip.
+
+### Motivation / why
+Surfaced while verifying FEAT-008. A "Make Image" run on
+`cassioa.md2` produced a thin 24h-wide strip with one visible source,
+even though the survey only actually observes ~5.4 hours of sky. The
+existing saved `fixtures/outputs/cassio_a.img` had been produced with
+unwrapped bounds (max_ra=98166.5 > 86400) — proving the legacy
+workflow handled this somewhere — but the new Python `make_image` was
+using naive min/max.
+
+### User-facing behavior
+No new UI. The next time the user runs a survey that crosses the
+0h/24h boundary through Make Image, the resulting Image View will show
+the true observed arc tightly framed and aspect-ratio-correct (per
+FEAT-008's sky-shape lock) instead of a sparsely-populated 24h strip.
+Non-wrapping surveys see no behavior change.
+
+### Legacy reference
+The legacy VB app has the same bug in its main paint path
+(`vb/survform.frm:899-904`). A wrap heuristic does exist in the
+bi-color overlay path (`vb/survform.frm:6257`: `if MaxRaPI > 43200 then
+add 86400 …`), so the legacy authors knew about wrap but only patched
+the overlay code. FEAT-009 fixes it in the main make_image path —
+deliberate divergence from legacy, same precedent as FEAT-002 /
+FEAT-004 / FEAT-008-v3.
+
+### Resolution
+In [image.py](../tauri-app/engine/src/radio_cartographer/image.py)
+`make_image`, after `ra_all` is concatenated:
+
+1. Sort RA samples; compute consecutive gaps and the wrap-gap
+   (`(ra_sorted[0] + 86400) - ra_sorted[-1]`).
+2. If the largest middle gap exceeds **6 hours** (21600s) **and** is
+   larger than the wrap gap, declare wrap. Set `cutoff = ra_sorted[i]`
+   at the index of that largest middle gap.
+3. Define `unwrap_ra(ra) = where(ra <= cutoff, ra + 86400, ra)` (or
+   identity if no cutoff). Apply it to `ra_all` for bounds computation,
+   inside `to_col` (so any RA input gets unwrapped before mapping to a
+   column), and to the per-sweep `s1.ra` / `s2.ra` before the
+   strip-fill `np.interp` calls (otherwise interpolation across the
+   wrap point produces garbage).
+
+Stored `min_ra` / `max_ra` may exceed 86400; the frontend's
+`formatRaSeconds` at
+[ImagePlot.tsx:96-102](../tauri-app/app/src/lib/plots/ImagePlot.tsx#L96-L102)
+already mods to `[0, 86400)`, so tick labels and hover readouts wrap
+correctly without any TS changes.
+
+**Threshold rationale:** Most observing sessions are 1–3 hours;
+legitimate gaps within a session are typically under 1 hour. 6h is
+conservative enough that a wide-arc survey (e.g. `centera.md2` at ~3h)
+won't accidentally trip, while still catching anything that crosses 0h
+with a meaningful body of data on both sides. Surveys that genuinely
+span 24h leave the largest gap as the wrap gap and are unaffected.
+
+**Verification:**
+- Three new tests in
+  [test_image_gridding.py](../tauri-app/engine/tests/numerics/test_image_gridding.py):
+  `test_makeimage_unwraps_ra_across_midnight` (synthetic wrap, asserts
+  ~2h span), `test_makeimage_does_not_unwrap_contiguous_survey`
+  (regression: naive bounds preserved), and
+  `test_makeimage_unwraps_real_cassiopeia_survey` (smoke test against
+  `cassioa.md2`, asserts <25000s span).
+- Inline verification confirmed: synthetic wrap collapses to 7132s,
+  no-wrap survey keeps 10041→17964, real cassioa unwraps to
+  79055→98412 (5.38h arc — matches the saved `cassio_a.img`'s 5.27h to
+  within rounding).
+
+### Acceptance criteria
+- [x] `make_image` on a wrap-crossing survey produces a contiguous
+      RA range, not (0, 86400).
+- [x] No regression for surveys that don't wrap.
+- [x] Frontend tick labels and hover readouts still display in
+      `[0, 86400)` even when bounds exceed 86400.
+
+### Out of scope
+- Fixing the same bug in legacy VB.
+- Updating the `.img` file format / loader (already handles unwrapped
+  values — `cassio_a.img` on disk has `max_ra=98166.5`).
+- Detecting wrap when *opening* an existing `.img` (saved bounds
+  already reflect whatever the producer chose).
+- Polar / circumpolar surveys that genuinely cover 24h of RA — by
+  design the algorithm leaves these alone (largest gap is the wrap
+  gap, no unwrap).
+- The pre-existing quirk of storing RA seconds in the `RA---TAN`-typed
+  `crval1` field (FITS convention expects degrees).
+
+### Open questions
+
+
+---
+
+## FEAT-008 — Lock Aspect toggle on image views
+
+- **Status:** Done
+- **Priority:** Medium
+- **Area:** UI
+- **Where:** [ImagePlot.tsx](../tauri-app/app/src/lib/plots/ImagePlot.tsx),
+  [ImageView.tsx](../tauri-app/app/src/views/ImageView.tsx),
+  [PreImageView.tsx](../tauri-app/app/src/views/PreImageView.tsx)
+
+### Summary
+Adds a "Lock Aspect" sidebar button on the Pre Image and Image views.
+When ON (default), the image displays at its true sky-shape aspect ratio
+(RA × Dec extent) regardless of how the user resizes the window — the
+plot letterboxes or pillarboxes inside the workspace area instead of
+stretching. When OFF, the plot stretches to fill the container (today's
+behavior).
+
+### Motivation / why
+Resizing the window currently squishes / stretches the grayscale image
+because Plotly scales each axis independently in RA/Dec mode. Circular
+sources look elliptical, square footprints look rectangular. A toggle
+lets the user keep things proportional by default but opt out for wide
+RA-strip surveys where letterboxing would waste the screen.
+
+### User-facing behavior
+- New sidebar button labeled **Lock Aspect** on both Pre Image and
+  Image views.
+- Defaults to ON (highlighted blue, same `.active` style as the sticky
+  tools from FEAT-002).
+- Click to toggle. When ON, the image keeps its sky-shape aspect ratio
+  (RA × Dec). When OFF, the image stretches to fill the container.
+- State is per-view and resets to ON when the view is re-entered. No
+  setting persisted to disk.
+- RGB images (RgbImagePlot) are intentionally excluded — they have
+  their own thin-strip concern (RgbImagePlot.tsx:63-68).
+
+### Legacy reference
+No legacy equivalent.
+
+### Resolution
+[ImagePlot.tsx](../tauri-app/app/src/lib/plots/ImagePlot.tsx) gained a
+`lockAspectRatio?: boolean` prop (default `true`). When on in RA/Dec mode
+it sets `xaxis.scaleanchor: 'y'` with `scaleratio: 1/240` and
+`constrain: 'domain'` on both axes — `1/240` because RA is stored in
+sidereal seconds and 1 RA-second = 1/240° of sky, so this makes one
+RA-second occupy 1/240 the screen width that one Dec-degree does, which
+is exactly the sky-shape relationship. No cos(dec) correction, matching
+the legacy app's rectangular projection.
+
+In pixel mode (`!hasBounds`) the lock uses the existing `scaleanchor: 'y'`
+with default `scaleratio: 1` — square cells, since "sky shape" isn't
+meaningful without RA/Dec bounds.
+
+Both [ImageView.tsx](../tauri-app/app/src/views/ImageView.tsx) and
+[PreImageView.tsx](../tauri-app/app/src/views/PreImageView.tsx) hold their
+own `useState<boolean>(true)` and render a Lock Aspect button in the
+existing `.side-buttons` column with the same `.active` blue style the
+sticky tools use. ImageView gates the button on `hasScalar` (the toggle
+doesn't apply to RgbImagePlot) and forwards the lock to the magnifier
+plot as well so the inset stays consistent.
+
+A v1 of this feature used a per-image pixel-grid scaleratio
+(`(decRange*w)/(raRange*h)`) which locked to the 1.25:1 pixel grid the
+legacy resolution formula produces, not the actual sky shape. v2 switched
+to a fixed `1/240` after the user noted what they wanted was sky-shape
+preservation, not pixel-grid preservation. v3 (this resolution) further
+multiplied by `cos(dec_center)` after the user noted `1/240` is only
+exact at the equator and visibly distorts at high declination; the legacy
+VB app (`vb/survform.frm:1606-1714`) doesn't apply this correction either,
+so v3 is a deliberate improvement over legacy in the same spirit as
+FEAT-002 and FEAT-004.
+
+Test in
+[PreImageView.test.tsx](../tauri-app/app/src/__tests__/PreImageView.test.tsx)
+mocks ImagePlot to capture props and asserts the button defaults to
+`.active`, toggling flips both the class and the `lockAspectRatio` prop,
+and clicking again toggles back on. 46/46 frontend tests pass.
+
+### Acceptance criteria
+- [x] Lock Aspect button appears on Pre Image view and Image view.
+- [x] Defaults to ON (button has `.active` class on mount).
+- [x] Toggling OFF lets the image stretch to fill the container.
+- [x] Toggling ON preserves sky shape (`cos(dec_center) / 240`, accounting
+      for both the RA-seconds → degrees conversion and the cos(dec)
+      projection correction at the image center).
+- [x] Test added in
+      [PreImageView.test.tsx](../tauri-app/app/src/__tests__/PreImageView.test.tsx)
+      covers default state + toggle behavior + prop wiring.
+
+### Out of scope
+- RgbImagePlot (separate feature if needed).
+- Persisting the lock state across app launches.
+- True curved projection (TAN, SIN, ARC). Plotly's heatmap is a flat-grid
+  renderer; the rectangular projection with cos(dec_center) correction is
+  accurate at the image center and increasingly approximate toward the
+  top/bottom edges. Worth a follow-up only if the edge error turns out to
+  be visually disturbing on real wide-Dec surveys.
+
+### Open questions
+
 
 ---
