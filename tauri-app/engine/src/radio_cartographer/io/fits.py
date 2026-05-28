@@ -48,6 +48,30 @@ def read_fits(path: str | Path) -> GriddedImage:
     ctype1 = str(header.get("CTYPE1", "RA---TAN"))
     ctype2 = str(header.get("CTYPE2", "DEC--TAN"))
 
+    # WCS sanity checks — fail loud on obviously broken headers so the
+    # downstream compose math can't run away (BUG-009).
+    for name, val in (
+        ("CRVAL1", crval1),
+        ("CRVAL2", crval2),
+        ("CRPIX1", crpix1),
+        ("CRPIX2", crpix2),
+        ("CDELT1", cdelt1),
+        ("CDELT2", cdelt2),
+    ):
+        if not np.isfinite(val):
+            raise ValueError(f".fits WCS field {name} is not finite: {val!r}")
+    if cdelt1 == 0.0 or cdelt2 == 0.0:
+        raise ValueError(
+            f".fits WCS CDELT must be non-zero, got CDELT1={cdelt1}, CDELT2={cdelt2}"
+        )
+    # 10 deg/pixel is already absurd for sky imaging; anything larger is a
+    # unit error (e.g. radians written into a CDELT-in-degrees slot).
+    if abs(cdelt1) > 10.0 or abs(cdelt2) > 10.0:
+        raise ValueError(
+            f".fits WCS CDELT exceeds 10 deg/pixel (likely a unit error): "
+            f"CDELT1={cdelt1}, CDELT2={cdelt2}"
+        )
+
     # World coordinates at the four corners (1-based FITS pixel convention).
     ra_at_col0 = crval1 + (1 - crpix1) * cdelt1
     ra_at_colN = crval1 + (width - crpix1) * cdelt1
@@ -57,6 +81,19 @@ def read_fits(path: str | Path) -> GriddedImage:
     max_ra = float(max(ra_at_col0, ra_at_colN))
     min_dec = float(min(dec_at_row0, dec_at_rowN))
     max_dec = float(max(dec_at_row0, dec_at_rowN))
+
+    # RA gets a grace window for wraparound (a footprint straddling 0/360);
+    # Dec is strict — outside [-90, 90] is meaningless on the celestial sphere.
+    if not (-360.0 <= min_ra <= max_ra <= 720.0):
+        raise ValueError(
+            f".fits WCS RA bounds out of range: [{min_ra}, {max_ra}] "
+            f"(expected within [-360, 720] after corner math)"
+        )
+    if not (-90.0 <= min_dec <= max_dec <= 90.0):
+        raise ValueError(
+            f".fits WCS Dec bounds out of range: [{min_dec}, {max_dec}] "
+            f"(expected within [-90, 90])"
+        )
 
     wcs = WCSMetadata(
         ctype1=ctype1,

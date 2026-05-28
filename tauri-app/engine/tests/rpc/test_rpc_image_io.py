@@ -2,11 +2,176 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
-from radio_cartographer.rpc import RpcServer
+import json
+
+import numpy as np
+
+from radio_cartographer.rpc import RpcServer, _array_to_jsonable_list, _block_downsample
 
 from .helpers import call
+
+
+def test_array_to_jsonable_list_emits_none_for_non_finite():
+    # Standard JSON doesn't allow NaN/Infinity; Python's json.dumps defaults
+    # to emitting bareword `NaN`/`Infinity` literals that Rust serde rejects.
+    # The Tauri sidecar bridge parses every response with strict serde_json,
+    # so any NaN we leak silently breaks the whole RPC reply.
+    arr = np.array([[1.0, np.nan], [np.inf, -np.inf]], dtype=np.float64)
+    out = _array_to_jsonable_list(arr)
+    assert out == [[1.0, None], [None, None]]
+    # Round-trip through strict JSON to confirm no NaN literal remains.
+    s = json.dumps(out, allow_nan=False)
+    assert "NaN" not in s and "Infinity" not in s
+
+
+def test_array_to_jsonable_list_passes_through_all_finite():
+    arr = np.array([[1.0, 2.0], [3.5, 4.25]], dtype=np.float64)
+    out = _array_to_jsonable_list(arr)
+    assert out == [[1.0, 2.0], [3.5, 4.25]]
+
+
+def test_appended_image_meta_emits_strict_json_even_with_uncovered_gap():
+    # Regression: an appended image with a no-coverage gap used to report
+    # `min_flux: NaN, max_flux: NaN` in the meta dict. Python json.dumps emitted
+    # a bareword `NaN` literal, Rust serde rejected the response with
+    # "expected value at line 1 column …", and the UI silently dropped the
+    # whole reply. The meta must serialize as strict JSON (no NaN/Infinity).
+    img_src = Path("C:\\Users\\leesnow\\skynet2\\ogrc\\fixtures\\outputs\\cassio_a.img")
+    server = RpcServer()
+    primary_h = _open_image_handle(server, img_src)
+    resp = call(
+        server,
+        "append_image",
+        {
+            "handle": primary_h,
+            "other_path": str(img_src),
+            "ra_shift_seconds": 30000.0,  # shift to force a gap
+        },
+    )
+    assert "error" not in resp, resp
+    meta = resp["result"]
+    # Strict-JSON round-trip — the same check the Rust sidecar bridge does.
+    s = json.dumps(meta, allow_nan=False)
+    assert "NaN" not in s and "Infinity" not in s
+    assert math.isfinite(meta["min_flux"]), f"min_flux must be finite, got {meta['min_flux']}"
+    assert math.isfinite(meta["max_flux"]), f"max_flux must be finite, got {meta['max_flux']}"
+
+
+def test_appended_image_save_roundtrip_with_uncovered_gap(tmp_path):
+    # BUG-014 save path: an appended scalar image carries NaN in the no-coverage
+    # gap. Saving to .img must not poison the file with non-finite header
+    # aggregates; re-opening must produce a finite image (the .img sentinel
+    # `Clr=0` maps back to `min_flux_p`).
+    img_src = Path("C:\\Users\\leesnow\\skynet2\\ogrc\\fixtures\\outputs\\cassio_a.img")
+    assert img_src.exists()
+    server = RpcServer()
+    primary_h = _open_image_handle(server, img_src)
+    # Append against itself with a small RA shift so the union has a real gap.
+    resp = call(
+        server,
+        "append_image",
+        {
+            "handle": primary_h,
+            "other_path": str(img_src),
+            "ra_shift_seconds": 30000.0,  # ~8h shift → guaranteed non-overlap
+        },
+    )
+    assert "error" not in resp, resp
+    appended = resp["result"]
+    # Pixel payload must contain at least one null cell (the gap).
+    pix = call(server, "get_image_pixels", {"handle": appended["handle"]})["result"]
+    has_null = any(v is None for row in pix["pixels"] for v in row)
+    assert has_null, "appended-with-shift output should contain null cells in the gap"
+    # Save must succeed and the file must be valid for re-open.
+    out_path = tmp_path / "appended.img"
+    save = call(server, "save_image", {"handle": appended["handle"], "path": str(out_path)})
+    assert "error" not in save, save
+    # Re-open: the loader maps Clr=0 back to min_flux_p, so the round-tripped
+    # image is fully finite (no NaN survives the .img format). Shape may differ
+    # — .img uses a legacy fixed grid keyed by `pix`, not the in-memory grid.
+    reopened_h = _open_image_handle(server, out_path)
+    re_pix = call(server, "get_image_pixels", {"handle": reopened_h})["result"]
+    re_null = any(v is None for row in re_pix["pixels"] for v in row)
+    assert not re_null, "re-opened .img must not contain null (Clr=0 maps to min_flux_p)"
+
+
+def test_block_downsample_preserves_peak():
+    # Stride-slice downsampling (`arr[::step, ::step]`) drops a peak at odd
+    # coordinates; block-max preserves it in whatever block contains it.
+    arr = np.zeros((10, 10), dtype=np.float64)
+    arr[3, 5] = 7.0  # peak at (row=3, col=5)
+    out = _block_downsample(arr, 2)
+    assert out.shape == (5, 5)
+    # The peak's block is (row 3 // 2, col 5 // 2) = (1, 2).
+    assert out[1, 2] == 7.0
+    # Stride slice would have given arr[::2, ::2] which never visits col 5
+    # (5 % 2 == 1), so the peak would vanish. Block-max keeps it.
+
+
+def test_block_downsample_propagates_nan_only_for_fully_nan_blocks():
+    arr = np.array(
+        [
+            [np.nan, np.nan, 1.0, 2.0],
+            [np.nan, np.nan, 3.0, np.nan],
+            [np.nan, 5.0, np.nan, np.nan],
+            [np.nan, np.nan, np.nan, np.nan],
+        ],
+        dtype=np.float64,
+    )
+    out = _block_downsample(arr, 2)
+    assert out.shape == (2, 2)
+    # Top-left block: all-NaN → NaN.
+    assert np.isnan(out[0, 0])
+    # Top-right: max of (1, 2, 3, NaN) = 3.
+    assert out[0, 1] == 3.0
+    # Bottom-left: max of (NaN, 5, NaN, NaN) = 5 — partial NaN doesn't poison.
+    assert out[1, 0] == 5.0
+    # Bottom-right: all-NaN → NaN.
+    assert np.isnan(out[1, 1])
+
+
+def test_block_downsample_step1_is_identity():
+    arr = np.arange(20, dtype=np.float64).reshape(4, 5)
+    out = _block_downsample(arr, 1)
+    assert np.array_equal(out, arr)
+
+
+def test_block_downsample_trims_partial_edge_block():
+    # 5×5 array, step=2 → trims last row and column.
+    arr = np.ones((5, 5), dtype=np.float64)
+    out = _block_downsample(arr, 2)
+    assert out.shape == (2, 2)
+    assert (out == 1.0).all()
+
+
+def _channel_stats(channel: list[list[float | None]]) -> tuple[int, int, int, float, float]:
+    """Return (covered, uncovered, total, finite_min, finite_max) for an RGB channel.
+
+    "Covered" = finite numeric value; "uncovered" = NaN or None (the two ways the
+    engine signals "no data"). Both shapes are accepted because BUG-013/-014 may
+    leak either form depending on whether the test runs against the in-memory
+    dict (NaN floats) or the JSON-serialized form (nulls).
+    """
+    covered = 0
+    uncovered = 0
+    total = 0
+    finite_min = math.inf
+    finite_max = -math.inf
+    for row in channel:
+        for v in row:
+            total += 1
+            if v is None or (isinstance(v, float) and math.isnan(v)):
+                uncovered += 1
+            else:
+                covered += 1
+                if v < finite_min:
+                    finite_min = v
+                if v > finite_max:
+                    finite_max = v
+    return covered, uncovered, total, finite_min, finite_max
 
 
 def _open_image_handle(server: RpcServer, path: Path) -> int:
@@ -56,6 +221,10 @@ def test_open_save_palette_roundtrip(tmp_path):
 
 
 def test_bicolor_image_via_rpc():
+    # BUG-013 diagnostic: with the NaN-sentinel FITS fixture in both slots, the
+    # R and G channels must contain finite pixel values that span a real range.
+    # Pre-fix, the all-NaN propagation through `_normalize01` made every pixel
+    # NaN/null and rendered as solid black in the UI.
     src = Path("C:\\Users\\leesnow\\skynet2\\ogrc\\fixtures\\inputs\\CAS-A_RC_Job_7963_0007654.fits")
     assert src.exists()
     server = RpcServer()
@@ -78,6 +247,94 @@ def test_bicolor_image_via_rpc():
     px = pix_resp["result"]
     assert px["width"] > 0 and px["height"] > 0
     assert len(px["r"]) == px["height"] and len(px["r"][0]) == px["width"]
+    # Channel content sanity: assigned channels must carry a real, bounded range
+    # of finite values; the unassigned channel (B) must be all-zero or all-NaN.
+    r_covered, _, _, r_min, r_max = _channel_stats(px["r"])
+    g_covered, _, _, g_min, g_max = _channel_stats(px["g"])
+    assert r_covered > 0, "bi-color R channel has no finite pixels"
+    assert g_covered > 0, "bi-color G channel has no finite pixels"
+    assert r_max >= 0.5, f"bi-color R channel never reaches half-intensity (max={r_max})"
+    assert g_max >= 0.5, f"bi-color G channel never reaches half-intensity (max={g_max})"
+    assert 0.0 <= r_min <= r_max <= 1.0
+    assert 0.0 <= g_min <= g_max <= 1.0
+
+
+def test_bicolor_image_img_pair_via_rpc():
+    # Companion to `test_bicolor_image_via_rpc` covering the .img loader path,
+    # which (unlike FITS) has no NaN sentinels. If the FITS variant fails and
+    # this one passes, the bug is NaN-propagation in `_normalize01`. If both
+    # fail, the bug is path-wide and an additional fix (e.g. block-max
+    # downsampling) is needed.
+    img_src = Path("C:\\Users\\leesnow\\skynet2\\ogrc\\fixtures\\outputs\\cassio_a.img")
+    assert img_src.exists(), img_src
+    server = RpcServer()
+    primary_h = _open_image_handle(server, img_src)
+    resp = call(
+        server,
+        "bicolor_image",
+        {
+            "handle": primary_h,
+            "other_path": str(img_src),
+            "primary_channel": "r",
+            "secondary_channel": "g",
+        },
+    )
+    assert "error" not in resp, resp
+    pix_resp = call(server, "get_rgb_image_pixels", {"handle": resp["result"]["handle"]})
+    assert "error" not in pix_resp, pix_resp
+    px = pix_resp["result"]
+    r_covered, _, _, r_min, r_max = _channel_stats(px["r"])
+    g_covered, _, _, g_min, g_max = _channel_stats(px["g"])
+    assert r_covered > 0 and g_covered > 0, "bi-color (.img pair) channels have no finite pixels"
+    assert r_max >= 0.5, f"bi-color (.img pair) R never reaches half-intensity (max={r_max})"
+    assert g_max >= 0.5, f"bi-color (.img pair) G never reaches half-intensity (max={g_max})"
+    assert 0.0 <= r_min <= r_max <= 1.0
+    assert 0.0 <= g_min <= g_max <= 1.0
+
+
+def test_append_fits_with_img_yields_clear_rpc_error():
+    # BUG-009: appending an .img onto a FITS primary used to allocate ~660 GiB
+    # because the formats store RA in different units. The compose layer now
+    # rejects this with ERR_INVALID_PARAMS and a user-readable message before
+    # any large allocation occurs.
+    fits_src = Path(
+        "C:\\Users\\leesnow\\skynet2\\ogrc\\fixtures\\inputs\\CAS-A_RC_Job_7963_0007654.fits"
+    )
+    img_src = Path("C:\\Users\\leesnow\\skynet2\\ogrc\\fixtures\\outputs\\cassio_a.img")
+    assert fits_src.exists() and img_src.exists()
+    server = RpcServer()
+    primary_h = _open_image_handle(server, fits_src)
+    resp = call(
+        server,
+        "append_image",
+        {"handle": primary_h, "other_path": str(img_src)},
+    )
+    assert "error" in resp, resp
+    assert resp["error"]["code"] == -32602  # ERR_INVALID_PARAMS
+    assert "combined sky area" in resp["error"]["message"]
+    # The base handle must still be valid — the failure was caught at the
+    # input-validation layer, so the registry was never torn down.
+    follow_up = call(server, "save_image", {"handle": primary_h, "path": "ignored.bogus"})
+    # save_image will reject the path, but the handle must resolve first.
+    assert follow_up["error"]["code"] != 1001, follow_up
+
+
+def test_superimpose_fits_with_img_yields_clear_rpc_error():
+    # Same guard on the superimpose path.
+    fits_src = Path(
+        "C:\\Users\\leesnow\\skynet2\\ogrc\\fixtures\\inputs\\CAS-A_RC_Job_7963_0007654.fits"
+    )
+    img_src = Path("C:\\Users\\leesnow\\skynet2\\ogrc\\fixtures\\outputs\\cassio_a.img")
+    server = RpcServer()
+    primary_h = _open_image_handle(server, fits_src)
+    resp = call(
+        server,
+        "superimpose_image",
+        {"handle": primary_h, "other_path": str(img_src), "weight": 0.5},
+    )
+    assert "error" in resp, resp
+    assert resp["error"]["code"] == -32602
+    assert "combined sky area" in resp["error"]["message"]
 
 
 def test_bicolor_rejects_duplicate_channels():

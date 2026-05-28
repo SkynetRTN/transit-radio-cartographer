@@ -364,6 +364,141 @@ def test_determine_scan_peak_fit_rejects_invalid_degree() -> None:
     assert "degree" in resp["error"]["message"].lower()
 
 
+def _install_synthetic_squared_cosine(
+    server: RpcServer,
+    handle: int,
+    *,
+    peak_flux: float,
+    peak_ra: float,
+    half_width: float,
+    baseline: float = 0.0,
+) -> None:
+    """Overwrite a calibrated workspace with a known cos² lobe.
+
+    The synthetic spans exactly one lobe centred on `peak_ra` with
+    `flux = peak_flux · cos²(π(ra − peak_ra)/(2·half_width)) + baseline`
+    over `[peak_ra − half_width, peak_ra + half_width]`.
+    """
+    ws = server._handles.get(handle)
+    assert isinstance(ws, ScanWorkspace)
+    assert ws.calibrated
+    ra = np.linspace(peak_ra - half_width, peak_ra + half_width, 51)
+    flux = peak_flux * np.cos(np.pi * (ra - peak_ra) / (2.0 * half_width)) ** 2 + baseline
+    ws.source_ra = ra
+    ws.source_mask = np.ones(ra.shape, dtype=np.bool_)
+    ws.reduced_source_flux = flux
+
+
+def test_determine_scan_peak_squared_cosine_recovers_known_cos2() -> None:
+    server = RpcServer()
+    handle, _ = _open(server)
+    call(server, "apply_scan_calibration", {"handle": handle})
+    _install_synthetic_squared_cosine(
+        server, handle, peak_flux=4.0, peak_ra=12.0, half_width=3.0, baseline=0.5
+    )
+    resp = call(
+        server,
+        "determine_scan_peak_squared_cosine",
+        {"handle": handle, "ra_min": 9.0, "ra_max": 15.0},
+    )
+    assert "error" not in resp, resp
+    result = resp["result"]
+    # `peak_flux` is A + baseline = 4.0 + 0.5 = 4.5. The linear lstsq is exact
+    # in noise-free synthetics (within float epsilon + 200-point grid step).
+    assert abs(result["peak_flux"] - 4.5) < 1e-3
+    assert abs(result["peak_ra"] - 12.0) < 0.05
+    assert result["overview"]["peak_flux"] == result["peak_flux"]
+    assert len(result["fit_ra"]) == len(result["fit_flux"]) == 200
+
+
+def test_determine_scan_peak_squared_cosine_undo_restores_prior_peak_flux() -> None:
+    server = RpcServer()
+    handle, _ = _open(server)
+    call(server, "apply_scan_calibration", {"handle": handle})
+    call(server, "determine_scan_peak", {"handle": handle, "flux": 1.5})
+    _install_synthetic_squared_cosine(
+        server, handle, peak_flux=3.0, peak_ra=8.0, half_width=2.0
+    )
+    fit = call(
+        server,
+        "determine_scan_peak_squared_cosine",
+        {"handle": handle, "ra_min": 6.0, "ra_max": 10.0},
+    )
+    assert "error" not in fit, fit
+    undone = call(server, "undo_scan", {"handle": handle})
+    assert undone["result"]["overview"]["peak_flux"] == 1.5
+
+
+def test_determine_scan_peak_squared_cosine_rejects_too_few_samples() -> None:
+    server = RpcServer()
+    handle, _ = _open(server)
+    call(server, "apply_scan_calibration", {"handle": handle})
+    _install_synthetic_squared_cosine(
+        server, handle, peak_flux=2.0, peak_ra=10.0, half_width=2.0
+    )
+    # Narrow window catches < 4 samples → too few for the 3-param lstsq.
+    resp = call(
+        server,
+        "determine_scan_peak_squared_cosine",
+        {"handle": handle, "ra_min": 9.99, "ra_max": 10.01},
+    )
+    assert "error" in resp, resp
+    assert "kept samples" in resp["error"]["message"]
+
+
+def test_determine_scan_peak_max_value_returns_max_sample() -> None:
+    server = RpcServer()
+    handle, _ = _open(server)
+    call(server, "apply_scan_calibration", {"handle": handle})
+    _install_synthetic_quadratic(server, handle, peak_flux=5.0, peak_ra=10.0)
+    resp = call(
+        server,
+        "determine_scan_peak_max_value",
+        {"handle": handle, "ra_min": 7.0, "ra_max": 13.0},
+    )
+    assert "error" not in resp, resp
+    result = resp["result"]
+    # The synthetic samples a quadratic over [5, 15] with 51 points; the
+    # sample nearest 10.0 hits exactly 5.0.
+    assert abs(result["peak_flux"] - 5.0) < 1e-6
+    assert abs(result["peak_ra"] - 10.0) < 1e-6
+    assert result["overview"]["peak_flux"] == result["peak_flux"]
+    # Max-value returns a single-point "grid" so the UI can branch on it.
+    assert len(result["fit_ra"]) == len(result["fit_flux"]) == 1
+
+
+def test_determine_scan_peak_max_value_undo_restores_prior_peak_flux() -> None:
+    server = RpcServer()
+    handle, _ = _open(server)
+    call(server, "apply_scan_calibration", {"handle": handle})
+    call(server, "determine_scan_peak", {"handle": handle, "flux": 2.5})
+    _install_synthetic_quadratic(server, handle, peak_flux=8.0, peak_ra=15.0)
+    pick = call(
+        server,
+        "determine_scan_peak_max_value",
+        {"handle": handle, "ra_min": 12.0, "ra_max": 18.0},
+    )
+    assert "error" not in pick, pick
+    assert abs(pick["result"]["peak_flux"] - 8.0) < 1e-6
+    undone = call(server, "undo_scan", {"handle": handle})
+    assert undone["result"]["overview"]["peak_flux"] == 2.5
+
+
+def test_determine_scan_peak_max_value_rejects_empty_range() -> None:
+    server = RpcServer()
+    handle, _ = _open(server)
+    call(server, "apply_scan_calibration", {"handle": handle})
+    _install_synthetic_quadratic(server, handle, peak_flux=5.0, peak_ra=10.0)
+    # A range outside the [5, 15] synthetic catches no samples at all.
+    resp = call(
+        server,
+        "determine_scan_peak_max_value",
+        {"handle": handle, "ra_min": 100.0, "ra_max": 101.0},
+    )
+    assert "error" in resp, resp
+    assert "kept sample" in resp["error"]["message"]
+
+
 def test_full_scan_pipeline_round_trip() -> None:
     """Drive the entire `legacyuireferenceguide.md` § Scan Processing flow."""
     server = RpcServer()

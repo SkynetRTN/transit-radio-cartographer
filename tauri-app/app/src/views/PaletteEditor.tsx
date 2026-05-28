@@ -41,6 +41,15 @@ const PRESETS: Record<string, PaletteStop[]> = {
 
 const STRIP_WIDTH = 600;
 const STRIP_HEIGHT = 40;
+const COMPONENT_STRIP_HEIGHT = 50;
+const COMPONENT_CHANNELS = ['r', 'g', 'b'] as const;
+const COMPONENT_FILLS: Record<(typeof COMPONENT_CHANNELS)[number], string> = {
+  r: 'rgba(220, 40, 40, 0.85)',
+  g: 'rgba(40, 180, 70, 0.85)',
+  b: 'rgba(40, 90, 220, 0.85)',
+};
+const VERTICAL_BAR_HEIGHT = 160;
+const VERTICAL_BAR_WIDTH = 36;
 
 function clamp(v: number, lo: number, hi: number): number {
   // Defend against NaN / blank inputs — clearing a number input would otherwise
@@ -79,6 +88,119 @@ function rgbCss({ r, g, b }: { r: number; g: number; b: number }): string {
   const gi = clamp(Math.round(g), 0, 255);
   const bi = clamp(Math.round(b), 0, 255);
   return `rgb(${ri}, ${gi}, ${bi})`;
+}
+
+function componentPolygonPoints(
+  stops: PaletteStop[],
+  channel: 'r' | 'g' | 'b',
+  width: number,
+  height: number,
+): string {
+  const finite = stops.filter(
+    (s) =>
+      Number.isFinite(s.anchor) &&
+      Number.isFinite(s.r) &&
+      Number.isFinite(s.g) &&
+      Number.isFinite(s.b),
+  );
+  if (finite.length === 0) return '';
+  const sorted = [...finite].sort((a, b) => a.anchor - b.anchor);
+  const yFor = (val: number) => height - (clamp(val, 0, 255) / 255) * height;
+  const xFor = (anchor: number) => (clamp(anchor, 0, 255) / 255) * width;
+  // Extend horizontally to the edges using the endpoints' channel levels so
+  // the filled region matches what interpRgb actually returns past the outer
+  // stops (i.e. flat, not zero).
+  const pts: Array<[number, number]> = [];
+  pts.push([0, yFor(sorted[0][channel])]);
+  for (const s of sorted) pts.push([xFor(s.anchor), yFor(s[channel])]);
+  pts.push([width, yFor(sorted[sorted.length - 1][channel])]);
+  pts.push([width, height]);
+  pts.push([0, height]);
+  return pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
+}
+
+interface VerticalChannelBarProps {
+  channel: 'r' | 'g' | 'b';
+  value: number | null;
+  onChange?: (v: number) => void;
+}
+
+function VerticalChannelBar({ channel, value, onChange }: VerticalChannelBarProps) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const draggingRef = useRef(false);
+  const disabled = value === null || !onChange;
+
+  const updateFromEvent = useCallback(
+    (clientY: number) => {
+      if (disabled || !onChange) return;
+      const el = ref.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      if (rect.height <= 0) return;
+      const y = clamp(clientY - rect.top, 0, rect.height);
+      const next = clamp(((rect.height - y) / rect.height) * 255, 0, 255);
+      onChange(next);
+    },
+    [disabled, onChange],
+  );
+
+  const onPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (disabled) return;
+      draggingRef.current = true;
+      updateFromEvent(e.clientY);
+    },
+    [disabled, updateFromEvent],
+  );
+
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      if (!draggingRef.current) return;
+      updateFromEvent(e.clientY);
+    };
+    const onUp = () => {
+      draggingRef.current = false;
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+  }, [updateFromEvent]);
+
+  const safe = value !== null && Number.isFinite(value) ? clamp(value, 0, 255) : 0;
+  const fillPct = (safe / 255) * 100;
+  const label = channel.toUpperCase();
+
+  return (
+    <div className={`palette-vbar-wrap${disabled ? ' palette-vbar-disabled' : ''}`}>
+      <div className="palette-vbar-label">{label}</div>
+      <div
+        ref={ref}
+        className="palette-vbar"
+        style={{ width: VERTICAL_BAR_WIDTH, height: VERTICAL_BAR_HEIGHT }}
+        onPointerDown={onPointerDown}
+        role="slider"
+        aria-label={`${label} level`}
+        aria-valuemin={0}
+        aria-valuemax={255}
+        aria-valuenow={disabled ? undefined : Math.round(safe)}
+        aria-disabled={disabled || undefined}
+      >
+        {!disabled && (
+          <div
+            className="palette-vbar-fill"
+            style={{
+              height: `${fillPct}%`,
+              background: COMPONENT_FILLS[channel],
+            }}
+          />
+        )}
+      </div>
+      <div className="palette-vbar-value">{disabled ? '—' : Math.round(safe)}</div>
+    </div>
+  );
 }
 
 interface Props {
@@ -141,6 +263,20 @@ export function PaletteEditor({ onClose }: Props = {}) {
       const updated = [...stops, next];
       setStops(updated);
       setSelectedIndex(updated.length - 1);
+    },
+    [stops],
+  );
+
+  const onComponentStripPointerDown = useCallback(
+    (e: React.PointerEvent<SVGSVGElement>) => {
+      const rect = e.currentTarget.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      const x = e.clientX - rect.left;
+      const hit = stops
+        .map((s, i) => ({ s, i }))
+        .filter(({ s }) => Number.isFinite(s.anchor))
+        .find(({ s }) => Math.abs((clamp(s.anchor, 0, 255) / 255) * rect.width - x) <= 6);
+      if (hit) setSelectedIndex(hit.i);
     },
     [stops],
   );
@@ -297,6 +433,8 @@ export function PaletteEditor({ onClose }: Props = {}) {
         <button onClick={resetFluxRange}>Reset</button>
       </div>
 
+      <div className="palette-top">
+      <div className="palette-top-left">
       <div
         ref={stripRef}
         className="palette-strip"
@@ -338,67 +476,151 @@ export function PaletteEditor({ onClose }: Props = {}) {
           );
         })}
       </div>
+      <svg
+        className="palette-components"
+        width={STRIP_WIDTH}
+        height={COMPONENT_STRIP_HEIGHT * 3}
+        aria-label="palette color components"
+        onPointerDown={onComponentStripPointerDown}
+        style={{ cursor: 'pointer' }}
+      >
+        {COMPONENT_CHANNELS.map((ch, row) => {
+          const yOffset = row * COMPONENT_STRIP_HEIGHT;
+          const points = componentPolygonPoints(
+            stops,
+            ch,
+            STRIP_WIDTH,
+            COMPONENT_STRIP_HEIGHT,
+          );
+          return (
+            <g key={ch} transform={`translate(0, ${yOffset})`}>
+              <rect
+                x={0}
+                y={0}
+                width={STRIP_WIDTH}
+                height={COMPONENT_STRIP_HEIGHT}
+                fill="#ffffff"
+                stroke="#888"
+                strokeWidth={1}
+              />
+              {points && (
+                <polygon points={points} fill={COMPONENT_FILLS[ch]} stroke="none" />
+              )}
+              {stops.map((s, i) => {
+                if (!Number.isFinite(s.anchor)) return null;
+                const x = (clamp(s.anchor, 0, 255) / 255) * STRIP_WIDTH;
+                const isSel = i === selectedIndex;
+                return (
+                  <line
+                    key={i}
+                    x1={x}
+                    x2={x}
+                    y1={0}
+                    y2={COMPONENT_STRIP_HEIGHT}
+                    stroke={isSel ? '#1e63b0' : '#444'}
+                    strokeWidth={isSel ? 1.5 : 1}
+                    opacity={isSel ? 1 : 0.65}
+                  />
+                );
+              })}
+            </g>
+          );
+        })}
+      </svg>
+
       <div className="palette-hint">
         Click a peg to select it · drag to move · click empty space to add a stop
       </div>
+      </div>
+
+      <div className="palette-components-panel">
+        <div className="palette-vbars">
+          <VerticalChannelBar
+            channel="r"
+            value={selectedStop ? selectedStop.r : null}
+            onChange={selectedStop ? (v) => updateSelected({ r: v }) : undefined}
+          />
+          <VerticalChannelBar
+            channel="g"
+            value={selectedStop ? selectedStop.g : null}
+            onChange={selectedStop ? (v) => updateSelected({ g: v }) : undefined}
+          />
+          <VerticalChannelBar
+            channel="b"
+            value={selectedStop ? selectedStop.b : null}
+            onChange={selectedStop ? (v) => updateSelected({ b: v }) : undefined}
+          />
+        </div>
+        <div className="palette-preview">
+          <div className="palette-preview-label">Preview</div>
+          <div
+            className={`palette-preview-swatch${selectedStop ? '' : ' palette-preview-swatch-empty'}`}
+            style={selectedStop ? { background: rgbCss(selectedStop) } : undefined}
+            aria-label="selected stop color preview"
+          />
+        </div>
+      </div>
+      </div>
 
       {selectedStop && (
-        <div className="palette-row">
-          <strong>Selected stop {selectedIndex! + 1}</strong>
-          <label>
-            anchor (0–255):
-            <input
-              type="number"
-              min={0}
-              max={255}
-              step="any"
-              value={Math.round(selectedStop.anchor * 100) / 100}
-              onChange={(e) => updateSelected({ anchor: clamp(parseFloat(e.target.value), 0, 255) })}
+        <>
+          <div className="palette-row">
+            <strong>Selected stop {selectedIndex! + 1}</strong>
+            <label>
+              anchor (0–255):
+              <input
+                type="number"
+                min={0}
+                max={255}
+                step="any"
+                value={Math.round(selectedStop.anchor * 100) / 100}
+                onChange={(e) => updateSelected({ anchor: clamp(parseFloat(e.target.value), 0, 255) })}
+              />
+            </label>
+            <label>
+              R:
+              <input
+                type="number"
+                min={0}
+                max={255}
+                value={Math.round(selectedStop.r)}
+                onChange={(e) => updateSelected({ r: clamp(parseFloat(e.target.value), 0, 255) })}
+              />
+            </label>
+            <label>
+              G:
+              <input
+                type="number"
+                min={0}
+                max={255}
+                value={Math.round(selectedStop.g)}
+                onChange={(e) => updateSelected({ g: clamp(parseFloat(e.target.value), 0, 255) })}
+              />
+            </label>
+            <label>
+              B:
+              <input
+                type="number"
+                min={0}
+                max={255}
+                value={Math.round(selectedStop.b)}
+                onChange={(e) => updateSelected({ b: clamp(parseFloat(e.target.value), 0, 255) })}
+              />
+            </label>
+            <span
+              className="palette-swatch"
+              style={{
+                display: 'inline-block',
+                width: 24,
+                height: 24,
+                border: '1px solid #555',
+                background: rgbCss(selectedStop),
+                verticalAlign: 'middle',
+              }}
             />
-          </label>
-          <label>
-            R:
-            <input
-              type="number"
-              min={0}
-              max={255}
-              value={Math.round(selectedStop.r)}
-              onChange={(e) => updateSelected({ r: clamp(parseFloat(e.target.value), 0, 255) })}
-            />
-          </label>
-          <label>
-            G:
-            <input
-              type="number"
-              min={0}
-              max={255}
-              value={Math.round(selectedStop.g)}
-              onChange={(e) => updateSelected({ g: clamp(parseFloat(e.target.value), 0, 255) })}
-            />
-          </label>
-          <label>
-            B:
-            <input
-              type="number"
-              min={0}
-              max={255}
-              value={Math.round(selectedStop.b)}
-              onChange={(e) => updateSelected({ b: clamp(parseFloat(e.target.value), 0, 255) })}
-            />
-          </label>
-          <span
-            className="palette-swatch"
-            style={{
-              display: 'inline-block',
-              width: 24,
-              height: 24,
-              border: '1px solid #555',
-              background: rgbCss(selectedStop),
-              verticalAlign: 'middle',
-            }}
-          />
-          <button onClick={removeSelected}>Remove stop</button>
-        </div>
+            <button onClick={removeSelected}>Remove stop</button>
+          </div>
+        </>
       )}
 
       <div className="palette-row">

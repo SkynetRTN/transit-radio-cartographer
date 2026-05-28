@@ -12,6 +12,18 @@ import { rpcClient, type ScanMeta, type ScanOverview } from '../ipc/client';
 
 export type ScanViewMode = 'scan' | 'calibrate-scan';
 
+// Fit kind used by Determine Peak. Picked from the dropdown in the Scan
+// menu and dispatched to one of four RPCs in ScanView's drag handler.
+// `'max'` is the odd one out — it returns a single point that the UI
+// renders as a ringed highlight instead of a fit curve.
+export type PeakFitKind =
+  | 'gaussian'
+  | 'cos2'
+  | 'poly2'
+  | 'poly3'
+  | 'poly4'
+  | 'max';
+
 export interface ScanState {
   loading: boolean;
   error: string | null;
@@ -30,12 +42,8 @@ export interface ScanState {
   markDirty: () => void;
   refreshOverview: () => Promise<void>;
   save: (path?: string) => Promise<string | null>;
-  // Fit kind used by Determine Peak. Encoded as a number to reuse the
-  // existing NumericInputDialog: `0` selects the Gaussian fit (current
-  // default), `2` / `3` / `4` select an N-degree polynomial fit. Clamped to
-  // {0, 2, 3, 4} at the setter site in MainWindow.
-  peakFitDegree: number;
-  setPeakFitDegree: (degree: number) => void;
+  peakFitKind: PeakFitKind;
+  setPeakFitKind: (kind: PeakFitKind) => void;
 }
 
 const ScanContext = createContext<ScanState | null>(null);
@@ -55,7 +63,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
   const [savePath, setSavePath] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [peakFitDegree, setPeakFitDegree] = useState<number>(0);
+  const [peakFitKind, setPeakFitKind] = useState<PeakFitKind>('gaussian');
 
   const handleRef = useRef<number | null>(handle);
   const savePathRef = useRef<string | null>(savePath);
@@ -170,8 +178,8 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       markDirty,
       refreshOverview,
       save,
-      peakFitDegree,
-      setPeakFitDegree,
+      peakFitKind,
+      setPeakFitKind,
     }),
     [
       loading,
@@ -189,7 +197,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       markDirty,
       refreshOverview,
       save,
-      peakFitDegree,
+      peakFitKind,
     ],
   );
 

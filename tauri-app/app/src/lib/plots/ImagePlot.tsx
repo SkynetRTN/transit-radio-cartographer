@@ -5,7 +5,9 @@ import type { ImageMeta, ImagePixels, PaletteStop } from '../../ipc/client';
 export interface ImagePoint {
   ra: number;
   dec: number;
-  flux: number;
+  // `null` means the cell is no-data (engine NaN sentinel encoded as null).
+  // The readout shows this as blank rather than as a real flux value.
+  flux: number | null;
   col: number;
   row: number;
 }
@@ -165,7 +167,9 @@ export function ImagePlot({
     let zmax = 0;
     for (const row of image.pixels) {
       for (const v of row) {
-        if (v > zmax) zmax = v;
+        // Skip no-coverage cells (BUG-014) when finding the bright cap — they
+        // arrive as `null` and would otherwise short-circuit the `>` compare.
+        if (v !== null && v > zmax) zmax = v;
       }
     }
 
@@ -277,7 +281,11 @@ export function ImagePlot({
       title: { text: title },
       margin: { l: 70, r: 20, t: title ? 40 : 12, b: 50 },
       paper_bgcolor: '#f3f3f3',
-      plot_bgcolor: '#000000',
+      // BUG-014: no-coverage cells arrive as `null` (engine NaN sentinel,
+      // JSON-encoded as null). Plotly's heatmap renders them transparent,
+      // so the plot background shows through — set to white to match the
+      // legacy "blank sky" appearance for append/superimpose gutters.
+      plot_bgcolor: '#ffffff',
       font: { family: 'Tahoma, sans-serif', size: 11 },
       xaxis,
       yaxis,
@@ -329,18 +337,45 @@ export function ImagePlot({
     plotEl.on('plotly_unhover', onUnhoverWired);
     plotEl.on('plotly_click', onClickWired);
 
+    // BUG-008: when the user double-clicks (or any other action triggers
+    // a zoom-out / autorange reset), Plotly resets `xaxis.autorange` to
+    // `true` and drops the `'reversed'` flag we set in the initial layout
+    // — so RA renders min-on-left, max-on-right and the axis appears
+    // flipped. Re-apply 'reversed' whenever Plotly autorange-resets the
+    // x-axis. Guarded by a flag so we don't loop on the relayout we
+    // ourselves trigger.
+    let suppressRelayout = false;
+    const onRelayoutWired = (data: unknown) => {
+      if (!hasBounds || suppressRelayout) return;
+      const d = data as Record<string, unknown>;
+      if (d['xaxis.autorange'] === true) {
+        suppressRelayout = true;
+        // Plotly's TS types say `autorange` is boolean, but the runtime
+        // accepts `'reversed'` (see the `xaxis` layout above, which uses
+        // the same value with an `as const` cast). Mirror that here.
+        Plotly.relayout(node, { 'xaxis.autorange': 'reversed' } as unknown as Partial<Plotly.Layout>).finally(() => {
+          suppressRelayout = false;
+        });
+      }
+    };
+    plotEl.on('plotly_relayout', onRelayoutWired);
+
     return () => {
       plotEl.removeAllListeners?.('plotly_hover');
       plotEl.removeAllListeners?.('plotly_unhover');
       plotEl.removeAllListeners?.('plotly_click');
+      plotEl.removeAllListeners?.('plotly_relayout');
       Plotly.purge(node);
     };
   }, [image, meta, title, palette, fluxRange, boxOverlay, showColorBar, onHover, onClick]);
 
   const handleContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!onContextMenu) return;
+    // Always suppress the browser context menu on the heatmap. Without this,
+    // right-click on PreImageView (which doesn't wire up onContextMenu) lets
+    // Plotly handle the event and ends up resetting the layout — which drops
+    // `autorange: 'reversed'` on the RA axis and flips it (BUG-008).
     e.preventDefault();
-    onContextMenu(lastHoverRef.current);
+    if (onContextMenu) onContextMenu(lastHoverRef.current);
   };
 
   return (

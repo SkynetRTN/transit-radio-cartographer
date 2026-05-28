@@ -5,11 +5,13 @@ import json
 import struct
 import sys
 import traceback
+import warnings
 from dataclasses import asdict, replace as replace_dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from numpy.typing import NDArray
 
 from ._handles import HandleRegistry, UnknownHandleError
 from .flux_calibration import default_known_jy, fit_counts_to_jy, fit_error, read_scn_peak
@@ -51,6 +53,8 @@ from .scan_workspace import (
     determine_peak,
     determine_peak_fit,
     determine_peak_gaussian,
+    determine_peak_max_value,
+    determine_peak_squared_cosine,
     revert_flux_calibration_scan,
     scan_from_scn,
     select_calibration_declination_scan,
@@ -122,6 +126,57 @@ def _survey_from_workspace_sources(ws: "SurveyWorkspace") -> Survey:
     )
 
 
+def _array_to_jsonable_list(arr: NDArray) -> list:
+    """Convert a numpy float array to a JSON-safe nested Python list.
+
+    Standard JSON does not allow `NaN`/`Infinity`; Python's `json.dumps` emits
+    them anyway as bareword literals, and Rust's `serde_json::from_str` (used
+    by the Tauri sidecar bridge to parse our responses) rejects them — the
+    whole RPC reply gets dropped and the UI sees an opaque "decode_failed."
+    Substituting `None`/`null` at the array-to-list boundary keeps the rest
+    of the engine NaN-aware while emitting strict JSON.
+    """
+    # Object-dtype intermediate so we can mix Python floats with None. The
+    # tolist() call still happens but on the substituted array.
+    finite = np.isfinite(arr)
+    if finite.all():
+        return arr.tolist()
+    obj = arr.astype(object)
+    obj[~finite] = None
+    return obj.tolist()
+
+
+def _block_downsample(pixels: NDArray, step: int) -> NDArray:
+    """Block-max downsample a 2-D array by `step`, keeping NaN as "no data".
+
+    Stride-slice downsampling (`pixels[::step, ::step]`) was the previous
+    approach, but for sparse bright sources (a single-pixel peak in a wide
+    grid) the peak can fall on an unsampled coordinate and disappear from
+    the display — leaving the user's bi-color image looking far darker than
+    the underlying channel actually is. Block-max preserves the peak for
+    *any* block that contains it.
+
+    Cells beyond the largest multiple of `step` are dropped (at most `step-1`
+    cells on each axis); this trades a one-cell display fringe for a simple
+    vectorized reduction. `np.nanmax` returns NaN only when every cell in
+    a block is NaN, which is the right semantic for "fully uncovered block."
+    """
+    if step <= 1:
+        return pixels
+    h, w = pixels.shape
+    h_trim = (h // step) * step
+    w_trim = (w // step) * step
+    if h_trim == 0 or w_trim == 0:
+        return pixels[:0, :0]
+    trimmed = pixels[:h_trim, :w_trim]
+    blocks = trimmed.reshape(h_trim // step, step, w_trim // step, step)
+    with np.errstate(invalid="ignore"), warnings.catch_warnings():
+        # `nanmax` on a fully-NaN block emits "All-NaN slice encountered"; we
+        # *want* NaN out in that case, so swallow the warning.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return np.nanmax(blocks, axis=(1, 3))
+
+
 def _image_to_gridded(image: Image) -> GriddedImage:
     """Convert a legacy `.img` Image (int16 + palette) to a GriddedImage.
 
@@ -188,17 +243,35 @@ def _gridded_to_image(
     pal = palette if palette is not None else _default_palette()
     if flux_max <= flux_min:
         flux_max = flux_min + 1e-9
-    norm = (image.pixels - flux_min) / (flux_max - flux_min)
-    norm = np.clip(norm, 0.0, 1.0)
+    # BUG-014: in-memory pixels carry NaN for "no coverage." The legacy .img
+    # format uses `Clr = 0` as the "unpainted background" sentinel (re-read
+    # at `_image_to_gridded` time as `min_flux_p` floor). Substitute 0 for
+    # no-coverage cells on the way out so the file is a strict superset of
+    # legacy semantics — a round-trip pins those cells back to the floor flux
+    # rather than to NaN, which is acceptable since .img has no real NaN.
+    finite = np.isfinite(image.pixels)
+    norm = np.zeros_like(image.pixels)
+    if finite.any():
+        norm[finite] = (image.pixels[finite] - flux_min) / (flux_max - flux_min)
+        norm = np.clip(norm, 0.0, 1.0)
     int_pixels = ((norm * 4999.0).round() + 1.0).astype(np.int16)
+    # Force no-coverage cells to the unpainted sentinel (Clr = 0).
+    int_pixels[~finite] = 0
+    # Float aggregates skip NaN so we don't poison the file header.
+    if finite.any():
+        observed_min = float(np.nanmin(image.pixels))
+        observed_max = float(np.nanmax(image.pixels))
+    else:
+        observed_min = 0.0
+        observed_max = 0.0
     return Image(
         name=name,
         min_ra=float(image.min_ra),
         max_ra=float(image.max_ra),
         min_dec=float(image.min_dec),
         max_dec=float(image.max_dec),
-        min_flux=float(np.min(image.pixels)) if image.pixels.size else 0.0,
-        max_flux=float(np.max(image.pixels)) if image.pixels.size else 0.0,
+        min_flux=observed_min,
+        max_flux=observed_max,
         min_ra_p=float(image.min_ra),
         max_ra_p=float(image.max_ra),
         min_dec_p=float(image.min_dec),
@@ -266,7 +339,11 @@ def _flux_range_from_params(params: dict[str, Any], image: GriddedImage) -> tupl
         except (TypeError, ValueError) as exc:
             raise RpcError(ERR_INVALID_PARAMS, "flux_min/flux_max must be numeric") from exc
     if image.pixels.size:
-        return float(np.min(image.pixels)), float(np.max(image.pixels))
+        # nanmin/nanmax so a composed image carrying NaN "no data" cells still
+        # auto-ranges from the actual data, not from a NaN-poisoned extent.
+        finite_count = int(np.isfinite(image.pixels).sum())
+        if finite_count > 0:
+            return float(np.nanmin(image.pixels)), float(np.nanmax(image.pixels))
     return 0.0, 1.0
 
 
@@ -434,6 +511,10 @@ class RpcServer:
                 result = self._determine_scan_peak_fit(params)
             elif method == "determine_scan_peak_gaussian":
                 result = self._determine_scan_peak_gaussian(params)
+            elif method == "determine_scan_peak_squared_cosine":
+                result = self._determine_scan_peak_squared_cosine(params)
+            elif method == "determine_scan_peak_max_value":
+                result = self._determine_scan_peak_max_value(params)
             elif method == "undo_scan":
                 result = self._undo_scan(params)
             elif method == "save_scan":
@@ -713,19 +794,28 @@ class RpcServer:
         height, width = pixels.shape
         if max_dim > 0:
             longest = max(height, width)
-            step = -(-longest // max_dim)  # ceil division
-            step = max(1, step)
+            step = max(1, -(-longest // max_dim))  # ceil division
             if step > 1:
-                pixels = pixels[::step, ::step]
+                pixels = _block_downsample(pixels, step)
                 height, width = pixels.shape
         return {
-            "pixels": pixels.tolist(),
+            "pixels": _array_to_jsonable_list(pixels),
             "width": int(width),
             "height": int(height),
         }
 
     def _image_meta(self, image: GriddedImage, handle: int) -> dict[str, Any]:
         height, width = image.pixels.shape
+        # nanmin/nanmax so an appended image carrying NaN "no data" cells
+        # (BUG-014) doesn't poison the meta with NaN — that would emit a bare
+        # `NaN` literal in JSON, which Rust serde rejects and the whole RPC
+        # reply silently disappears on the UI side.
+        if image.pixels.size and np.isfinite(image.pixels).any():
+            min_flux = float(np.nanmin(image.pixels))
+            max_flux = float(np.nanmax(image.pixels))
+        else:
+            min_flux = 0.0
+            max_flux = 0.0
         return {
             "handle": handle,
             "width": int(width),
@@ -734,8 +824,8 @@ class RpcServer:
             "max_ra": float(image.max_ra),
             "min_dec": float(image.min_dec),
             "max_dec": float(image.max_dec),
-            "min_flux": float(np.min(image.pixels)) if image.pixels.size else 0.0,
-            "max_flux": float(np.max(image.pixels)) if image.pixels.size else 0.0,
+            "min_flux": min_flux,
+            "max_flux": max_flux,
             "unit": image.unit,
             "flux_calibrated": bool(image.flux_calibrated),
             "flux_slope": (
@@ -842,9 +932,16 @@ class RpcServer:
         dec_shift = float(params.get("dec_shift_degrees", 0.0))
         pix = params.get("pix")
         pix_int = int(pix) if pix is not None else None
-        composed = append_images(
-            primary, secondary, pix=pix_int, ra_shift_seconds=ra_shift, dec_shift_degrees=dec_shift
-        )
+        try:
+            composed = append_images(
+                primary,
+                secondary,
+                pix=pix_int,
+                ra_shift_seconds=ra_shift,
+                dec_shift_degrees=dec_shift,
+            )
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
         new_handle = self._handles.create(composed)
         return self._image_meta(composed, new_handle)
 
@@ -907,16 +1004,23 @@ class RpcServer:
         tertiary = _open_image_path(str(third_path))
         ra_shift = float(params.get("ra_shift_seconds", 0.0))
         dec_shift = float(params.get("dec_shift_degrees", 0.0))
+        tertiary_ra_shift = float(params.get("tertiary_ra_shift_seconds", 0.0))
+        tertiary_dec_shift = float(params.get("tertiary_dec_shift_degrees", 0.0))
         pix = params.get("pix")
         pix_int = int(pix) if pix is not None else None
-        composed = tricolor_compose(
-            primary,
-            secondary,
-            tertiary,
-            pix=pix_int,
-            ra_shift_seconds=ra_shift,
-            dec_shift_degrees=dec_shift,
-        )
+        try:
+            composed = tricolor_compose(
+                primary,
+                secondary,
+                tertiary,
+                pix=pix_int,
+                tertiary_ra_shift_seconds=tertiary_ra_shift,
+                tertiary_dec_shift_degrees=tertiary_dec_shift,
+                ra_shift_seconds=ra_shift,
+                dec_shift_degrees=dec_shift,
+            )
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
         new_handle = self._handles.create(composed)
         return self._rgb_image_meta(composed, new_handle)
 
@@ -950,17 +1054,16 @@ class RpcServer:
         height, width = r.shape
         if max_dim > 0:
             longest = max(height, width)
-            step = -(-longest // max_dim)
-            step = max(1, step)
+            step = max(1, -(-longest // max_dim))
             if step > 1:
-                r = r[::step, ::step]
-                g = g[::step, ::step]
-                b = b[::step, ::step]
+                r = _block_downsample(r, step)
+                g = _block_downsample(g, step)
+                b = _block_downsample(b, step)
                 height, width = r.shape
         return {
-            "r": r.tolist(),
-            "g": g.tolist(),
-            "b": b.tolist(),
+            "r": _array_to_jsonable_list(r),
+            "g": _array_to_jsonable_list(g),
+            "b": _array_to_jsonable_list(b),
             "width": int(width),
             "height": int(height),
         }
@@ -1543,6 +1646,56 @@ class RpcServer:
             raise RpcError(ERR_INVALID_PARAMS, "scan must be calibrated before determining peak")
         try:
             peak_flux, ra_grid, flux_grid, peak_ra = determine_peak_gaussian(
+                ws, ra_min, ra_max
+            )
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        return {
+            "peak_flux": float(peak_flux),
+            "peak_ra": float(peak_ra),
+            "fit_ra": [float(x) for x in ra_grid],
+            "fit_flux": [float(x) for x in flux_grid],
+            "overview": self._scan_overview(ws),
+        }
+
+    def _determine_scan_peak_squared_cosine(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        try:
+            ra_min = float(params["ra_min"])
+            ra_max = float(params["ra_max"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RpcError(
+                ERR_INVALID_PARAMS, "ra_min/ra_max are required numbers"
+            ) from exc
+        if not ws.calibrated:
+            raise RpcError(ERR_INVALID_PARAMS, "scan must be calibrated before determining peak")
+        try:
+            peak_flux, ra_grid, flux_grid, peak_ra = determine_peak_squared_cosine(
+                ws, ra_min, ra_max
+            )
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        return {
+            "peak_flux": float(peak_flux),
+            "peak_ra": float(peak_ra),
+            "fit_ra": [float(x) for x in ra_grid],
+            "fit_flux": [float(x) for x in flux_grid],
+            "overview": self._scan_overview(ws),
+        }
+
+    def _determine_scan_peak_max_value(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        try:
+            ra_min = float(params["ra_min"])
+            ra_max = float(params["ra_max"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RpcError(
+                ERR_INVALID_PARAMS, "ra_min/ra_max are required numbers"
+            ) from exc
+        if not ws.calibrated:
+            raise RpcError(ERR_INVALID_PARAMS, "scan must be calibrated before determining peak")
+        try:
+            peak_flux, ra_grid, flux_grid, peak_ra = determine_peak_max_value(
                 ws, ra_min, ra_max
             )
         except ValueError as exc:

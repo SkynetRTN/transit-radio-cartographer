@@ -553,6 +553,103 @@ def determine_peak_fit(
     return peak_flux, ra_grid, flux_grid, peak_ra
 
 
+def determine_peak_squared_cosine(
+    workspace: ScanWorkspace,
+    ra_min: float,
+    ra_max: float,
+    *,
+    grid_size: int = 200,
+) -> tuple[float, NDArray[np.float64], NDArray[np.float64], float]:
+    """Fit a squared-cosine lobe `A·cos²(π(x − x₀)/W) + B` over a user range.
+
+    The drag width is taken as the lobe width `W = ra_max − ra_min` so the
+    three free parameters are `A`, `B`, and the center `x₀`. With `W`
+    fixed the identity `cos²θ = (1 + cos 2θ)/2` linearizes the model:
+
+        f(x) = c₀ + c₁·cos(2π x / W) + c₂·sin(2π x / W)
+
+    which we solve with `np.linalg.lstsq` and convert back:
+    `A = 2·√(c₁² + c₂²)`, `B = c₀ − A/2`,
+    `x₀ = atan2(c₂, c₁) · W / (2π)`.  Pure numpy, like the log-quadratic
+    Gaussian path — no scipy dependency.
+    """
+    if ra_min == ra_max:
+        raise ValueError("peak-fit range must be non-empty")
+    if ra_min > ra_max:
+        ra_min, ra_max = ra_max, ra_min
+    region = (
+        (workspace.source_ra >= ra_min)
+        & (workspace.source_ra <= ra_max)
+        & workspace.source_mask
+    )
+    n = int(region.sum())
+    if n < 4:
+        raise ValueError(
+            f"need at least 4 kept samples in the range to fit a squared "
+            f"cosine (found {n})"
+        )
+    ra = workspace.source_ra[region]
+    flux = current_source_flux(workspace)[region]
+    width = float(ra_max - ra_min)
+    omega = 2.0 * np.pi / width
+    design = np.column_stack(
+        [np.ones_like(ra), np.cos(omega * ra), np.sin(omega * ra)]
+    )
+    coeff, *_ = np.linalg.lstsq(design, flux, rcond=None)
+    c0, c1, c2 = float(coeff[0]), float(coeff[1]), float(coeff[2])
+    amplitude = 2.0 * float(np.hypot(c1, c2))
+    if amplitude <= 0.0:
+        raise ValueError(
+            "selected range does not contain a squared-cosine-shaped peak"
+        )
+    baseline = c0 - amplitude / 2.0
+    center = float(np.arctan2(c2, c1)) * width / (2.0 * np.pi)
+    ra_grid = np.linspace(ra_min, ra_max, grid_size)
+    flux_grid = amplitude * np.cos(np.pi * (ra_grid - center) / width) ** 2 + baseline
+    max_idx = int(np.argmax(flux_grid))
+    peak_flux = float(flux_grid[max_idx])
+    peak_ra = float(ra_grid[max_idx])
+    _push_source_undo(workspace)
+    workspace.peak_flux = peak_flux
+    return peak_flux, ra_grid, flux_grid, peak_ra
+
+
+def determine_peak_max_value(
+    workspace: ScanWorkspace,
+    ra_min: float,
+    ra_max: float,
+) -> tuple[float, NDArray[np.float64], NDArray[np.float64], float]:
+    """Pick the largest kept sample in the user-selected RA band.
+
+    No curve fit — just `argmax` over the kept source flux in the range.
+    Returns single-element `ra_grid`/`flux_grid` arrays so the response
+    shape matches the other peak-fit operations; the UI branches on the
+    selected kind to decide whether to draw a curve or a single highlight.
+    """
+    if ra_min == ra_max:
+        raise ValueError("peak-fit range must be non-empty")
+    if ra_min > ra_max:
+        ra_min, ra_max = ra_max, ra_min
+    region = (
+        (workspace.source_ra >= ra_min)
+        & (workspace.source_ra <= ra_max)
+        & workspace.source_mask
+    )
+    n = int(region.sum())
+    if n < 1:
+        raise ValueError("need at least 1 kept sample in the range to pick a max")
+    ra = workspace.source_ra[region]
+    flux = current_source_flux(workspace)[region]
+    max_idx = int(np.argmax(flux))
+    peak_flux = float(flux[max_idx])
+    peak_ra = float(ra[max_idx])
+    ra_grid = np.array([peak_ra], dtype=np.float64)
+    flux_grid = np.array([peak_flux], dtype=np.float64)
+    _push_source_undo(workspace)
+    workspace.peak_flux = peak_flux
+    return peak_flux, ra_grid, flux_grid, peak_ra
+
+
 def undo_scan(workspace: ScanWorkspace) -> bool:
     """Revert the most recent cal-side or source-side mutation."""
     if not workspace.undo_stack:

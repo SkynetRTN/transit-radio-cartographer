@@ -50,6 +50,10 @@ vi.mock('../ipc/client', () => ({
     cutScanSegment: vi.fn(),
     baselineScanSource: vi.fn(),
     determineScanPeak: vi.fn(),
+    determineScanPeakFit: vi.fn(),
+    determineScanPeakGaussian: vi.fn(),
+    determineScanPeakSquaredCosine: vi.fn(),
+    determineScanPeakMaxValue: vi.fn(),
     undoScan: vi.fn(),
     saveScan: vi.fn(),
     saveSurvey: vi.fn(),
@@ -87,7 +91,7 @@ function renderApp() {
 test('top-level menus appear in legacy order with no FITS item', () => {
   renderApp();
   expect(screen.getByRole('navigation', { name: /main menu/i })).toBeInTheDocument();
-  const expected = ['File', 'Image', 'Survey', 'Scan', 'Flux Calibration'];
+  const expected = ['Help', 'Image', 'Survey', 'Scan', 'Flux Calibration'];
   const rootMenuButtons = screen
     .getAllByRole('button')
     .filter((btn) => expected.includes((btn.textContent ?? '').trim()));
@@ -111,7 +115,7 @@ test('save scan menu items respect hasScan and savePath state', () => {
   expect(screen.getByRole('menuitem', { name: 'Save Scan As…' })).toBeDisabled();
 });
 
-test('Change Degree of Determine Peak menu item opens a numeric prompt', async () => {
+test('Change Determine Peak Fit menu item opens a dropdown with six options (FEAT-006)', async () => {
   const dialog = await import('@tauri-apps/plugin-dialog');
   const client = await import('../ipc/client');
   (dialog.open as unknown as ReturnType<typeof vi.fn>).mockResolvedValue('/tmp/cyg0a.md1');
@@ -146,8 +150,6 @@ test('Change Degree of Determine Peak menu item opens a numeric prompt', async (
   await vi.waitFor(() => {
     expect(client.rpcClient.openScan).toHaveBeenCalledWith('/tmp/cyg0a.md1');
   });
-  // Open the dialog, change the value, submit. Clamp-to-[2,4] is enforced in onSubmit;
-  // here we just check the dialog appears and accepts an in-range value.
   fireEvent.click(screen.getByText('Scan'));
   await vi.waitFor(() => {
     expect(
@@ -155,12 +157,24 @@ test('Change Degree of Determine Peak menu item opens a numeric prompt', async (
     ).not.toBeDisabled();
   });
   fireEvent.click(screen.getByRole('menuitem', { name: 'Change Determine Peak Fit…' }));
-  const input = await screen.findByLabelText('Fit kind (0 = Gaussian, 2/3/4 = polynomial degree):');
-  fireEvent.change(input, { target: { value: '3' } });
+  const select = (await screen.findByLabelText('Fit kind:')) as HTMLSelectElement;
+  // Spec order: Gaussian → Squared Cosine → 2/3/4 Polynomial → Max Value.
+  const labels = Array.from(select.options).map((o) => o.text);
+  expect(labels).toEqual([
+    'Gaussian',
+    'Squared Cosine',
+    '2nd Degree Polynomial',
+    '3rd Degree Polynomial',
+    '4th Degree Polynomial',
+    'Max Value',
+  ]);
+  // Default selection is Gaussian.
+  expect(select.value).toBe('gaussian');
+  fireEvent.change(select, { target: { value: 'cos2' } });
   fireEvent.click(screen.getByRole('button', { name: 'OK' }));
   // Dialog dismisses after submit.
   await vi.waitFor(() => {
-    expect(screen.queryByLabelText('Fit kind (0 = Gaussian, 2/3/4 = polynomial degree):')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Fit kind:')).not.toBeInTheDocument();
   });
 });
 

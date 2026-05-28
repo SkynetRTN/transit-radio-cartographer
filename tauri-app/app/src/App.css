@@ -551,7 +551,7 @@ body {
   flex-direction: column;
   gap: 12px;
   font-size: 12px;
-  max-width: 720px;
+  max-width: min(960px, 95vw);
 }
 
 .palette-row {
@@ -593,6 +593,118 @@ body {
 
 .palette-strip {
   margin-top: 4px;
+}
+
+.palette-components {
+  display: block;
+  margin-top: 8px;
+  user-select: none;
+}
+
+.palette-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 16px 24px;
+}
+
+.palette-top-left {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.palette-components-panel {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  flex: 0 0 auto;
+}
+
+.palette-vbars {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+}
+
+.palette-vbar-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  user-select: none;
+}
+
+.palette-vbar-label {
+  font-weight: 600;
+  color: #333;
+}
+
+.palette-vbar {
+  position: relative;
+  background: #ffffff;
+  border: 1px solid #888;
+  border-radius: 2px;
+  cursor: ns-resize;
+  overflow: hidden;
+}
+
+.palette-vbar-disabled .palette-vbar {
+  cursor: default;
+  background: #f4f4f4;
+}
+
+.palette-vbar-disabled .palette-vbar-label,
+.palette-vbar-disabled .palette-vbar-value {
+  color: #999;
+}
+
+.palette-vbar-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+}
+
+.palette-vbar-value {
+  color: #333;
+  font-variant-numeric: tabular-nums;
+}
+
+.palette-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+}
+
+.palette-preview-label {
+  font-weight: 600;
+  color: #333;
+}
+
+.palette-preview-swatch {
+  width: 80px;
+  height: 80px;
+  border: 1px solid #555;
+  border-radius: 2px;
+}
+
+.palette-preview-swatch-empty {
+  background-color: #fafafa;
+  background-image:
+    linear-gradient(45deg, #ddd 25%, transparent 25%),
+    linear-gradient(-45deg, #ddd 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #ddd 75%),
+    linear-gradient(-45deg, transparent 75%, #ddd 75%);
+  background-size: 10px 10px;
+  background-position: 0 0, 0 5px, 5px -5px, -5px 0;
+  border-color: #aaa;
 }
 
 .palette-hint {

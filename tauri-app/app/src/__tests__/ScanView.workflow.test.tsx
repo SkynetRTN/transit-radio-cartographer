@@ -85,6 +85,20 @@ vi.mock('../ipc/client', () => {
         fit_flux: [3.0, 4.6, 3.0],
         overview: { ...overviewCalibrated, peak_flux: 4.6 },
       }),
+      determineScanPeakSquaredCosine: vi.fn().mockResolvedValue({
+        peak_flux: 4.7,
+        peak_ra: 10,
+        fit_ra: [5, 10, 15],
+        fit_flux: [0.0, 4.7, 0.0],
+        overview: { ...overviewCalibrated, peak_flux: 4.7 },
+      }),
+      determineScanPeakMaxValue: vi.fn().mockResolvedValue({
+        peak_flux: 5.2,
+        peak_ra: 6.5,
+        fit_ra: [6.5],
+        fit_flux: [5.2],
+        overview: { ...overviewCalibrated, peak_flux: 5.2 },
+      }),
       undoScan: vi.fn().mockResolvedValue({ undone: true, overview: overviewRaw }),
       saveScan: vi.fn().mockResolvedValue({ path: '/tmp/cyg0a.scn', bytes_written: 1234 }),
     },
@@ -120,6 +134,7 @@ const overviewCalibrated: ScanOverview = { ...overviewRaw, calibrated: true };
 vi.mock('../lib/plots/PointScatter', () => ({
   PointScatter: (props: {
     testId?: string;
+    highlightPoint?: { x: number; y: number; color?: string } | null;
     onPointClick?: (p: { x: number; y: number; ra: number; dec: number; flux: number }) => void;
     onEmptyClick?: () => void;
     onDragStart?: (v: number) => void;
@@ -128,7 +143,11 @@ vi.mock('../lib/plots/PointScatter', () => ({
   }) => {
     const id = props.testId ?? 'plot';
     return (
-      <div data-testid={id}>
+      <div
+        data-testid={id}
+        data-highlight-x={props.highlightPoint?.x ?? ''}
+        data-highlight-y={props.highlightPoint?.y ?? ''}
+      >
         <button
           data-testid={`${id}-point-a`}
           onClick={() => props.onPointClick?.({ x: 5, y: 3, ra: 5, dec: 10, flux: 3 })}
@@ -450,13 +469,79 @@ test('Determine Peak stays sticky after a peak fit (FEAT-002)', async () => {
   await act(async () => {
     fireEvent.click(screen.getByTestId('scan-flux-plot-drag-end'));
   });
-  // peakFitDegree defaults to 0 → Gaussian fit RPC.
+  // peakFitKind defaults to 'gaussian' → Gaussian fit RPC.
   await waitFor(() =>
     expect(
       rpcClient.determineScanPeakGaussian as unknown as ReturnType<typeof vi.fn>,
     ).toHaveBeenCalledWith(7, 5, 7),
   );
   expect(screen.getByText(/Determine Peak \(drag/)).toBeInTheDocument();
+});
+
+function FitKindPicker({ kind }: { kind: 'cos2' | 'max' | 'poly3' }) {
+  const { setPeakFitKind } = useScan();
+  useEffect(() => {
+    setPeakFitKind(kind);
+  }, [kind, setPeakFitKind]);
+  return null;
+}
+
+test('Determine Peak with Squared Cosine fit kind invokes the cos² RPC (FEAT-006)', async () => {
+  const meta = setupCalibratedScanView();
+  await act(async () => {
+    render(
+      <ScanProvider>
+        <HydrateScan meta={meta} />
+        <FitKindPicker kind="cos2" />
+        <ScanView />
+      </ScanProvider>,
+    );
+  });
+  await waitFor(() => expect(screen.getByText('Determine Peak')).toBeInTheDocument());
+  fireEvent.click(screen.getByText('Determine Peak'));
+  fireEvent.click(screen.getByTestId('scan-flux-plot-drag-start'));
+  fireEvent.click(screen.getByTestId('scan-flux-plot-drag-update'));
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('scan-flux-plot-drag-end'));
+  });
+  await waitFor(() =>
+    expect(
+      rpcClient.determineScanPeakSquaredCosine as unknown as ReturnType<typeof vi.fn>,
+    ).toHaveBeenCalledWith(7, 5, 7),
+  );
+  // cos² returns a fit curve, so no point-ring highlight should appear.
+  expect(screen.getByTestId('scan-flux-plot').getAttribute('data-highlight-x')).toBe('');
+});
+
+test('Determine Peak with Max Value fit kind invokes the max RPC and rings the point (FEAT-006)', async () => {
+  const meta = setupCalibratedScanView();
+  await act(async () => {
+    render(
+      <ScanProvider>
+        <HydrateScan meta={meta} />
+        <FitKindPicker kind="max" />
+        <ScanView />
+      </ScanProvider>,
+    );
+  });
+  await waitFor(() => expect(screen.getByText('Determine Peak')).toBeInTheDocument());
+  fireEvent.click(screen.getByText('Determine Peak'));
+  fireEvent.click(screen.getByTestId('scan-flux-plot-drag-start'));
+  fireEvent.click(screen.getByTestId('scan-flux-plot-drag-update'));
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('scan-flux-plot-drag-end'));
+  });
+  await waitFor(() =>
+    expect(
+      rpcClient.determineScanPeakMaxValue as unknown as ReturnType<typeof vi.fn>,
+    ).toHaveBeenCalledWith(7, 5, 7),
+  );
+  // Max Value renders a single ringed sample (mocked at ra=6.5, flux=5.2);
+  // no fit curve, just the highlight.
+  await waitFor(() =>
+    expect(screen.getByTestId('scan-flux-plot').getAttribute('data-highlight-x')).toBe('6.5'),
+  );
+  expect(screen.getByTestId('scan-flux-plot').getAttribute('data-highlight-y')).toBe('5.2');
 });
 
 test('Switching tools deselects the previous one (FEAT-002)', async () => {
