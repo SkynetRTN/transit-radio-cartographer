@@ -490,8 +490,8 @@ The three color component "hue" bars should be below the current hue bar, opposi
 
 ### Acceptance criteria
 *Bullet list of what "done" means. Concrete and testable. e.g.*
-- [ ] All listed UIs appear and look good
-- [ ] Passes visual inspection by user -- no not mark as done until user marks off this acceptance criteria
+- [X] All listed UIs appear and look good
+- [X] Passes visual inspection by user -- no not mark as done until user marks off this acceptance criteria
 
 ### Out of scope
 Adjustment of the palette presets or palette behavior after exiting the palette editor
