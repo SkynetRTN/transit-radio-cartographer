@@ -43,7 +43,7 @@ export function ScanView() {
     refreshOverview,
     setOverview,
     markDirty,
-    peakFitDegree,
+    peakFitKind,
   } = useScan();
   const [view, setView] = useState<ScanViewPayload | null>(null);
   const [loading, setLoading] = useState(false);
@@ -56,12 +56,18 @@ export function ScanView() {
   const [pendingBaselinePoint, setPendingBaselinePoint] = useState<
     { ra: number; flux: number } | null
   >(null);
-  // Polynomial curve from the most recent Determine Peak fit. Drawn over the
-  // flux plot so the user can see how the fit lays through their selection;
-  // cleared whenever the view reloads. Engine doesn't persist this — only the
-  // resulting `peak_flux` lives on the workspace.
+  // Polynomial / Gaussian / cos² curve from the most recent Determine Peak
+  // fit. Drawn over the flux plot so the user can see how the fit lays
+  // through their selection; cleared whenever the view reloads. Engine
+  // doesn't persist this — only the resulting `peak_flux` lives on the
+  // workspace.
   const [pendingPeakFit, setPendingPeakFit] = useState<
     { ra: number[]; flux: number[] } | null
+  >(null);
+  // For the Max Value fit kind we ring the chosen sample instead of drawing
+  // a curve; this is the (ra, flux) of that sample.
+  const [pendingPeakHighlight, setPendingPeakHighlight] = useState<
+    { ra: number; flux: number } | null
   >(null);
   const dragOrigin = useRef<number | null>(null);
   const dragDecOrigin = useRef<number | null>(null);
@@ -97,6 +103,7 @@ export function ScanView() {
     setDragRange(null);
     setDragDecRange(null);
     setPendingPeakFit(null);
+    setPendingPeakHighlight(null);
   }, [view]);
 
   const unit: 'volts' | 'gain' | 'jy' = view?.unit ?? 'volts';
@@ -275,19 +282,39 @@ export function ScanView() {
             await Promise.all([loadView(), refreshOverview()]);
             markDirty();
           } else {
-            // peakFitDegree === 0 → Gaussian; 2/3/4 → polynomial. See the
-            // encoding comment on `peakFitDegree` in scan-context.tsx.
-            const res =
-              peakFitDegree === 0
-                ? await rpcClient.determineScanPeakGaussian(handle, range.x0, range.x1)
-                : await rpcClient.determineScanPeakFit(
-                    handle,
-                    range.x0,
-                    range.x1,
-                    peakFitDegree,
-                  );
+            // Dispatch on the selected fit kind. The Gaussian / cos² /
+            // polynomial RPCs all return a fit-curve grid that lays through
+            // the selection; Max Value returns a single (ra, flux) sample
+            // that the UI rings instead of drawing a curve.
+            let res;
+            switch (peakFitKind) {
+              case 'gaussian':
+                res = await rpcClient.determineScanPeakGaussian(handle, range.x0, range.x1);
+                break;
+              case 'cos2':
+                res = await rpcClient.determineScanPeakSquaredCosine(handle, range.x0, range.x1);
+                break;
+              case 'poly2':
+                res = await rpcClient.determineScanPeakFit(handle, range.x0, range.x1, 2);
+                break;
+              case 'poly3':
+                res = await rpcClient.determineScanPeakFit(handle, range.x0, range.x1, 3);
+                break;
+              case 'poly4':
+                res = await rpcClient.determineScanPeakFit(handle, range.x0, range.x1, 4);
+                break;
+              case 'max':
+                res = await rpcClient.determineScanPeakMaxValue(handle, range.x0, range.x1);
+                break;
+            }
             setOverview(res.overview);
-            setPendingPeakFit({ ra: res.fit_ra, flux: res.fit_flux });
+            if (peakFitKind === 'max') {
+              setPendingPeakFit(null);
+              setPendingPeakHighlight({ ra: res.peak_ra, flux: res.peak_flux });
+            } else {
+              setPendingPeakHighlight(null);
+              setPendingPeakFit({ ra: res.fit_ra, flux: res.fit_flux });
+            }
             markDirty();
           }
         } catch (e) {
@@ -302,7 +329,7 @@ export function ScanView() {
       loadView,
       refreshOverview,
       markDirty,
-      peakFitDegree,
+      peakFitKind,
       setOverview,
     ],
   );
@@ -412,7 +439,14 @@ export function ScanView() {
     if (mode.kind === 'baseline')
       return pendingBaselinePoint ? 'Baseline Source: click endpoint…' : 'Baseline Source: click first point…';
     if (mode.kind === 'peak') {
-      const fitLabel = peakFitDegree === 0 ? 'Gaussian' : `polynomial degree ${peakFitDegree}`;
+      const fitLabel = {
+        gaussian: 'Gaussian',
+        cos2: 'squared cosine',
+        poly2: 'polynomial degree 2',
+        poly3: 'polynomial degree 3',
+        poly4: 'polynomial degree 4',
+        max: 'max value',
+      }[peakFitKind];
       return `Determine Peak: drag an RA range over the peak (${fitLabel})…`;
     }
     return null;
@@ -447,6 +481,11 @@ export function ScanView() {
                         : stickyPoint
                           ? { x: stickyPoint.ra, y: stickyPoint.flux }
                           : null
+                    }
+                    highlightPoint={
+                      pendingPeakHighlight
+                        ? { x: pendingPeakHighlight.ra, y: pendingPeakHighlight.flux }
+                        : null
                     }
                     highlightRange={dragRange}
                     highlightColor={mode.kind === 'peak' ? '#5fb7ff' : undefined}

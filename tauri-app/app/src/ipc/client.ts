@@ -218,7 +218,11 @@ export interface ImageMeta {
 }
 
 export interface ImagePixels {
-  pixels: number[][];
+  // Per-cell flux (engine native units). `null` is the JSON-safe "no data"
+  // sentinel — see RgbImagePixels for the rationale. Scalar renderers should
+  // treat null as blank rather than as a real flux value (which Plotly does
+  // by default when null cells are present in a heatmap z-array).
+  pixels: (number | null)[][];
   width: number;
   height: number;
 }
@@ -235,9 +239,13 @@ export interface RgbImageMeta {
 }
 
 export interface RgbImagePixels {
-  r: number[][];
-  g: number[][];
-  b: number[][];
+  // Per-cell channel intensities in [0, 1]. `null` marks "no data" — the
+  // engine encodes its NaN sentinel as null since standard JSON (and Rust's
+  // strict `serde_json`) rejects NaN/Infinity literals. Renderers should
+  // paint null cells as blank (white), not as black.
+  r: (number | null)[][];
+  g: (number | null)[][];
+  b: (number | null)[][];
   width: number;
   height: number;
 }
@@ -343,6 +351,9 @@ export class RpcClient {
       bracket,
       enabled,
     });
+  }
+  setWorkspaceName(handle: number, name: string) {
+    return this.request<WorkspaceOverview>('set_workspace_name', { handle, name });
   }
   smooth(handle: number, width = 5, workspaceHandle?: number | null) {
     return this.request<ReductionResult>('smooth', this._reductionParams(handle, { width }, workspaceHandle));
@@ -475,7 +486,13 @@ export class RpcClient {
     handle: number,
     secondPath: string,
     thirdPath: string,
-    options?: { ra_shift_seconds?: number; dec_shift_degrees?: number; pix?: number },
+    options?: {
+      ra_shift_seconds?: number;
+      dec_shift_degrees?: number;
+      tertiary_ra_shift_seconds?: number;
+      tertiary_dec_shift_degrees?: number;
+      pix?: number;
+    },
   ) {
     const params: Record<string, unknown> = {
       handle,
@@ -485,6 +502,10 @@ export class RpcClient {
     if (options?.ra_shift_seconds !== undefined) params.ra_shift_seconds = options.ra_shift_seconds;
     if (options?.dec_shift_degrees !== undefined)
       params.dec_shift_degrees = options.dec_shift_degrees;
+    if (options?.tertiary_ra_shift_seconds !== undefined)
+      params.tertiary_ra_shift_seconds = options.tertiary_ra_shift_seconds;
+    if (options?.tertiary_dec_shift_degrees !== undefined)
+      params.tertiary_dec_shift_degrees = options.tertiary_dec_shift_degrees;
     if (options?.pix !== undefined) params.pix = options.pix;
     return this.request<RgbImageMeta>('tricolor_image', params);
   }
@@ -554,6 +575,9 @@ export class RpcClient {
       enabled,
     });
   }
+  setScanWorkspaceName(handle: number, name: string) {
+    return this.request<ScanOverview>('set_scan_workspace_name', { handle, name });
+  }
   selectScanDeclination(handle: number, decMin: number, decMax: number) {
     return this.request<{ removed: number; overview: ScanOverview }>(
       'select_scan_declination',
@@ -605,6 +629,24 @@ export class RpcClient {
       fit_flux: number[];
       overview: ScanOverview;
     }>('determine_scan_peak_gaussian', { handle, ra_min: raMin, ra_max: raMax });
+  }
+  determineScanPeakSquaredCosine(handle: number, raMin: number, raMax: number) {
+    return this.request<{
+      peak_flux: number;
+      peak_ra: number;
+      fit_ra: number[];
+      fit_flux: number[];
+      overview: ScanOverview;
+    }>('determine_scan_peak_squared_cosine', { handle, ra_min: raMin, ra_max: raMax });
+  }
+  determineScanPeakMaxValue(handle: number, raMin: number, raMax: number) {
+    return this.request<{
+      peak_flux: number;
+      peak_ra: number;
+      fit_ra: number[];
+      fit_flux: number[];
+      overview: ScanOverview;
+    }>('determine_scan_peak_max_value', { handle, ra_min: raMin, ra_max: raMax });
   }
   undoScan(handle: number) {
     return this.request<{ undone: boolean; overview: ScanOverview }>('undo_scan', { handle });

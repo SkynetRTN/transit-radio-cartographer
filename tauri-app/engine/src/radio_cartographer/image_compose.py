@@ -12,10 +12,30 @@ both images stay zero.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 from numpy.typing import NDArray
 
 from .image import GriddedImage, RgbGriddedImage, WCSMetadata
+
+# Output grid cap (cells). 100 MP × 8 B/cell = 800 MB at float64 — comfortably
+# larger than any legitimate composite, fatally smaller than the 660 GiB OOM
+# that triggered BUG-009. Crossing this cap almost always means the two inputs
+# carry RA/Dec in different units (e.g. legacy `.img` seconds-of-time vs FITS
+# degrees) rather than a real mosaic, so we reject before allocating.
+_GRID_CELL_BUDGET = 100_000_000
+
+
+def _check_grid_budget(width: int, height: int) -> None:
+    if width * height > _GRID_CELL_BUDGET:
+        raise ValueError(
+            f"Cannot compose images: combined sky area is far larger than the "
+            f"primary's resolution. This usually means the two images use "
+            f"different coordinate systems (e.g. a .fits file in degrees with "
+            f"an .img file in seconds of time). Computed grid would be "
+            f"{height}x{width} pixels."
+        )
 
 
 def append_images(
@@ -91,6 +111,7 @@ def _compose(
     cell_dec = abs(cell_dec) or 1.0
     width = max(int(np.ceil((max_ra - min_ra) / cell_ra)) + 1, 1)
     height = max(int(np.ceil((max_dec - min_dec) / cell_dec)) + 1, 1)
+    _check_grid_budget(width, height)
 
     p_resampled = _resample_onto(primary, min_ra, max_ra, min_dec, max_dec, width, height, 0.0, 0.0)
     s_resampled = _resample_onto(
@@ -101,7 +122,11 @@ def _compose(
         secondary, min_ra, max_ra, min_dec, max_dec, width, height, ra_shift_seconds, dec_shift_degrees
     )
 
-    pixels = np.zeros((height, width), dtype=np.float64)
+    # BUG-014: cells outside both inputs' footprints are "no data" — encode as
+    # NaN so the UI renders them as blank (white) rather than treating the
+    # zero-fill as a real-but-very-dark sample. The save layer is responsible
+    # for round-tripping these to a format-appropriate sentinel.
+    pixels = np.full((height, width), np.nan, dtype=np.float64)
     only_p = p_mask & ~s_mask
     only_s = s_mask & ~p_mask
     both = p_mask & s_mask
@@ -196,11 +221,12 @@ def bicolor_compose(
     ra_shift_seconds: float = 0.0,
     dec_shift_degrees: float = 0.0,
 ) -> RgbGriddedImage:
-    """Assign each input to one of R/G/B; the third channel is zero.
+    """Assign each input to one of R/G/B; the unused channel is all-zero.
 
     Each channel is normalized independently so a faint source still saturates
     that channel — same intent as the legacy bi-color flow (vb/survform.frm
-    bicolor-mode).
+    bicolor-mode). Cells outside each input's footprint carry NaN so the UI
+    can render them as "no data" (white) rather than as a black covered cell.
     """
     if primary_channel not in ("r", "g", "b"):
         raise ValueError(f"primary_channel must be r/g/b, got {primary_channel!r}")
@@ -213,11 +239,21 @@ def bicolor_compose(
     p_resampled, s_resampled, bbox = _two_image_grid(
         primary, secondary, pix, ra_shift_seconds, dec_shift_degrees
     )
-    channels[primary_channel] = _normalize01(p_resampled)
-    channels[secondary_channel] = _normalize01(s_resampled)
-    zero = np.zeros_like(p_resampled)
+    p_mask, s_mask = _two_image_masks(
+        primary, secondary, bbox, ra_shift_seconds, dec_shift_degrees
+    )
+    p_for_channel = np.where(p_mask, p_resampled, np.nan)
+    s_for_channel = np.where(s_mask, s_resampled, np.nan)
+    channels[primary_channel] = _normalize01(p_for_channel)
+    channels[secondary_channel] = _normalize01(s_for_channel)
+    # The unused channel is the union footprint at flat 0 so the assigned
+    # colors mix only where their inputs actually have data. Uncovered cells
+    # of the union footprint are NaN so the UI's no-data paint applies
+    # whenever ANY channel for that pixel is NaN.
+    union_mask = p_mask | s_mask
+    unused = np.where(union_mask, 0.0, np.nan)
     for c in ("r", "g", "b"):
-        channels.setdefault(c, zero)
+        channels.setdefault(c, unused)
     return _rgb_image_from_channels(channels, bbox)
 
 
@@ -229,39 +265,72 @@ def tricolor_compose(
     pix: int | None = None,
     ra_shift_seconds: float = 0.0,
     dec_shift_degrees: float = 0.0,
+    tertiary_ra_shift_seconds: float = 0.0,
+    tertiary_dec_shift_degrees: float = 0.0,
 ) -> RgbGriddedImage:
     """R = primary, G = secondary, B = tertiary — each normalized independently.
 
-    The legacy guide allows tri-color either from an existing bi-color image
-    (assigning the not-yet-used color to the third input) or from a single
-    primary plus two more images. This implementation handles the latter
-    directly; the bi-color → tri-color case is just bi-color → add the third
-    input on whichever channel is currently zero, which the caller can do by
-    re-using `bicolor_compose` semantics.
+    The output grid is the union of all three sources' footprints (with shifts
+    applied to secondary and tertiary), at the primary's native cell size — so
+    a tertiary off the side of the primary+secondary union is still rendered.
+    Per-channel coverage is tracked: cells outside an input's footprint are
+    NaN in that channel, letting the UI render no-coverage cells distinctly.
     """
-    # First resample primary vs secondary into a 2-image union grid, then
-    # resample tertiary into the same grid. Keep the secondary's shift on the
-    # secondary; tertiary uses its own shift (caller passes 0 if unwanted).
-    p_resampled, s_resampled, bbox = _two_image_grid(
-        primary, secondary, pix, ra_shift_seconds, dec_shift_degrees
+    # Union bbox over all three inputs (with each input's shift applied).
+    sec_min_ra = secondary.min_ra + ra_shift_seconds
+    sec_max_ra = secondary.max_ra + ra_shift_seconds
+    sec_min_dec = secondary.min_dec + dec_shift_degrees
+    sec_max_dec = secondary.max_dec + dec_shift_degrees
+    ter_min_ra = tertiary.min_ra + tertiary_ra_shift_seconds
+    ter_max_ra = tertiary.max_ra + tertiary_ra_shift_seconds
+    ter_min_dec = tertiary.min_dec + tertiary_dec_shift_degrees
+    ter_max_dec = tertiary.max_dec + tertiary_dec_shift_degrees
+    min_ra = min(primary.min_ra, sec_min_ra, ter_min_ra)
+    max_ra = max(primary.max_ra, sec_max_ra, ter_max_ra)
+    min_dec = min(primary.min_dec, sec_min_dec, ter_min_dec)
+    max_dec = max(primary.max_dec, sec_max_dec, ter_max_dec)
+
+    # Output cell size inherited from primary (same convention as bi-color).
+    p_height, p_width = primary.pixels.shape
+    if pix is not None and pix > 0:
+        cell_ra = (primary.max_ra - primary.min_ra) / max(p_width - 1, 1) / pix
+        cell_dec = (primary.max_dec - primary.min_dec) / max(p_height - 1, 1) / pix
+    else:
+        cell_ra = (primary.max_ra - primary.min_ra) / max(p_width - 1, 1)
+        cell_dec = (primary.max_dec - primary.min_dec) / max(p_height - 1, 1)
+    cell_ra = abs(cell_ra) or 1.0
+    cell_dec = abs(cell_dec) or 1.0
+    width = max(int(np.ceil((max_ra - min_ra) / cell_ra)) + 1, 1)
+    height = max(int(np.ceil((max_dec - min_dec) / cell_dec)) + 1, 1)
+    _check_grid_budget(width, height)
+
+    p_resampled = _resample_onto(primary, min_ra, max_ra, min_dec, max_dec, width, height, 0.0, 0.0)
+    s_resampled = _resample_onto(
+        secondary, min_ra, max_ra, min_dec, max_dec, width, height,
+        ra_shift_seconds, dec_shift_degrees,
     )
-    # Resample tertiary into the same bbox/grid with no shift (kept simple —
-    # the caller can pre-shift if needed).
     t_resampled = _resample_onto(
-        tertiary,
-        bbox["min_ra"],
-        bbox["max_ra"],
-        bbox["min_dec"],
-        bbox["max_dec"],
-        bbox["width"],
-        bbox["height"],
-        0.0,
-        0.0,
+        tertiary, min_ra, max_ra, min_dec, max_dec, width, height,
+        tertiary_ra_shift_seconds, tertiary_dec_shift_degrees,
+    )
+    p_mask = _coverage_mask(primary, min_ra, max_ra, min_dec, max_dec, width, height, 0.0, 0.0)
+    s_mask = _coverage_mask(
+        secondary, min_ra, max_ra, min_dec, max_dec, width, height,
+        ra_shift_seconds, dec_shift_degrees,
+    )
+    t_mask = _coverage_mask(
+        tertiary, min_ra, max_ra, min_dec, max_dec, width, height,
+        tertiary_ra_shift_seconds, tertiary_dec_shift_degrees,
     )
     channels = {
-        "r": _normalize01(p_resampled),
-        "g": _normalize01(s_resampled),
-        "b": _normalize01(t_resampled),
+        "r": _normalize01(np.where(p_mask, p_resampled, np.nan)),
+        "g": _normalize01(np.where(s_mask, s_resampled, np.nan)),
+        "b": _normalize01(np.where(t_mask, t_resampled, np.nan)),
+    }
+    bbox = {
+        "min_ra": min_ra, "max_ra": max_ra,
+        "min_dec": min_dec, "max_dec": max_dec,
+        "width": width, "height": height,
     }
     return _rgb_image_from_channels(channels, bbox)
 
@@ -276,9 +345,9 @@ def extend_rgb_compose(
     """Add a third image into the unused channel of an existing RGB image.
 
     Used by Tri-Color when invoked from a bi-color result — the unused
-    (all-zero) channel is detected and filled with the new image, resampled
-    onto the existing RGB grid. Raises if all three channels are already
-    populated (the image is already a tri-color).
+    (all-zero or all-NaN) channel is detected and filled with the new image,
+    resampled onto the existing RGB grid. Raises if all three channels are
+    already populated (the image is already a tri-color).
     """
     channels: dict[str, NDArray[np.float64]] = {
         "r": np.asarray(rgb.pixels_r, dtype=np.float64),
@@ -287,43 +356,116 @@ def extend_rgb_compose(
     }
     unused: str | None = None
     for name, ch in channels.items():
-        if ch.size == 0 or float(np.max(ch)) == 0.0:
+        if ch.size == 0:
+            unused = name
+            break
+        # An unused channel is one where no covered cell carries data — the
+        # bicolor path fills it with 0.0 inside coverage and NaN outside, so
+        # `nanmax` is either 0.0 (covered-but-empty) or NaN (all-NaN). Either
+        # way it counts as unused for the extend operation.
+        with np.errstate(invalid="ignore"), warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            ch_max = float(np.nanmax(ch))
+        if np.isnan(ch_max) or ch_max == 0.0:
             unused = name
             break
     if unused is None:
         raise ValueError("all 3 channels already populated; cannot extend to tri-color")
 
-    height, width = channels["r"].shape
+    old_height, old_width = channels["r"].shape
+    # Extend the bbox to cover the new image's footprint too, otherwise a
+    # third input at a different sky position is silently clipped to the
+    # existing bi-color bounds and never appears in the result.
+    other_min_ra = other.min_ra + ra_shift_seconds
+    other_max_ra = other.max_ra + ra_shift_seconds
+    other_min_dec = other.min_dec + dec_shift_degrees
+    other_max_dec = other.max_dec + dec_shift_degrees
+    new_min_ra = min(float(rgb.min_ra), other_min_ra)
+    new_max_ra = max(float(rgb.max_ra), other_max_ra)
+    new_min_dec = min(float(rgb.min_dec), other_min_dec)
+    new_max_dec = max(float(rgb.max_dec), other_max_dec)
+
+    # Reuse the existing rgb's cell density so the bi-color's data isn't
+    # interpolated; the grid just grows on whichever side the new image
+    # extends past.
+    cell_ra = (float(rgb.max_ra) - float(rgb.min_ra)) / max(old_width - 1, 1)
+    cell_dec = (float(rgb.max_dec) - float(rgb.min_dec)) / max(old_height - 1, 1)
+    cell_ra = abs(cell_ra) or 1.0
+    cell_dec = abs(cell_dec) or 1.0
+    new_width = max(int(np.ceil((new_max_ra - new_min_ra) / cell_ra)) + 1, 1)
+    new_height = max(int(np.ceil((new_max_dec - new_min_dec) / cell_dec)) + 1, 1)
+    _check_grid_budget(new_width, new_height)
+
+    # Resample each existing channel onto the larger grid. `_resample_onto`
+    # carries the source's NaN cells through as NaN, and stamps zero for
+    # cells outside the source bbox — we then mask those back to NaN so the
+    # extension region renders as no-data per the BUG-014 contract.
+    if (new_width, new_height) != (old_width, old_height):
+        old_mask = _coverage_mask(
+            GriddedImage(
+                pixels=channels["r"],
+                wcs=rgb.wcs,
+                min_ra=float(rgb.min_ra),
+                max_ra=float(rgb.max_ra),
+                min_dec=float(rgb.min_dec),
+                max_dec=float(rgb.max_dec),
+            ),
+            new_min_ra, new_max_ra, new_min_dec, new_max_dec,
+            new_width, new_height, 0.0, 0.0,
+        )
+        for name, ch in list(channels.items()):
+            tmp = GriddedImage(
+                pixels=ch,
+                wcs=rgb.wcs,
+                min_ra=float(rgb.min_ra),
+                max_ra=float(rgb.max_ra),
+                min_dec=float(rgb.min_dec),
+                max_dec=float(rgb.max_dec),
+            )
+            resampled = _resample_onto(
+                tmp, new_min_ra, new_max_ra, new_min_dec, new_max_dec,
+                new_width, new_height, 0.0, 0.0,
+            )
+            channels[name] = np.where(old_mask, resampled, np.nan)
+
     new_layer = _resample_onto(
         other,
-        rgb.min_ra,
-        rgb.max_ra,
-        rgb.min_dec,
-        rgb.max_dec,
-        width,
-        height,
-        ra_shift_seconds,
-        dec_shift_degrees,
+        new_min_ra, new_max_ra, new_min_dec, new_max_dec,
+        new_width, new_height,
+        ra_shift_seconds, dec_shift_degrees,
     )
-    channels[unused] = _normalize01(new_layer)
-    return RgbGriddedImage(
-        pixels_r=channels["r"],
-        pixels_g=channels["g"],
-        pixels_b=channels["b"],
-        wcs=rgb.wcs,
-        min_ra=rgb.min_ra,
-        max_ra=rgb.max_ra,
-        min_dec=rgb.min_dec,
-        max_dec=rgb.max_dec,
+    new_mask = _coverage_mask(
+        other,
+        new_min_ra, new_max_ra, new_min_dec, new_max_dec,
+        new_width, new_height,
+        ra_shift_seconds, dec_shift_degrees,
     )
+    channels[unused] = _normalize01(np.where(new_mask, new_layer, np.nan))
+
+    bbox = {
+        "min_ra": new_min_ra, "max_ra": new_max_ra,
+        "min_dec": new_min_dec, "max_dec": new_max_dec,
+        "width": new_width, "height": new_height,
+    }
+    return _rgb_image_from_channels(channels, bbox)
 
 
 def _normalize01(arr: NDArray[np.float64]) -> NDArray[np.float64]:
-    lo = float(np.min(arr)) if arr.size else 0.0
-    hi = float(np.max(arr)) if arr.size else 1.0
+    # NaN-safe per-channel stretch. Non-finite inputs (FITS NaN sentinels,
+    # divide-by-zero artifacts) carry through as NaN so the downstream
+    # renderer can paint them as "no data" rather than collapsing to black
+    # via the [0, 1] clamp. The finite mask is also used to derive lo/hi
+    # — otherwise a single stray NaN would poison the whole channel.
+    if arr.size == 0:
+        return arr
+    finite = np.isfinite(arr)
+    if not finite.any():
+        return np.full_like(arr, np.nan)
+    lo = float(np.min(arr[finite]))
+    hi = float(np.max(arr[finite]))
     if hi <= lo:
-        return np.zeros_like(arr)
-    return (arr - lo) / (hi - lo)
+        return np.where(finite, 0.0, np.nan)
+    return np.where(finite, (arr - lo) / (hi - lo), np.nan)
 
 
 def _two_image_grid(
@@ -354,6 +496,7 @@ def _two_image_grid(
     cell_dec = abs(cell_dec) or 1.0
     width = max(int(np.ceil((max_ra - min_ra) / cell_ra)) + 1, 1)
     height = max(int(np.ceil((max_dec - min_dec) / cell_dec)) + 1, 1)
+    _check_grid_budget(width, height)
 
     p_resampled = _resample_onto(primary, min_ra, max_ra, min_dec, max_dec, width, height, 0.0, 0.0)
     s_resampled = _resample_onto(
@@ -376,6 +519,30 @@ def _two_image_grid(
         "height": height,
     }
     return p_resampled, s_resampled, bbox
+
+
+def _two_image_masks(
+    primary: GriddedImage,
+    secondary: GriddedImage,
+    bbox: dict[str, float | int],
+    ra_shift_seconds: float,
+    dec_shift_degrees: float,
+) -> tuple[NDArray[np.bool_], NDArray[np.bool_]]:
+    """Coverage masks for `primary` and `secondary` on the bbox produced by
+    `_two_image_grid`. Returned in the same order. Used by bi/tri-color compose
+    so cells outside an input's footprint can be marked NaN per channel."""
+    min_ra = float(bbox["min_ra"])
+    max_ra = float(bbox["max_ra"])
+    min_dec = float(bbox["min_dec"])
+    max_dec = float(bbox["max_dec"])
+    width = int(bbox["width"])
+    height = int(bbox["height"])
+    p_mask = _coverage_mask(primary, min_ra, max_ra, min_dec, max_dec, width, height, 0.0, 0.0)
+    s_mask = _coverage_mask(
+        secondary, min_ra, max_ra, min_dec, max_dec, width, height,
+        ra_shift_seconds, dec_shift_degrees,
+    )
+    return p_mask, s_mask
 
 
 def _rgb_image_from_channels(

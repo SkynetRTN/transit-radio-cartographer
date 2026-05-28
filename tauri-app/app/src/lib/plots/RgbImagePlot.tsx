@@ -77,14 +77,43 @@ export function RgbImagePlot({ image, meta, title = '', testId }: Props) {
     canvas.height = h;
     const ctx = canvas.getContext('2d')!;
     const imgData = ctx.createImageData(w, h);
+    // BUG-013/-014 channel-wise no-data semantic: each channel independently
+    // signals "no data here" by arriving as `null` (engine's JSON-safe NaN).
+    // For a disjoint bi-color (Cas-A in R, Crab in G), Cas-A's cells have R
+    // finite but G null — the user still wants those rendered red, not blank.
+    // So the rule is: paint white only when EVERY channel is non-finite; if
+    // at least one channel carries data, treat the others as 0.
+    //
+    // Canvas orientation: the bitmap fills the plot area in paper coords, so
+    //   - canvas col c (left-to-right) maps to engine col c. The engine puts
+    //     ra_grid = max_ra at col 0 and ra_grid = min_ra at col W-1. With the
+    //     x-axis reversed (max_ra displays on the visual LEFT), canvas col 0
+    //     (visual left of bitmap) already aligns with the visual-left RA tick.
+    //   - canvas row r (top-to-bottom) maps to engine row H-1-r. The engine
+    //     puts dec_grid = min_dec at row 0 (its native bottom) and max_dec at
+    //     row H-1 (top), but HTML canvas has row 0 at the top — hence the
+    //     row flip.
     for (let r = 0; r < h; r++) {
       for (let c = 0; c < w; c++) {
         const srcRow = h - 1 - r;
-        const srcCol = w - 1 - c;
+        const srcCol = c;
         const idx = (r * w + c) * 4;
-        imgData.data[idx] = Math.round(Math.max(0, Math.min(1, image.r[srcRow][srcCol])) * 255);
-        imgData.data[idx + 1] = Math.round(Math.max(0, Math.min(1, image.g[srcRow][srcCol])) * 255);
-        imgData.data[idx + 2] = Math.round(Math.max(0, Math.min(1, image.b[srcRow][srcCol])) * 255);
+        const rv = image.r[srcRow][srcCol];
+        const gv = image.g[srcRow][srcCol];
+        const bv = image.b[srcRow][srcCol];
+        const rOk = Number.isFinite(rv);
+        const gOk = Number.isFinite(gv);
+        const bOk = Number.isFinite(bv);
+        if (!rOk && !gOk && !bOk) {
+          imgData.data[idx] = 255;
+          imgData.data[idx + 1] = 255;
+          imgData.data[idx + 2] = 255;
+          imgData.data[idx + 3] = 255;
+          continue;
+        }
+        imgData.data[idx] = rOk ? Math.round(Math.max(0, Math.min(1, rv as number)) * 255) : 0;
+        imgData.data[idx + 1] = gOk ? Math.round(Math.max(0, Math.min(1, gv as number)) * 255) : 0;
+        imgData.data[idx + 2] = bOk ? Math.round(Math.max(0, Math.min(1, bv as number)) * 255) : 0;
         imgData.data[idx + 3] = 255;
       }
     }
@@ -124,6 +153,11 @@ export function RgbImagePlot({ image, meta, title = '', testId }: Props) {
 
     const xaxis: Partial<Plotly.LayoutAxis> = {
       title: { text: 'Right Ascension' },
+      // RGB composites paint over the full plot area as a single bitmap; the
+      // gridlines that scalar heatmaps lean on for cell registration would
+      // overlay each footprint and obscure source structure.
+      showgrid: false,
+      zeroline: false,
       ...(hasBounds ? { autorange: 'reversed' as const } : {}),
       ...(raTicks
         ? { tickmode: 'array', tickvals: raTicks.tickvals, ticktext: raTicks.ticktext }
@@ -131,26 +165,33 @@ export function RgbImagePlot({ image, meta, title = '', testId }: Props) {
     };
     const yaxis: Partial<Plotly.LayoutAxis> = {
       title: { text: 'Declination' },
+      showgrid: false,
+      zeroline: false,
       ...(decTicks
         ? { tickmode: 'array', tickvals: decTicks.tickvals, ticktext: decTicks.ticktext }
         : {}),
     };
 
+    // Layout image placed in PAPER coords (0..1 plot fraction) rather than data
+    // coords. Plotly's data-coord layout images interact badly with reversed
+    // axes — the bitmap was rendering at a tiny fraction of the intended size
+    // for some sizex/sizey ranges. Paper coords sidestep that entirely; the
+    // bitmap fills the plot area, and we made sure the canvas pixel order
+    // matches the desired visual orientation:
+    //   - canvas col 0 (visual LEFT of bitmap) holds the source's max_ra data;
+    //     after reversed-axis display that lines up with the visual LEFT tick.
+    //   - canvas row 0 (visual TOP of bitmap) holds the source's max_dec data,
+    //     matching the visual TOP tick.
     const layoutImages = hasBounds
       ? [
           {
             source: dataUrl,
-            xref: 'x',
-            yref: 'y',
-            // Anchor at axis (min_ra, max_dec). With the x axis reversed,
-            // min_ra is the visual RIGHT side — and because we pre-rotated
-            // the canvas, canvas col 0 holds min_ra data. So the bitmap's
-            // left edge (canvas col 0) ends up at visual right, lining up
-            // with the axis label for min_ra.
-            x: meta!.min_ra,
-            y: meta!.max_dec,
-            sizex: meta!.max_ra - meta!.min_ra,
-            sizey: meta!.max_dec - meta!.min_dec,
+            xref: 'paper',
+            yref: 'paper',
+            x: 0,
+            y: 1,
+            sizex: 1,
+            sizey: 1,
             xanchor: 'left',
             yanchor: 'top',
             sizing: 'stretch',
@@ -163,7 +204,11 @@ export function RgbImagePlot({ image, meta, title = '', testId }: Props) {
       title: { text: title },
       margin: { l: 70, r: 20, t: title ? 40 : 12, b: 50 },
       paper_bgcolor: '#f3f3f3',
-      plot_bgcolor: '#000000',
+      // BUG-013: the bitmap covers only the union footprint, so anything the
+      // user sees outside the painted area (and through any transparent canvas
+      // pixels, though we paint alpha=255 everywhere) should be blank white —
+      // matching legacy bi-color where un-imaged sky is white, not black.
+      plot_bgcolor: '#ffffff',
       font: { family: 'Tahoma, sans-serif', size: 11 },
       xaxis,
       yaxis,

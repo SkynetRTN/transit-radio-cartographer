@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from astropy.io import fits
 
 from radio_cartographer.image import GriddedImage, WCSMetadata
 from radio_cartographer.io.fits import read_fits, write_fits
@@ -55,3 +56,46 @@ def test_fits_reads_cas_a_fixture():
     assert gridded.pixels.ndim == 2
     assert np.isfinite(gridded.pixels).all()
     assert np.isfinite(gridded.min_ra) and np.isfinite(gridded.max_ra)
+
+
+# ── WCS validation (BUG-009) ─────────────────────────────────────────────────
+
+
+def _write_fits(tmp_path, *, data=None, **header_overrides):
+    """Build a tiny synthetic FITS file with the given WCS header overrides."""
+    if data is None:
+        data = np.ones((8, 10), dtype=np.float32)
+    hdu = fits.PrimaryHDU(data=data)
+    h = hdu.header
+    h["CTYPE1"] = "RA---TAN"
+    h["CTYPE2"] = "DEC--TAN"
+    h["CRVAL1"] = 100.0
+    h["CRVAL2"] = 20.0
+    h["CRPIX1"] = (data.shape[1] + 1) / 2.0
+    h["CRPIX2"] = (data.shape[0] + 1) / 2.0
+    h["CDELT1"] = -0.01
+    h["CDELT2"] = 0.01
+    for k, v in header_overrides.items():
+        h[k] = v
+    path = tmp_path / "bad.fits"
+    hdu.writeto(path, overwrite=True)
+    return path
+
+
+def test_read_fits_rejects_zero_cdelt(tmp_path):
+    path = _write_fits(tmp_path, CDELT1=0.0)
+    with pytest.raises(ValueError, match="CDELT.*non-zero"):
+        read_fits(path)
+
+
+def test_read_fits_rejects_huge_cdelt(tmp_path):
+    path = _write_fits(tmp_path, CDELT1=50.0)
+    with pytest.raises(ValueError, match="CDELT.*10 deg/pixel"):
+        read_fits(path)
+
+
+def test_read_fits_rejects_out_of_range_dec(tmp_path):
+    # CRVAL2 in the celestial-pole region pushes computed Dec bounds past 90°.
+    path = _write_fits(tmp_path, CRVAL2=200.0)
+    with pytest.raises(ValueError, match="Dec bounds out of range"):
+        read_fits(path)

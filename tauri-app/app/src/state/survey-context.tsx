@@ -71,6 +71,7 @@ export interface SurveyState {
   setRgbImage: (meta: RgbImageMeta, pixels: RgbImagePixels) => void;
   setImagePalette: (palette: PaletteStop[] | null, flux: FluxRange | null) => void;
   setImageName: (name: string) => void;
+  setSurveyName: (name: string) => Promise<void>;
   setMagnifierHalfSize: (n: number) => void;
   saveImage: (path: string) => Promise<string | null>;
   clearImage: () => Promise<void>;
@@ -391,6 +392,18 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     setImageNameState(name);
   }, []);
 
+  const setSurveyNameAction = useCallback(async (name: string) => {
+    const h = workspaceHandleRef.current;
+    if (h === null) return;
+    try {
+      const overview = await rpcClient.setWorkspaceName(h, name);
+      setWorkspace(overview);
+      setDirty(true);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }, []);
+
   const setMagnifierHalfSizeAction = useCallback((n: number) => {
     // Clamp to a sane range so the magnifier always has at least a 3×3
     // window and never asks for more cells than the image actually contains.
@@ -551,6 +564,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       setRgbImage: setRgbImageAction,
       setImagePalette: setImagePaletteAction,
       setImageName: setImageNameAction,
+      setSurveyName: setSurveyNameAction,
       setMagnifierHalfSize: setMagnifierHalfSizeAction,
       saveImage: saveImageAction,
       clearImage,
@@ -592,6 +606,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       setRgbImageAction,
       setImagePaletteAction,
       setImageNameAction,
+      setSurveyNameAction,
       setMagnifierHalfSizeAction,
       saveImageAction,
       clearImage,

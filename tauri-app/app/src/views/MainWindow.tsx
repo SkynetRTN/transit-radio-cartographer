@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { SurveyView } from './SurveyView';
 import { ScanView } from './ScanView';
 import { CalibrateScanView } from './CalibrateScanView';
@@ -10,12 +11,14 @@ import { AboutBox } from './AboutBox';
 import { PreImageView } from './PreImageView';
 import { ImageView } from './ImageView';
 import { NumericInputDialog, type NumericPrompt } from './dialogs/NumericInputDialog';
+import { SelectInputDialog, type SelectPrompt } from './dialogs/SelectInputDialog';
+import { TextInputDialog, type TextPrompt } from './dialogs/TextInputDialog';
 import { YesNoCancelDialog } from './dialogs/YesNoCancelDialog';
 import { ColorPickDialog } from './dialogs/ColorPickDialog';
 import { ConfirmDialog } from './dialogs/ConfirmDialog';
 import { HelpDialog } from './help/HelpDialog';
 import { useSurvey } from '../state/survey-context';
-import { useScan } from '../state/scan-context';
+import { useScan, type PeakFitKind } from '../state/scan-context';
 import { useFluxCal } from '../state/flux-cal-context';
 import { rpcClient, type ChannelColor, type ImageMeta, type RgbImageMeta } from '../ipc/client';
 
@@ -47,6 +50,7 @@ export function MainWindow() {
     imageName,
     imageSavePath,
     saveImage,
+    setSurveyName,
     magnifierHalfSize,
     setMagnifierHalfSize,
   } = useSurvey();
@@ -61,8 +65,9 @@ export function MainWindow() {
     savePath: scanSavePath,
     dirty: scanDirty,
     save: saveScan,
-    peakFitDegree,
-    setPeakFitDegree,
+    setScanName,
+    peakFitKind,
+    setPeakFitKind,
   } = useScan();
   const fluxCal = useFluxCal();
   const hasSurvey = survey !== null;
@@ -75,7 +80,11 @@ export function MainWindow() {
   // tricolor) or if there's no RGB image.
   const rgbUnusedChannel: ChannelColor | null = (() => {
     if (!rgbImagePixels) return null;
-    const channelHas = (grid: number[][]) => grid.some((row) => row.some((v) => v > 0));
+    // No-coverage cells arrive as `null` (BUG-014). `v > 0` is false for null
+    // and for 0, which is the correct semantic: an "unused" channel is one
+    // where no covered cell carries any positive intensity.
+    const channelHas = (grid: (number | null)[][]) =>
+      grid.some((row) => row.some((v) => v !== null && v > 0));
     const r = channelHas(rgbImagePixels.r);
     const g = channelHas(rgbImagePixels.g);
     const b = channelHas(rgbImagePixels.b);
@@ -134,6 +143,12 @@ export function MainWindow() {
     sameCalibration: boolean;
     raShiftSeconds: number;
     decShiftDegrees: number;
+    // Independent shift for the tertiary input in tricolor-from-scalar — the
+    // user often wants to nudge each image separately when the inputs come
+    // from different sky regions. tricolor-from-rgb only adds one new image,
+    // so it uses the secondary shift fields.
+    tertiaryRaShiftSeconds: number;
+    tertiaryDecShiftDegrees: number;
     pix: number;
     stage:
       | 'pick-primary-color'
@@ -142,6 +157,9 @@ export function MainWindow() {
       | 'shift-q'
       | 'shift-ra'
       | 'shift-dec'
+      | 'tertiary-shift-q'
+      | 'tertiary-shift-ra'
+      | 'tertiary-shift-dec'
       | 'pix'
       | 'commit';
   }
@@ -154,6 +172,8 @@ export function MainWindow() {
   } | null>(null);
 
   const [numericPrompt, setNumericPrompt] = useState<NumericPrompt | null>(null);
+  const [selectPrompt, setSelectPrompt] = useState<SelectPrompt | null>(null);
+  const [textPrompt, setTextPrompt] = useState<TextPrompt | null>(null);
   const [yesNoPrompt, setYesNoPrompt] = useState<{
     title: string;
     message: string;
@@ -543,16 +563,35 @@ export function MainWindow() {
     async (mode: ComposeMode) => {
       setOpenMenu(null);
       if (!image) return;
+      // Default the dialog filter to the base image's format so users land on
+      // a compatible file by default. Cross-format compose (e.g. .fits + .img)
+      // currently fails because the formats use different RA units (BUG-011);
+      // until that's fixed, nudging same-format reduces footguns. Users can
+      // still switch to the broader filter manually if they need to.
+      const baseExt = imageSavePath?.toLowerCase().match(/\.(img|fits|fit)$/)?.[1] ?? null;
+      const matchFilter =
+        baseExt === 'img'
+          ? { name: 'Image (.img)', extensions: ['img'] }
+          : baseExt === 'fits' || baseExt === 'fit'
+            ? { name: 'FITS (.fits)', extensions: ['fits', 'fit'] }
+            : null;
+      const filters = matchFilter
+        ? [
+            matchFilter,
+            { name: 'Image (.img, .fits)', extensions: ['img', 'fits', 'fit'] },
+            { name: 'All files', extensions: ['*'] },
+          ]
+        : [
+            { name: 'Image (.img, .fits)', extensions: ['img', 'fits', 'fit'] },
+            { name: 'All files', extensions: ['*'] },
+          ];
       let path: string | null = null;
       try {
         const selected = await openDialog({
           multiple: false,
           directory: false,
           title: mode === 'append' ? 'Select Image to Append' : 'Select Image to Superimpose',
-          filters: [
-            { name: 'Image (.img, .fits)', extensions: ['img', 'fits', 'fit'] },
-            { name: 'All files', extensions: ['*'] },
-          ],
+          filters,
         });
         path = typeof selected === 'string' ? selected : null;
       } catch (err) {
@@ -571,7 +610,7 @@ export function MainWindow() {
         stage: 'same-cal',
       });
     },
-    [image],
+    [image, imageSavePath],
   );
 
   const cancelCompose = useCallback(() => {
@@ -789,6 +828,8 @@ export function MainWindow() {
         sameCalibration: true,
         raShiftSeconds: 0,
         decShiftDegrees: 0,
+        tertiaryRaShiftSeconds: 0,
+        tertiaryDecShiftDegrees: 0,
         pix: 1,
         // tricolor-from-rgb auto-fills the unused channel — no color picks.
         // All other modes ask the user to pick colors explicitly.
@@ -860,6 +901,12 @@ export function MainWindow() {
       });
       return;
     }
+    // Tricolor-from-scalar takes three fresh inputs and needs an independent
+    // shift cascade for the tertiary image; the other two modes only ever
+    // shift a single new image, so they jump straight to 'pix' after the
+    // secondary shift.
+    const afterSecondaryShift =
+      colorCompose.mode === 'tricolor-from-scalar' ? 'tertiary-shift-q' : 'pix';
     if (colorCompose.stage === 'shift-q') {
       setYesNoPrompt({
         title: 'Shift second image?',
@@ -870,7 +917,7 @@ export function MainWindow() {
         },
         onNo: () => {
           setYesNoPrompt(null);
-          next({ raShiftSeconds: 0, decShiftDegrees: 0, stage: 'pix' });
+          next({ raShiftSeconds: 0, decShiftDegrees: 0, stage: afterSecondaryShift });
         },
       });
       return;
@@ -894,7 +941,50 @@ export function MainWindow() {
         defaultValue: 0,
         onSubmit: (value) => {
           setNumericPrompt(null);
-          next({ decShiftDegrees: value, stage: 'pix' });
+          next({ decShiftDegrees: value, stage: afterSecondaryShift });
+        },
+      });
+      return;
+    }
+    if (colorCompose.stage === 'tertiary-shift-q') {
+      setYesNoPrompt({
+        title: 'Shift third image?',
+        message: 'Do you want to shift the third image?',
+        onYes: () => {
+          setYesNoPrompt(null);
+          next({ stage: 'tertiary-shift-ra' });
+        },
+        onNo: () => {
+          setYesNoPrompt(null);
+          next({
+            tertiaryRaShiftSeconds: 0,
+            tertiaryDecShiftDegrees: 0,
+            stage: 'pix',
+          });
+        },
+      });
+      return;
+    }
+    if (colorCompose.stage === 'tertiary-shift-ra') {
+      setNumericPrompt({
+        title: 'RA Shift (third image)',
+        label: 'Shift in RA (minutes):',
+        defaultValue: 0,
+        onSubmit: (value) => {
+          setNumericPrompt(null);
+          next({ tertiaryRaShiftSeconds: value * 60, stage: 'tertiary-shift-dec' });
+        },
+      });
+      return;
+    }
+    if (colorCompose.stage === 'tertiary-shift-dec') {
+      setNumericPrompt({
+        title: 'Dec Shift (third image)',
+        label: 'Shift in Dec (degrees):',
+        defaultValue: 0,
+        onSubmit: (value) => {
+          setNumericPrompt(null);
+          next({ tertiaryDecShiftDegrees: value, stage: 'pix' });
         },
       });
       return;
@@ -915,7 +1005,13 @@ export function MainWindow() {
       const c = colorCompose;
       setColorCompose(null);
       void (async () => {
-        if (!image) return;
+        // Only bicolor / tricolor-from-scalar need the scalar `image` (their
+        // primary). tricolor-from-rgb operates on the existing RGB handle —
+        // and by that point `image` is null because setRgbImage cleared it
+        // when the bi-color first appeared. A blanket `!image` guard here
+        // silently swallowed the whole commit for the from-rgb path.
+        if ((c.mode === 'bicolor' || c.mode === 'tricolor-from-scalar') && !image) return;
+        if (c.mode === 'tricolor-from-rgb' && !rgbImage) return;
         try {
           let meta: RgbImageMeta;
           if (c.mode === 'bicolor') {
@@ -1000,6 +1096,8 @@ export function MainWindow() {
               {
                 ra_shift_seconds: c.raShiftSeconds,
                 dec_shift_degrees: c.decShiftDegrees,
+                tertiary_ra_shift_seconds: c.tertiaryRaShiftSeconds,
+                tertiary_dec_shift_degrees: c.tertiaryDecShiftDegrees,
                 pix: c.pix,
               },
             );
@@ -1050,18 +1148,65 @@ export function MainWindow() {
   const handleChangeCalibrationName = useCallback(() => {
     setOpenMenu(null);
     if (!fluxCal.table) return;
-    const next = window.prompt('Calibration name:', fluxCal.table.caption);
-    if (next !== null) fluxCal.setCaption(next);
+    setTextPrompt({
+      title: 'Change Calibration Name',
+      label: 'Calibration name:',
+      defaultValue: fluxCal.table.caption,
+      onSubmit: (value) => {
+        setTextPrompt(null);
+        fluxCal.setCaption(value);
+      },
+    });
   }, [fluxCal]);
+
+  const handleChangeImageName = useCallback(() => {
+    setOpenMenu(null);
+    if (!image) return;
+    setTextPrompt({
+      title: 'Change Image Name',
+      label: 'Image name:',
+      defaultValue: imageName,
+      onSubmit: (value) => {
+        setTextPrompt(null);
+        setImageName(value);
+      },
+    });
+  }, [image, imageName, setImageName]);
+
+  const handleChangeSurveyName = useCallback(() => {
+    setOpenMenu(null);
+    if (!workspace) return;
+    setTextPrompt({
+      title: 'Change Survey Name',
+      label: 'Survey name:',
+      defaultValue: workspace.name,
+      onSubmit: (value) => {
+        setTextPrompt(null);
+        void setSurveyName(value);
+      },
+    });
+  }, [workspace, setSurveyName]);
+
+  const handleChangeScanName = useCallback(() => {
+    setOpenMenu(null);
+    if (!scanOverview) return;
+    setTextPrompt({
+      title: 'Change Scan Name',
+      label: 'Scan name:',
+      defaultValue: scanOverview.name,
+      onSubmit: (value) => {
+        setTextPrompt(null);
+        void setScanName(value);
+      },
+    });
+  }, [scanOverview, setScanName]);
 
   const toggleMenu = (key: MenuKey) =>
     setOpenMenu((current) => (current === key ? null : key));
 
-  const closeAndReturnToMain = () => {
+  const handleCloseApplication = () => {
     setOpenMenu(null);
-    setAuxView(null);
-    void close();
-    void closeScan();
+    void getCurrentWindow().close();
   };
 
   return (
@@ -1073,7 +1218,7 @@ export function MainWindow() {
             aria-haspopup="menu"
             aria-expanded={openMenu === 'file'}
           >
-            File
+            Help
           </button>
           {openMenu === 'file' && (
             <div role="menu" className="menu-popup">
@@ -1093,15 +1238,15 @@ export function MainWindow() {
                   setHelpOpen(true);
                 }}
               >
-                Help / Tutorial…
+                Tutorial
               </button>
               <div className="menu-sep" />
               <button
                 role="menuitem"
-                onClick={closeAndReturnToMain}
-                title="Close the survey and return to the empty workspace"
+                onClick={handleCloseApplication}
+                title="Close the application"
               >
-                Exit
+                Close Application
               </button>
             </div>
           )}
@@ -1222,12 +1367,7 @@ export function MainWindow() {
               <button
                 role="menuitem"
                 disabled={!hasImage}
-                onClick={() => {
-                  setOpenMenu(null);
-                  if (!image) return;
-                  const next = window.prompt('Image name:', imageName);
-                  if (next !== null) setImageName(next);
-                }}
+                onClick={handleChangeImageName}
                 title={hasImage ? undefined : 'Available after you build or upload an image'}
               >
                 Change Image Name…
@@ -1267,7 +1407,11 @@ export function MainWindow() {
                 Save Survey As…
               </button>
               <div className="menu-sep" />
-              <button role="menuitem" disabled={!hasSurvey}>
+              <button
+                role="menuitem"
+                disabled={!hasSurvey}
+                onClick={handleChangeSurveyName}
+              >
                 Change Survey Name…
               </button>
             </div>
@@ -1309,7 +1453,11 @@ export function MainWindow() {
                 Append Scan…
               </button>
               <div className="menu-sep" />
-              <button role="menuitem" disabled={!hasScan}>
+              <button
+                role="menuitem"
+                disabled={!hasScan}
+                onClick={handleChangeScanName}
+              >
                 Change Scan Name…
               </button>
               <div className="menu-sep" />
@@ -1318,18 +1466,21 @@ export function MainWindow() {
                 disabled={!hasScan}
                 onClick={() => {
                   setOpenMenu(null);
-                  setNumericPrompt({
+                  setSelectPrompt({
                     title: 'Change Determine Peak Fit',
-                    label: 'Fit kind (0 = Gaussian, 2/3/4 = polynomial degree):',
-                    defaultValue: peakFitDegree,
+                    label: 'Fit kind:',
+                    defaultValue: peakFitKind,
+                    options: [
+                      { value: 'gaussian', label: 'Gaussian' },
+                      { value: 'cos2', label: 'Squared Cosine' },
+                      { value: 'poly2', label: '2nd Degree Polynomial' },
+                      { value: 'poly3', label: '3rd Degree Polynomial' },
+                      { value: 'poly4', label: '4th Degree Polynomial' },
+                      { value: 'max', label: 'Max Value' },
+                    ],
                     onSubmit: (value) => {
-                      setNumericPrompt(null);
-                      // Round-then-clamp: anything outside {0, 2, 3, 4}
-                      // collapses to the nearest valid kind. `1` snaps up to
-                      // `2` since there's no degree-1 fit for finding a peak.
-                      const r = Math.round(value);
-                      const clamped = r <= 0 ? 0 : r === 1 ? 2 : r > 4 ? 4 : r;
-                      setPeakFitDegree(clamped);
+                      setSelectPrompt(null);
+                      setPeakFitKind(value as PeakFitKind);
                     },
                   });
                 }}
@@ -1483,6 +1634,15 @@ export function MainWindow() {
             cancelColorCompose();
           }}
         />
+      )}
+      {selectPrompt && (
+        <SelectInputDialog
+          prompt={selectPrompt}
+          onCancel={() => setSelectPrompt(null)}
+        />
+      )}
+      {textPrompt && (
+        <TextInputDialog prompt={textPrompt} onCancel={() => setTextPrompt(null)} />
       )}
       {colorPrompt && (
         <ColorPickDialog

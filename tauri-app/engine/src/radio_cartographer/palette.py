@@ -10,7 +10,8 @@ def apply_palette(
     data: NDArray[np.float64], palette: Palette, flux_min: float, flux_max: float
 ) -> NDArray[np.uint8]:
     arr = np.asarray(data, dtype=np.float64)
-    clipped = np.clip(arr, flux_min, flux_max)
+    finite = np.isfinite(arr)
+    clipped = np.clip(np.where(finite, arr, flux_min), flux_min, flux_max)
     norm = (clipped - flux_min) / max(flux_max - flux_min, 1e-12)
 
     stops = sorted(palette.stops, key=lambda s: s.anchor)
@@ -23,4 +24,10 @@ def apply_palette(
     rr = np.interp(norm, anchors, r)
     gg = np.interp(norm, anchors, g)
     bb = np.interp(norm, anchors, b)
-    return np.stack([rr, gg, bb], axis=-1).clip(0, 255).astype(np.uint8)
+    rgb = np.stack([rr, gg, bb], axis=-1).clip(0, 255).astype(np.uint8)
+    # BUG-014: paint no-coverage cells white in bitmap output so it visually
+    # matches the legacy "blank sky" convention. The mask must be broadcast
+    # across the RGB channel axis added by the stack.
+    if not finite.all():
+        rgb[~finite] = (255, 255, 255)
+    return rgb

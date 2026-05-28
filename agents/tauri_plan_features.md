@@ -343,3 +343,160 @@ Do not change behavior or name of Baseline Source in scan view, only adjust the 
 
 
 ---
+
+## FEAT-005 — Exit Button
+
+- **Status:** Proposed 
+- **Priority:** Medium 
+- **Area:** UI | Engine 
+- **Where:** 
+
+### Summary
+The file menu should be renamed to "Help" the Help/Tutorial option should be renamed "Tutorial" and the exit button should be renamed "Close Application" and simply close the application
+
+### Motivation / why
+Currently that button isn't functional at all, it closes the application in the legacy version because there is no other way to close it. Renaming the file menu I think makes more sense as there is no ability to open or interact with files under that dropdown.
+
+### User-facing behavior
+File menu is labeled "Help" under which is the "About", "Tutorial" and "Close Application" buttons. "Close Application" closes out the application, "About" and "Tutorial" behavior remains the same 
+
+### Legacy reference
+Exit button closes application in legacy version
+
+### Acceptance criteria
+*Bullet list of what "done" means. Concrete and testable. e.g.*
+- [ ] Application closes when Close Application button is pressed
+
+
+### Out of scope
+You should not adjust the current closing method that people are familar with, this is just giving another option. 
+
+### Open questions
+
+
+---
+
+## FEAT-006 — Additional options in peak fit
+
+- **Status:** Proposed 
+- **Priority:** Medium 
+- **Area:** UI | Engine 
+- **Where:** 
+
+### Summary
+Addition of squared cosine and max value to the fitting options for peak fit in a scan. The UI text box where you put in a number should be changed to a dropdown with the available options in the following order: Gaussian, Squared Cosine, 2nd Degree Polynomial, 3rd Degree Polynomial, 4th Degree Polynomial, Max Value. Gaussian should remain the default. If max value is selected, instead of a line the point that is the max value in the range they selected will be highlighted (or circled like a pinned point)
+
+### Motivation / why
+Squared cosine would be a good function to fit, max would be good for deciding what the best fit is. With 3 non-polynomial options the selection shouldn't be based around polynomials.
+
+### User-facing behavior
+Box where you type in a number to select fitting option becomes a dropdown. Fitting behavior remains unchanged
+
+### Legacy reference
+Doesn't match legacy
+
+### Acceptance criteria
+*Bullet list of what "done" means. Concrete and testable. e.g.*
+- [ ] Dropdown selection of what function to fit the peak with in interactable
+- [ ] A squared cosine is fit when selected
+- [ ] The max point is highlighted when selected
+
+### Out of scope
+
+
+### Open questions
+Any other options for fit that jump out to you as good for peaks like this ask if I want implemented. 
+
+---
+
+## FEAT-000 — Example: keyboard shortcuts for sweep navigation
+
+- **Status:** Proposed
+- **Priority:** Medium
+- **Area:** UI
+- **Where:** [SurveyView.tsx](../tauri-app/app/src/views/SurveyView.tsx),
+  [survey-context.tsx](../tauri-app/app/src/state/survey-context.tsx);
+  shortcut registration likely belongs in
+  [MainWindow.tsx](../tauri-app/app/src/views/MainWindow.tsx)
+
+### Summary
+Bind `[` / `]` to Prev/Next sweep and `Enter` to Accept Sweep when the
+SurveyView is focused, mirroring the legacy app's hotkeys.
+
+### Motivation / why
+Students walking through a 30+ sweep survey currently have to mouse over
+to the sidebar Prev/Next/Accept buttons for every sweep. Hotkeys cut
+through-survey time roughly in half and match what experienced users of
+the legacy VB app already have in their fingers.
+
+### User-facing behavior
+- When SurveyView is focused (no modal open, no text input focused):
+  - `]` advances to the next sweep (wraps to first if at end).
+  - `[` goes to the previous sweep.
+  - `Enter` accepts the current sweep (same as clicking Accept Sweep).
+  - `u` undoes the last baseline segment on the current sweep.
+- Shortcuts are listed in a small "?" popover anchored to the sidebar.
+- Disabled while any modal (e.g. "Input Pixel Resolution") is open.
+
+### Legacy reference
+- Screenshot: [docs/legacy_ui_reference/screenshots/calibrate.png](../docs/legacy_ui_reference/screenshots/calibrate.png)
+- Legacy source: `vb/survform.frm` KeyDown handler around line 2200.
+
+### Acceptance criteria
+- [ ] Pressing `]` on SurveyView advances the sweep index in
+      [survey-context.tsx](../tauri-app/app/src/state/survey-context.tsx).
+- [ ] `Enter` triggers the same accept-sweep flow as the button (incl.
+      transition to Pre Image after the last sweep).
+- [ ] Shortcuts no-op when any modal or text input is focused.
+- [ ] Test added in
+      [SurveyView.test.tsx](../tauri-app/app/src/__tests__/) that simulates
+      keypress and asserts sweep index change.
+
+### Out of scope
+- Rebinding shortcuts (single fixed map for now).
+- Hotkeys on other views (Pre Image, Image, Palette Editor) — separate
+  features if needed.
+
+### Open questions
+- Should `Enter` also work when the Accept Sweep button isn't yet enabled
+  (i.e. before calibration), or should it be silent in that state?
+
+---
+
+<!-- TEMPLATE — copy everything between the markers below for each new feature -->
+<!-- TEMPLATE START -->
+
+## FEAT-007 — Show Palette Expansion
+
+- **Status:** Proposed 
+- **Priority:**  Medium 
+- **Area:** UI | Engine |
+- **Where:** tauri-app\app\src\views\PaletteEditor.tsx
+
+### Summary
+Keep the functionality of color selection the same, but add color component dialogs. Below the hue bar should be three bars of similar size (one for R, one for G, one for B) that represent the color componets (above the hue bar in the legacy version). At each stop point there should be a line through the color component bars and the level of the color (ranging from 0 to 255) and in each direction the level should slope to the next stop. Additionally when a stop is selected or a new stop is created, there should be three vertical bars where you can adjust the level of rgb and see a preview of what color it is. 
+
+### Motivation / why
+More visual interest on the palette page, makes it easier for users to create new colors
+
+### User-facing behavior
+See summary
+
+### Legacy reference
+Screen shot: docs\legacy_ui_reference\screenshots\showpalette.png
+
+The three color component "hue" bars should be below the current hue bar, opposite of how the legacy looks
+
+
+### Acceptance criteria
+*Bullet list of what "done" means. Concrete and testable. e.g.*
+- [X] All listed UIs appear and look good
+- [X] Passes visual inspection by user -- no not mark as done until user marks off this acceptance criteria
+
+### Out of scope
+Adjustment of the palette presets or palette behavior after exiting the palette editor
+
+### Open questions
+Surface questions if you are unclear about anything in the implementaion.
+
+---

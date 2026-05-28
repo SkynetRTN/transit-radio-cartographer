@@ -25,7 +25,9 @@ Claude to fix them.
 
 ## Active bugs
 
-*(none)*
+BUG-011
+BUG-012
+BUG-013
 
 ---
 
@@ -388,5 +390,348 @@ Just has a set size
 
 ### Acceptance
 You should be able to resize the window and have the survey or image or scan fill most of the window, leaving a small gray outline, the size of what is currently defaulted on the top and sides.
+
+---
+
+## BUG-008 — Right click preimage flips axis
+
+- **Status:** Fixed
+- **Priority:**  Medium 
+- **Area:** UI 
+- **Where:** [ImagePlot.tsx](../tauri-app/app/src/lib/plots/ImagePlot.tsx)
+  `handleContextMenu`
+
+### Fix
+Two changes in [ImagePlot.tsx](../tauri-app/app/src/lib/plots/ImagePlot.tsx):
+
+1. `handleContextMenu` only called `e.preventDefault()` when an
+   `onContextMenu` callback was wired up. `PreImageView` doesn't pass
+   one, so the browser context menu was free to open. Moved
+   `preventDefault()` ahead of the callback check so right-click is a
+   no-op on any `ImagePlot` that doesn't opt into a context-menu action.
+2. The actual axis-flip cause: when Plotly resets the layout (zoom-out
+   via double-click, or any other autorange reset), it sets
+   `xaxis.autorange: true` — *dropping* the `'reversed'` flag we set in
+   the initial layout, so RA renders min-on-left and the axis appears
+   flipped. Added a `plotly_relayout` listener that detects this reset
+   and re-applies `autorange: 'reversed'` (guarded by a flag so the
+   relayout we trigger doesn't loop). Only kicks in when `hasBounds`,
+   matching the initial layout's gate.
+
+`ImageView` (which does wire up `onContextMenu` for the box-set flow) is
+unaffected.
+
+### Repro
+1. Open App
+2. Load Survey
+3. Approve all sweeps, generate preimage
+
+### Expected
+Right click does nothing on preimage
+
+### Actual
+Right clicking on the preimage zooms in and then when a user zooms back out, the RA axis flips
+
+
+### Notes / suspected cause
+Something about doing a right click zoom resets the plot and gets rid of the correct RA axis
+
+### Acceptance
+A user can right click on a preimage and nothing will happen. 
+
+---
+
+## BUG-009 — Can't append  with .fits file
+
+- **Status:** In Progress — input-guard fix landed; root-cause unit normalization tracked as BUG-011
+- **Priority:** High
+- **Area:** Engine
+- **Where:** tauri-app/engine/src/radio_cartographer/image_compose.py, tauri-app/engine/src/radio_cartographer/io/fits.py, tauri-app/engine/src/radio_cartographer/rpc.py
+
+### Repro
+1. Open app
+2. Open .fits file as image (e.g. fixtures/inputs/CAS-A_RC_Job_7963_0007654.fits)
+3. Append or superimpose with another file (e.g. fixtures/outputs/cassio_a.img)
+
+### Expected
+User should be able to append and superimpose image with a fits file
+
+### Actual (pre-fix)
+When user tries to append or superimpose, either a .img file or .fits file with the base image being a .fits file, it fails and generates two errors shown below:
+
+'Error: 1001:unknown handle: 29 '
+'-32603':Unable to allocate 660. GiB for an array with shape (5269, 16803921) and data type float64
+
+### Root cause
+`.img` files store RA in **seconds of time** (e.g. `cassio_a.img` → min_ra=79208.67, max_ra=98166.5) while `.fits` files store RA in **degrees** (CAS-A → 350.04–350.86). `_compose()` in `image_compose.py` takes `min/max` across both as if they were the same unit, producing a union span of ~97,800° at the FITS primary's 0.00582°/px resolution → 16,803,921-pixel-wide output grid → 660 GiB float64 allocation → Python sidecar OOM → in-memory `HandleRegistry` lost → next UI action gets `1001:unknown handle: 29`. The handle error is a downstream symptom, not a separate bug.
+
+### Fix (this PR)
+Layered input validation that rejects the failure before any large allocation:
+1. **Grid-budget guard** in `image_compose._check_grid_budget()`: raises `ValueError` with a user-readable message if the planned output grid exceeds 100 megapixels. Applied in `_compose` and `_two_image_grid` (covers append/superimpose/bicolor/tricolor).
+2. **FITS WCS validation** in `io.fits.read_fits()`: rejects headers with non-finite CRVAL/CRPIX/CDELT, zero CDELT, |CDELT| > 10°, or computed Dec outside [-90, 90].
+3. **RPC translation**: `_append_image` and `_tricolor_image` now wrap `ValueError` as `RpcError(ERR_INVALID_PARAMS, ...)` so the message reaches the UI via `setWarning((e as Error).message)`.
+
+### Acceptance
+- Repro now returns a clear yellow-banner warning ("Cannot compose images: combined sky area is far larger than the primary's resolution…") instead of crashing the sidecar.
+- Base image handle remains valid after the rejection (no `unknown handle` follow-up).
+- Tests: `test_append_fits_with_img_yields_clear_rpc_error`, `test_superimpose_fits_with_img_yields_clear_rpc_error` (RPC e2e), plus grid-budget and FITS-validation unit tests.
+- Full append/superimpose between two `.fits` files (or two `.img` files) with compatible coordinates continues to work — this is just an input guard, not a behavior change for the valid cases.
+
+---
+
+## BUG-010 — Change Name
+
+- **Status:** Resolved
+- **Priority:** Medium 
+- **Area:** UI | Engine 
+- **Where:** tauri-app/app/src/views/MainWindow.tsx, tauri-app/app/src/views/dialogs/TextInputDialog.tsx, tauri-app/app/src/state/{survey,scan}-context.tsx, tauri-app/app/src/ipc/client.ts, tauri-app/engine/src/radio_cartographer/rpc.py
+
+### Repro
+1. Any Change name button
+
+### Expected
+Chnage name button should open a pop up text box that allows you to change the "name" of the image, calibration, scan or survey that is displayed on the top left of the UI. This is not the same as the file name, though the default if there isn't something else should be the file name. You should be able to change the name and it persist if you save the file, close and reopen it. 
+
+### Actual
+Buttons don't do anything currently
+
+
+### Notes / suspected cause
+Just hasn't been implemented yet, is being used essentially as a file name field 
+
+### Acceptance
+Using the change name button allows you to input text that will be displayed in the upper left of the window (where it currently is) that will be persistant through saving, closing and reopening of a file. 
+
+---
+
+## BUG-011 — `.img` and `.fits` use incompatible RA units (seconds-of-time vs degrees)
+
+- **Status:** Open
+- **Priority:** High (blocks legitimate FITS+IMG mosaics)
+- **Area:** Engine
+- **Where:** tauri-app/engine/src/radio_cartographer/io/img.py, tauri-app/engine/src/radio_cartographer/io/fits.py, tauri-app/engine/src/radio_cartographer/rpc.py (`_image_to_gridded`)
+
+### Repro
+1. Open a `.fits` file (e.g. CAS-A FITS, RA in degrees, ~350.04–350.86°).
+2. Try to append a `.img` of the same source (e.g. `cassio_a.img`, RA values ~79208–98166 seconds-of-time).
+
+### Expected
+The compose should succeed: both files cover roughly the same sky region.
+
+### Actual
+BUG-009's input guard now rejects with a clear "different coordinate systems" error. Compose never runs.
+
+### Notes / suspected cause
+`io.img.read_img` stores `min_ra`/`max_ra` straight from the legacy VB binary header (units = seconds of time, derived from `Pix * 15 sec/pix` × column count, see survform.frm:1697). `io.fits.read_fits` stores `min_ra`/`max_ra` in degrees from WCS corner math. Both write to the same `GriddedImage.min_ra`/`max_ra` fields with no awareness of units. `_compose()` then treats them as the same scale.
+
+Conversion: 1 second of time = 15/3600 degrees = 1/240 degree (for RA only; Dec is in degrees in both formats).
+
+### Fix sketch
+Normalize at load time so every `GriddedImage` carries RA in degrees:
+- In `_image_to_gridded` (rpc.py), divide `image.min_ra`/`max_ra` by 240 before populating the GriddedImage.
+- Update `_gridded_to_image` (the reverse) to multiply back by 240 when serializing `.img`.
+- Audit all `GriddedImage` consumers (workspace, plots, compose math) for places that assume seconds.
+- Add a roundtrip test that loads a `.img`, saves it back, and checks byte equality of the legacy bounds fields.
+
+### Acceptance
+- A `.fits` file and the corresponding `.img` of the same source compose successfully (overlap visible in the result).
+- Existing `.img`-only and `.fits`-only compose tests still pass.
+- Legacy `.img` roundtrip preserves on-disk byte values for min_ra/max_ra fields.
+
+---
+
+## BUG-012 — Sidecar crash leaves UI holding stale handles
+
+- **Status:** Open
+- **Priority:** Medium
+- **Area:** RPC | Engine | UI
+- **Where:** tauri-app/src-tauri/ (sidecar process management), tauri-app/engine/src/radio_cartographer/_handles.py, tauri-app/app/src/ipc/client.ts
+
+### Repro
+Any flow that crashes the Python sidecar (OOM, unhandled exception, kill -9). Observed in the wild as: BUG-009's 660 GiB allocation → sidecar OOM → next UI action returns `Error: 1001:unknown handle: 29` because the in-memory `HandleRegistry` is gone but the UI still believes its handles are live.
+
+### Expected
+The user keeps working without losing in-flight context. Either the sidecar auto-restarts and the UI re-registers its known handles (re-opening files transparently), or the UI shows a single clear "engine restarted; please re-open your files" notice and resets handle state.
+
+### Actual
+The UI surfaces a cryptic `1001:unknown handle: <N>` error on every subsequent operation. The user has to manually close and reopen everything.
+
+### Notes / suspected cause
+- `HandleRegistry` is purely in-memory (tauri-app/engine/src/radio_cartographer/_handles.py); there is no persistence layer.
+- The Tauri sidecar process isn't currently monitored/restarted on crash.
+- The UI has no concept of "handles invalidated; recover."
+
+### Fix sketch
+Two layers:
+1. **Sidecar resilience** (src-tauri): supervise the Python process; on unexpected exit, log to a panel, restart it, and emit an IPC event "engine_restarted" with the new pid.
+2. **UI handle reconciliation** (ipc/client.ts + state contexts): on `engine_restarted`, mark all handles stale, prompt user to re-open files (or attempt automatic re-open from the last known path if we tracked it). Translate `code === 1001` responses into a structured "STALE_HANDLE" error type instead of raw string parsing.
+
+### Acceptance
+- Killing the sidecar mid-session (`taskkill /F /IM python.exe` while in the dev shell) results in either an automatic restart-and-recover, or a one-time user-facing notification — never a cascade of `unknown handle` errors.
+- Regression test: a mocked transport that simulates sidecar restart returns the appropriate UI state instead of breaking all open windows.
+
+---
+
+## BUG-013 — Bi-Color and Tri-Color Images
+
+- **Status:** Fixed
+- **Priority:** High
+- **Area:** UI | Engine
+- **Where:**
+  - [image_compose.py](../tauri-app/engine/src/radio_cartographer/image_compose.py) (compose math, NaN handling, 3-way bbox)
+  - [rpc.py](../tauri-app/engine/src/radio_cartographer/rpc.py) (`_image_meta`, `_get_*_image_pixels`, JSON-safe encoding, block-max downsample, tertiary shift params)
+  - [palette.py](../tauri-app/engine/src/radio_cartographer/palette.py) (bitmap-save NaN handling)
+  - [RgbImagePlot.tsx](../tauri-app/app/src/lib/plots/RgbImagePlot.tsx) (paper-coord layout image, no-data → white, gridlines off)
+  - [ImagePlot.tsx](../tauri-app/app/src/lib/plots/ImagePlot.tsx) (white plot_bgcolor, null-pixel handling)
+  - [ImageView.tsx](../tauri-app/app/src/views/ImageView.tsx), [client.ts](../tauri-app/app/src/ipc/client.ts), [MainWindow.tsx](../tauri-app/app/src/views/MainWindow.tsx) (null pixel propagation, tertiary shift dialog, commit-handler guard)
+
+### Fix
+Five distinct issues conspired to produce the all-black bi-color result and
+the missing third image in tri-color. They were fixed in layers:
+
+1. **`_normalize01` was not NaN-safe.** A single FITS NaN sentinel poisoned
+   the whole channel because `np.min`/`np.max` propagate NaN, the `hi <= lo`
+   guard returned False against NaN, and `(arr - NaN) / (NaN - NaN)` produced
+   an all-NaN channel. Replaced with a finite-mask version that derives
+   `lo`/`hi` from `arr[np.isfinite(arr)]` and passes NaN cells through as
+   NaN so the renderer can paint them distinctly.
+2. **JSON encoding emitted `NaN` bareword literals.** Python's default
+   `json.dumps` writes `NaN`/`Infinity` literally, which Rust's strict
+   `serde_json::from_str` in [sidecar.rs](../tauri-app/app/src-tauri/src/sidecar.rs)
+   rejected — the whole RPC reply was dropped on the UI side, manifesting
+   as either a `-32000:expected value at line 1 column …` error (for
+   append-after-NaN) or an empty render. Added `_array_to_jsonable_list`
+   that converts NaN → `null` at the array-to-list boundary in
+   `_get_image_pixels`/`_get_rgb_image_pixels`, and audited every
+   pixel-derived float in `_image_meta` / `_flux_range_from_params` /
+   `_gridded_to_image` to use `nanmin`/`nanmax` with all-NaN fallbacks.
+3. **Stride-slice downsampling dropped point-source peaks.** A bright
+   one-pixel source can fall on an unsampled coordinate after
+   `r[::step, ::step]` and vanish from the displayed grid. Replaced with
+   `_block_downsample` (NaN-aware block-max via `nanmax` over
+   `(H//step, step, W//step, step)`) so any block containing the peak
+   keeps it.
+4. **Bi/tri-color compose treated no-coverage cells as `0.0`.** That
+   collapsed to a real-but-very-dark pixel after the [0, 1] clamp, so
+   the renderer couldn't tell "no data" from "covered but dim." Threaded
+   per-input coverage masks through `bicolor_compose`,
+   `tricolor_compose`, and `extend_rgb_compose`; uncovered cells are
+   now NaN per channel. The renderer paints white only when *all* channels
+   for a pixel are non-finite, otherwise it treats non-finite individuals
+   as 0 — this preserves the cassio-only / crab-only regions on a
+   disjoint-input bi-color.
+5. **Plotly's data-coord layout image was being squished.** With
+   `xref: 'x'`, large `sizex` (~32 000 sidereal seconds for RA), and a
+   reversed axis, Plotly rendered the bitmap at a tiny fraction of the
+   intended width — the user saw only a sliver of Cas-A at the right
+   edge. Switched to `xref: 'paper'` so the bitmap fills the plot area
+   directly, and updated the canvas pixel orientation to match: canvas
+   col 0 = engine col 0 = data at `max_ra` = visual LEFT after reversed
+   axis. Disabled gridlines/zerolines for visual cleanliness.
+
+For **tri-color from scratch**, `tricolor_compose` now unions all three
+inputs into the output bbox (it was using `_two_image_grid` which only
+considered primary+secondary, silently clipping the tertiary). Added
+independent `tertiary_ra_shift_seconds` / `tertiary_dec_shift_degrees`
+parameters end-to-end (engine → RPC → client → dialog cascade) so the
+user can nudge the third image into a visible region.
+
+For **tri-color from an existing bi-color**, `extend_rgb_compose` now
+grows the bbox to cover the new image's footprint (it was clamping the
+new image to the existing bi-color's bounds), resampling the existing
+R/G/B channels onto the larger grid with NaN outside their original
+coverage. A separate UI bug — an unconditional `if (!image) return` at
+the top of the commit handler in [MainWindow.tsx](../tauri-app/app/src/views/MainWindow.tsx)
+— was silently swallowing the from-rgb commit because `image` is null
+once the bi-color is showing. Guarded per-mode so only bicolor and
+tricolor-from-scalar require `image`, while tricolor-from-rgb requires
+`rgbImage`.
+
+Regression tests in
+[test_image_compose.py](../tauri-app/engine/tests/numerics/test_image_compose.py)
+and [test_rpc_image_io.py](../tauri-app/engine/tests/rpc/test_rpc_image_io.py)
+cover NaN-safe `_normalize01`, peak-preserving block downsample,
+no-finite-poisoning JSON encoding, three-way disjoint tri-color, tertiary
+shifting, bbox-extended extend, and the strict-JSON meta round-trip that
+caught the `min_flux: NaN, max_flux: NaN` decode failure.
+
+### Repro
+1. Open App
+2. Open Image
+3. Select Bi-color or Tri-color image
+4. Select additional image
+5. Walk through uis that pop up
+
+### Expected
+A bi-color (or tricolor) image is produced and shown
+
+### Actual
+The axes seem to scale but the entire image is black.
+
+### Screenshots / attachments
+- docs\bug_screenshots\colorimagebug.png
+
+### Notes / suspected cause
+Something in the color image is being overridden by a palette option maybe
+
+### Acceptance
+Bi color and tri color images are able to be produced
+
+---
+
+## BUG-014 — Black blank space instead of white in appended images
+
+- **Status:** Fixed
+- **Priority:** Medium
+- **Area:** UI | Engine
+- **Where:**
+  - [image_compose.py](../tauri-app/engine/src/radio_cartographer/image_compose.py) (`_compose` NaN-init)
+  - [ImagePlot.tsx](../tauri-app/app/src/lib/plots/ImagePlot.tsx) (white plot_bgcolor, null z-cells render transparent)
+  - [ImageView.tsx](../tauri-app/app/src/views/ImageView.tsx) (null-aware magnifier, blank flux readout)
+  - [client.ts](../tauri-app/app/src/ipc/client.ts), [rpc.py](../tauri-app/engine/src/radio_cartographer/rpc.py) (null-safe pixel types and JSON encoding — see BUG-013)
+
+### Fix
+Bundled with BUG-013 because the underlying contract is the same:
+**NaN means "no data," renderer paints no data as white** (matching the
+legacy reference screenshot of an appended image).
+
+- `_compose` (append/superimpose) now initializes the output to
+  `np.full((h, w), np.nan, …)` instead of `np.zeros(...)`. Cells covered
+  by either input get the input's flux value; the gap stays NaN.
+- The save side handles NaN sentinel mapping: `_gridded_to_image` swaps
+  NaN to `Clr = 0` (the legacy `.img` "unpainted background" marker, which
+  reloads as `min_flux_p` — round-trip-safe), `apply_palette` paints
+  no-data white for `.bmp` export, and FITS save passes NaN through
+  unchanged (FITS native no-data sentinel).
+- `ImagePlot` sets `plot_bgcolor: '#ffffff'` and relies on Plotly's
+  built-in transparent rendering of `null` heatmap cells — Vite uses
+  the same `_array_to_jsonable_list` boundary as bi/tri-color so scalar
+  cells encode as `null` and render as bgcolor.
+- The flux readout in `ImageView` was updated to show an em-dash
+  rather than `0.0000` when the cursor lands on a NaN cell, and the
+  magnifier now skips NaN when computing local stretch min/max so a
+  no-data corner doesn't break the local palette.
+
+### Repro
+1. Open app
+2. Open image
+3. Append image
+4. Walk through pop ups
+
+### Expected
+Images are appended and blank space inbetween images is rendered as white and flux field is blank (not zero but blank)
+
+### Actual
+Blank space inbetween images is rendered as having a flux of zero and is black (or whatever color zero palette is)
+
+
+### Screenshots / attachments
+- docs\legacy_ui_reference\screenshots\appendedimage.png
+
+### Notes / suspected cause
+nans are being rendered as zero instead of something else
+
+### Acceptance
+Visual pass by user, nan values should render as white not black to differentiate from the background subtracted near-zero values of the maps.
 
 ---

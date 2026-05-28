@@ -35,7 +35,10 @@ function pointFromColRow(
 ): ImagePoint {
   const c = Math.max(0, Math.min(pixels.width - 1, col));
   const r = Math.max(0, Math.min(pixels.height - 1, row));
-  const flux = pixels.pixels[r]?.[c] ?? 0;
+  // Preserve `null` for no-coverage cells (BUG-014) — fluxReadout treats it
+  // as blank rather than substituting 0, which would be misleading.
+  const raw = pixels.pixels[r]?.[c];
+  const flux = raw === null || raw === undefined ? null : raw;
   const ra =
     meta && pixels.width > 1
       ? meta.max_ra - (c / (pixels.width - 1)) * (meta.max_ra - meta.min_ra)
@@ -69,16 +72,21 @@ function buildMagnifier(
   const colMax = Math.min(pixels.width - 1, center.col + half);
   const rowMin = Math.max(0, center.row - half);
   const rowMax = Math.min(pixels.height - 1, center.row + half);
-  const subPixels: number[][] = [];
+  // Pass `null` through to the magnifier's heatmap z-array — Plotly renders
+  // null cells transparent against `plot_bgcolor` (BUG-014). The min/max scan
+  // ignores null so a no-data corner doesn't break the local palette stretch.
+  const subPixels: (number | null)[][] = [];
   let localMin = Number.POSITIVE_INFINITY;
   let localMax = Number.NEGATIVE_INFINITY;
   for (let r = rowMin; r <= rowMax; r++) {
-    const row: number[] = [];
+    const row: (number | null)[] = [];
     for (let c = colMin; c <= colMax; c++) {
       const v = pixels.pixels[r][c];
       row.push(v);
-      if (v < localMin) localMin = v;
-      if (v > localMax) localMax = v;
+      if (v !== null && v !== undefined) {
+        if (v < localMin) localMin = v;
+        if (v > localMax) localMax = v;
+      }
     }
     subPixels.push(row);
   }
@@ -296,8 +304,12 @@ export function ImageView() {
                   <div>RA: {displayPoint ? formatRaSeconds(displayPoint.ra) : '—'}</div>
                   <div>Dec: {displayPoint ? formatDecDegrees(displayPoint.dec) : '—'}</div>
                   <div>
-                    Flux: {displayPoint ? displayPoint.flux.toFixed(4) : '—'}
-                    {fluxUnit && displayPoint ? ` ${fluxUnit}` : ''}
+                    Flux:{' '}
+                    {displayPoint
+                      ? displayPoint.flux === null
+                        ? '—'  /* BUG-014: no-coverage cell — blank, not "0.0000" */
+                        : `${displayPoint.flux.toFixed(4)}${fluxUnit ? ` ${fluxUnit}` : ''}`
+                      : '—'}
                   </div>
                   {pinnedPoint && <div className="pinned-tag">pinned</div>}
                 </div>

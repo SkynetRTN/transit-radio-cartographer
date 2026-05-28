@@ -30,6 +30,11 @@ interface Props {
   verticalLines?: number[];
   overlayLines?: { points: Array<{ x: number; y: number }>; color?: string; width?: number }[];
   pinnedPoint?: { x: number; y: number } | null;
+  // Secondary ringed-point overlay used by the Determine Peak "Max Value"
+  // fit kind. Same visual primitive as `pinnedPoint` but takes its own
+  // color so the max highlight (blue, #0080ff to match the peak-fit curve)
+  // can sit on screen alongside a gold pinned point without colliding.
+  highlightPoint?: { x: number; y: number; color?: string } | null;
   onHover?: (p: Point | null) => void;
   onPointClick?: (p: Point) => void;
   onEmptyClick?: () => void;
@@ -132,6 +137,7 @@ export function PointScatter({
   verticalLines,
   overlayLines,
   pinnedPoint,
+  highlightPoint,
   onHover,
   onPointClick,
   onEmptyClick,
@@ -225,6 +231,23 @@ export function PointScatter({
         hoverinfo: 'skip',
         showlegend: false,
         name: 'pinned',
+      });
+    }
+
+    if (highlightPoint) {
+      traces.push({
+        x: [highlightPoint.x],
+        y: [highlightPoint.y],
+        type: 'scatter',
+        mode: 'markers',
+        marker: {
+          symbol: 'circle-open',
+          size: 16,
+          line: { color: highlightPoint.color ?? '#0080ff', width: 3 },
+        },
+        hoverinfo: 'skip',
+        showlegend: false,
+        name: 'highlight',
       });
     }
 
@@ -359,7 +382,7 @@ export function PointScatter({
       node.removeEventListener('click', onDomClick);
       Plotly.purge(node);
     };
-  }, [series, xAxisLabel, yAxisLabel, fixedXRange, fixedYRange, showXTicks, pinnedPoint, overlayLines, xTickFormatter]);
+  }, [series, xAxisLabel, yAxisLabel, fixedXRange, fixedYRange, showXTicks, pinnedPoint, highlightPoint, overlayLines, xTickFormatter]);
 
   // ── Effect 2: cheap shape-only updates via relayout. This is what makes the
   //   drag-highlight follow the cursor smoothly without rebuilding the plot.
