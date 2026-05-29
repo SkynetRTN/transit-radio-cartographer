@@ -258,7 +258,7 @@ test('Baseline Sweeps opens a dialog with default 5 and submits to baseline rpc'
   );
 });
 
-test('Lock Aspect button defaults to active and toggles the prop on ImagePlot', async () => {
+test('Pre Image plot receives displayMode="sky" by default (FEAT-011)', async () => {
   imagePlotProps.length = 0;
   await act(async () => {
     render(
@@ -275,29 +275,13 @@ test('Lock Aspect button defaults to active and toggles the prop on ImagePlot', 
       </SurveyProvider>,
     );
   });
-  await waitFor(() => expect(screen.getByText('Lock Aspect')).toBeTruthy());
-  const lockBtn = screen.getByRole('button', { name: 'Lock Aspect' });
-  // Default ON — button carries the `.active` class and ImagePlot receives
-  // `lockAspectRatio: true`.
-  expect(lockBtn.className).toMatch(/active/);
   await waitFor(() => {
     const last = imagePlotProps[imagePlotProps.length - 1];
-    expect(last?.lockAspectRatio).toBe(true);
+    expect(last?.displayMode).toBe('sky');
   });
-  // Click toggles to OFF.
-  fireEvent.click(lockBtn);
-  await waitFor(() => {
-    expect(screen.getByRole('button', { name: 'Lock Aspect' }).className).not.toMatch(/active/);
-  });
-  await waitFor(() => {
-    const last = imagePlotProps[imagePlotProps.length - 1];
-    expect(last?.lockAspectRatio).toBe(false);
-  });
-  // Click again toggles back ON.
-  fireEvent.click(screen.getByRole('button', { name: 'Lock Aspect' }));
-  await waitFor(() => {
-    expect(screen.getByRole('button', { name: 'Lock Aspect' }).className).toMatch(/active/);
-  });
+  // No Lock Aspect button exists — FEAT-011 removed it; control lives in
+  // the Image menu instead.
+  expect(screen.queryByRole('button', { name: 'Lock Aspect' })).toBeNull();
 });
 
 test('Align Sweeps opens a dialog with default 0.5 and submits to align rpc', async () => {

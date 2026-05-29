@@ -22,6 +22,8 @@ import {
 
 export type WorkspaceViewMode = 'survey' | 'calibrate-survey' | 'pre-image' | 'image';
 
+export type ImageDisplayMode = 'sky' | 'raw' | 'pixel' | 'stretch';
+
 export interface FluxRange {
   min: number;
   max: number;
@@ -48,6 +50,14 @@ export interface SurveyState {
   // shared context so the Image menu's "Change Magnifier Size…" can update it
   // while the magnifier itself is rendered by ImageView.
   magnifierHalfSize: number;
+  // FEAT-011: tri-state-plus image display mode, set via Image > Image Display.
+  // - 'sky' (default): cos(dec_center)/240 — true sky shape (FEAT-008 v3).
+  // - 'raw': 1/240 — equator-only sky shape, matches legacy VB (FEAT-008 v2).
+  // - 'pixel': (decRange*w)/(raRange*h) — each pixel cell square on screen.
+  // - 'stretch': no scaleanchor; image fills the workspace container.
+  // Global so the menu and both views agree. Supersedes the per-view Lock
+  // Aspect button (FEAT-008) and Snap to Square checkbox (FEAT-010) UIs.
+  imageDisplay: ImageDisplayMode;
   reducing: boolean;
   savePath: string | null;
   dirty: boolean;
@@ -73,6 +83,7 @@ export interface SurveyState {
   setImageName: (name: string) => void;
   setSurveyName: (name: string) => Promise<void>;
   setMagnifierHalfSize: (n: number) => void;
+  setImageDisplay: (mode: ImageDisplayMode) => void;
   saveImage: (path: string) => Promise<string | null>;
   clearImage: () => Promise<void>;
   // Re-multiply / un-multiply the open image's pixels by a flux-cal slope.
@@ -106,6 +117,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   const [imageName, setImageNameState] = useState<string>('image');
   const [imageSavePath, setImageSavePath] = useState<string | null>(null);
   const [magnifierHalfSize, setMagnifierHalfSizeState] = useState<number>(15);
+  const [imageDisplay, setImageDisplayState] = useState<ImageDisplayMode>('sky');
   const [loading, setLoading] = useState(false);
   const [reducing, setReducing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -545,6 +557,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       imageName,
       imageSavePath,
       magnifierHalfSize,
+      imageDisplay,
       reducing,
       savePath,
       dirty,
@@ -566,6 +579,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       setImageName: setImageNameAction,
       setSurveyName: setSurveyNameAction,
       setMagnifierHalfSize: setMagnifierHalfSizeAction,
+      setImageDisplay: setImageDisplayState,
       saveImage: saveImageAction,
       clearImage,
       applyImageFluxCalibration,
@@ -589,6 +603,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       imageName,
       imageSavePath,
       magnifierHalfSize,
+      imageDisplay,
       reducing,
       savePath,
       dirty,
@@ -608,6 +623,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       setImageNameAction,
       setSurveyNameAction,
       setMagnifierHalfSizeAction,
+      setImageDisplayState,
       saveImageAction,
       clearImage,
       applyImageFluxCalibration,

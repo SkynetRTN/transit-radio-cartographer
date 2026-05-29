@@ -16,6 +16,7 @@ export function PreImageView() {
     workspaceHandle,
     setViewMode,
     makeImage,
+    imageDisplay,
   } = useSurvey();
   const [imagePixels, setImagePixels] = useState<ImagePixels | null>(null);
   const [imageMeta, setImageMeta] = useState<ImageMeta | null>(null);
@@ -31,7 +32,6 @@ export function PreImageView() {
   const [didSmooth, setDidSmooth] = useState(false);
   const [didBaseline, setDidBaseline] = useState(false);
   const [didAlign, setDidAlign] = useState(false);
-  const [lockAspect, setLockAspect] = useState(true);
 
   const generateImage = useCallback(
     async (pixValue: number) => {
@@ -201,7 +201,7 @@ export function PreImageView() {
                 meta={imageMeta}
                 title=""
                 testId="pre-image-plot"
-                lockAspectRatio={lockAspect}
+                displayMode={imageDisplay}
               />
             ) : (
               !status && !error && <div className="plot-status">No image yet.</div>
@@ -239,14 +239,6 @@ export function PreImageView() {
                 title="Align the accepted sweeps with a max declination shift (default 0.5°)"
               >
                 Align Sweeps
-              </button>
-              <div className="button-gap" />
-              <button
-                onClick={() => setLockAspect((v) => !v)}
-                className={lockAspect ? 'active' : ''}
-                title="Keep the image pixel grid at its true aspect ratio when the window is resized"
-              >
-                Lock Aspect
               </button>
               <div className="button-gap" />
               <button onClick={handleBackToSweeps}>Back to Sweeps</button>

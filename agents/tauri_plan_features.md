@@ -34,16 +34,30 @@ then hand the file to Claude to build them. Sibling to
 
 ## Done
 
+- **FEAT-011** — Replaced the per-view Lock Aspect button (FEAT-008) and
+  the Image > Snap to Square checkbox (FEAT-010) with one **Image >
+  Image Display** four-mode selector: Declination Corrected (default),
+  No Declination Correction, Snap to Square, Stretch to Fill. See the
+  FEAT-011 entry below.
+- **FEAT-010** — *(UI superseded by FEAT-011.)* Image menu had a
+  **Snap to Square** toggle that switched the Lock Aspect lock between
+  the default sky-shape projection (cos(dec)/240) and a pixel-grid lock
+  that makes each cell square on screen. The pixel-grid formula is
+  preserved in FEAT-011 as the "Snap to Square" option of the new
+  selector. See the FEAT-010 entry below.
 - **FEAT-009** — `make_image` now detects RA-crossing surveys (samples
   clustered at both 0h and 24h with a large middle gap) and unwraps the
   early-side samples by +86400 before gridding, so Cassiopeia-style
   observations across midnight produce a tight ~5h arc instead of a
   24h-wide grid with an empty middle. See the FEAT-009 entry below.
-- **FEAT-008** — Lock Aspect sidebar button on the Pre Image and Image
-  views. ON (default) preserves the sky-shape aspect ratio via
-  `scaleratio: cos(dec_center) / 240` (RA-seconds → degrees plus the
-  rectangular-projection correction for high-dec surveys); OFF stretches
-  to fill the workspace area. See the FEAT-008 entry below for details.
+- **FEAT-008** — *(UI superseded by FEAT-011.)* Lock Aspect sidebar
+  button on the Pre Image and Image views. ON (default) preserved the
+  sky-shape aspect ratio via `scaleratio: cos(dec_center) / 240`
+  (RA-seconds → degrees plus the rectangular-projection correction for
+  high-dec surveys); OFF stretched to fill the workspace area. The
+  cos(dec)/240, 1/240, and pixel-grid formulas all live on in FEAT-011's
+  four-mode selector. See the FEAT-008 entry below for the formula
+  evolution history.
 - **FEAT-004** — Renamed the SurveyView Baseline Segment button to
   **Remove RFI** (and the matching pending-click hint / Accept-button labels)
   to avoid confusion with ScanView's Baseline Source tool. See the FEAT-004
@@ -495,6 +509,260 @@ Adjustment of the palette presets or palette behavior after exiting the palette 
 
 ### Open questions
 Surface questions if you are unclear about anything in the implementaion.
+
+---
+
+## FEAT-011 — Image > Image Display four-mode selector
+
+- **Status:** Done
+- **Priority:** Medium
+- **Area:** UI
+- **Where:**
+  [MainWindow.tsx](../tauri-app/app/src/views/MainWindow.tsx),
+  [survey-context.tsx](../tauri-app/app/src/state/survey-context.tsx),
+  [ImagePlot.tsx](../tauri-app/app/src/lib/plots/ImagePlot.tsx),
+  [ImageView.tsx](../tauri-app/app/src/views/ImageView.tsx),
+  [PreImageView.tsx](../tauri-app/app/src/views/PreImageView.tsx),
+  [App.css](../tauri-app/app/src/App.css),
+  [MainWindow.menu.test.tsx](../tauri-app/app/src/__tests__/MainWindow.menu.test.tsx),
+  [PreImageView.test.tsx](../tauri-app/app/src/__tests__/PreImageView.test.tsx)
+
+### Summary
+Replaces FEAT-008's per-view **Lock Aspect** sidebar button and
+FEAT-010's **Image > Snap to Square** checkbox with one **Image >
+Image Display ▸** menu item that opens a side submenu containing four
+radio-style options:
+
+- ✓ Declination Corrected (default)
+- No Declination Correction
+- Snap to Square
+- Stretch to Fill
+
+The first three lock the aspect ratio with different scaleratio
+formulas; the fourth drops the lock entirely so the plot fills the
+workspace area. The setting is global (survey context) and applies to
+both Pre Image and Image views as well as the magnifier inset.
+
+### Motivation / why
+After three FEAT-008 iterations and FEAT-010 on top, the image-display
+controls were split across two surfaces (a sidebar button + a global
+menu checkbox) with overlapping semantics. Consolidating into one
+named radio group makes the behavior discoverable and removes the
+button clutter from the sidebars.
+
+### User-facing behavior
+- Lock Aspect button no longer appears on the Pre Image or Image
+  sidebar.
+- Image menu has an "Image Display ▸" item at the bottom. Clicking it
+  toggles a side submenu (same look as the parent menu, positioned to
+  the right of the parent item) containing the four radio-style mode
+  items. Clicking a mode applies it immediately and closes both the
+  submenu and the parent menu. The active mode carries a `✓` prefix;
+  the others carry three leading spaces so the label position stays
+  stable.
+- Default mode is "Declination Corrected" — the same display behavior
+  the app shipped with under FEAT-008 v3.
+- Setting persists across view switches (Pre Image ↔ Image) within
+  the same app session; resets to the default on app restart (no
+  persistence to disk). Submenu open-state resets every time the
+  parent Image menu closes.
+
+### Legacy reference
+No legacy equivalent — the legacy VB app's image is always a fixed
+5970×4770 pixel rectangle whose ratio depends on the host window. The
+"No Declination Correction" mode is the closest analog to legacy
+behavior (1/240 with no cos correction), but legacy doesn't expose any
+choice between modes.
+
+### Resolution
+Introduced `ImageDisplayMode = 'sky' | 'raw' | 'pixel' | 'stretch'` in
+[survey-context.tsx](../tauri-app/app/src/state/survey-context.tsx)
+and replaced the FEAT-010 `snapToSquare: boolean` field with
+`imageDisplay: ImageDisplayMode` (default `'sky'`) plus a matching
+`setImageDisplay` setter.
+
+[ImagePlot.tsx](../tauri-app/app/src/lib/plots/ImagePlot.tsx) lost the
+FEAT-008 `lockAspectRatio` and FEAT-010 `aspectMode` props. The single
+new `displayMode` prop drives a four-way branch on the bounded-mode
+axis layout:
+
+| Mode | scaleanchor | scaleratio |
+|------|-------------|------------|
+| `'sky'` | yes | `cos((min_dec+max_dec)/2 * π/180) / 240` |
+| `'raw'` | yes | `1 / 240` |
+| `'pixel'` | yes | `(decRange × imageWidth) / (raRange × imageHeight)` |
+| `'stretch'` | — | (no scaleanchor; axes scale independently) |
+
+Pixel-mode (no RA/Dec bounds) keeps its existing `scaleanchor:'y'` /
+`scaleratio:1` for all but `'stretch'`; `'stretch'` removes that lock
+too.
+
+Both [PreImageView.tsx](../tauri-app/app/src/views/PreImageView.tsx)
+and [ImageView.tsx](../tauri-app/app/src/views/ImageView.tsx) lost
+their local `lockAspect` state and Lock Aspect sidebar `<button>`s.
+Both views now pull `imageDisplay` from `useSurvey()` and forward
+`displayMode={imageDisplay}` to ImagePlot (main plot in PreImage; main
+plot + magnifier inset in Image).
+
+[MainWindow.tsx](../tauri-app/app/src/views/MainWindow.tsx) gained a
+bottom-of-Image-menu side submenu: a `.menu-sep`, then a
+`.menu-submenu-host` (relative-positioned flex column) containing the
+parent `<button role="menuitem" aria-haspopup="menu"
+aria-expanded={...}>Image Display ▸</button>` and a conditionally-
+rendered `.menu-submenu` div with the four radio-style mode buttons.
+The submenu is `position: absolute; left: 100%` so it floats to the
+right of the parent item with the same visual style as the parent
+menu. The submenu open state is local component state, and a
+`useEffect` resets it to `false` whenever the parent Image menu
+closes. New `.menu-submenu-host` and `.menu-submenu` styles were
+added to [App.css](../tauri-app/app/src/App.css).
+
+Test coverage:
+- [MainWindow.menu.test.tsx](../tauri-app/app/src/__tests__/MainWindow.menu.test.tsx)
+  asserts the four items render with `✓` on Declination Corrected by
+  default, that clicking each one moves the `✓`, and that returning
+  to Declination Corrected restores the default.
+- [PreImageView.test.tsx](../tauri-app/app/src/__tests__/PreImageView.test.tsx)
+  asserts the Pre Image plot receives `displayMode === 'sky'` on
+  mount and that no Lock Aspect button is rendered.
+
+### About .img files (user question)
+The user asked whether the declination correction can be applied to
+uploaded `.img` files. **Yes — automatically.** The cos(dec)
+correction is a Plotly display-time scaling; ImagePlot reads
+`meta.min_dec` and `meta.max_dec` and computes `scaleratio = cos((min+max)/2)/240`
+regardless of whether `meta` came from `openImage` (.img file) or
+`makeImage` (built from a survey). Nothing is baked into the pixel
+grid. So `cassio_a.img` opened from disk shows up at sky-shape aspect
+the same way a freshly-made cassio image does.
+
+### Acceptance criteria
+- [x] Image menu has an "Image Display ▸" item that opens a side
+      submenu with four radio-style mode items, default ✓ on
+      Declination Corrected.
+- [x] Clicking any mode applies it and closes both submenu and
+      parent menu.
+- [x] Submenu close-on-parent-close: reopening Image doesn't auto-
+      show the submenu.
+- [x] Lock Aspect sidebar button is gone from both Pre Image and
+      Image views.
+- [x] All four modes produce the documented scaleratio behavior in
+      ImagePlot.
+- [x] Tests cover the menu state machine and the prop wiring.
+
+### Out of scope
+- Persisting `imageDisplay` across app launches.
+- Applying display modes to RgbImagePlot.
+- A "stretch but keep aspect" mode or other configurations beyond the
+  four documented.
+- Changing the cos(dec) correction formula itself (still
+  `cos(dec_center)` rectangular projection).
+
+### Open questions
+
+
+---
+
+## FEAT-010 — Snap to Square toggle in the Image menu
+
+- **Status:** Done
+- **Priority:** Low
+- **Area:** UI
+- **Where:**
+  [MainWindow.tsx](../tauri-app/app/src/views/MainWindow.tsx),
+  [survey-context.tsx](../tauri-app/app/src/state/survey-context.tsx),
+  [ImagePlot.tsx](../tauri-app/app/src/lib/plots/ImagePlot.tsx),
+  [ImageView.tsx](../tauri-app/app/src/views/ImageView.tsx),
+  [PreImageView.tsx](../tauri-app/app/src/views/PreImageView.tsx),
+  [MainWindow.menu.test.tsx](../tauri-app/app/src/__tests__/MainWindow.menu.test.tsx)
+
+### Summary
+Adds a checkable **Snap to Square** entry to the Image top menu.
+When unchecked (default), Lock Aspect locks to true sky shape using
+the FEAT-008 v3 `cos(dec_center) / 240` formula. When checked, Lock
+Aspect instead uses the pixel-grid formula
+`(decRange × imageWidth) / (raRange × imageHeight)`, which renders
+each pixel cell square on screen. The existing Lock Aspect sidebar
+button is unchanged — it still toggles whether any lock is applied;
+this just picks which "locked" formula to use.
+
+### Motivation / why
+After FEAT-008 v3, sky-shape-correct surveys like cassio (dec ~60°,
+heavily compressed RA) and wide RA-strip surveys can render as
+awkward letterboxed thin strips that are hard to inspect at detail.
+"Snap to Square" gives the user a quick way to coerce the display
+into a square-cell pixel-grid view for inspection without giving up
+the lock entirely (which would stretch to fill, distorting cells in
+the opposite direction).
+
+### User-facing behavior
+- New **Snap to Square** item at the bottom of the Image menu,
+  separated by a divider from the existing Change-Magnifier-Size /
+  Change-Image-Name items.
+- Always enabled (does not require an image to be loaded — the
+  setting persists for the next image you build/open).
+- Unchecked by default. A `✓` prefix appears when active.
+- Click toggles the global setting. Both Pre Image and Image views
+  (including the magnifier inset) react immediately.
+
+### Legacy reference
+No legacy equivalent. The legacy VB app's image is always a fixed
+5970×4770 pixel rectangle (`vb/survform.frm:1606-1607`), so its
+display ratio is whatever the host window forces.
+
+### Resolution
+Added `snapToSquare: boolean` and `setSnapToSquare` to the
+`SurveyState` context in
+[survey-context.tsx](../tauri-app/app/src/state/survey-context.tsx),
+mirroring the existing `magnifierHalfSize` pattern (in-memory only,
+no persistence to disk). [ImagePlot.tsx](../tauri-app/app/src/lib/plots/ImagePlot.tsx)
+gained an `aspectMode?: 'sky' | 'pixel'` prop (default `'sky'`)
+which selects between
+`Math.cos(decCenter * Math.PI / 180) / 240` (sky) and
+`(decRange * imageWidth) / (raRange * imageHeight)` (pixel) — the
+latter is exactly the FEAT-008 v1 formula, resurrected as an opt-in
+alternative.
+
+Both [ImageView.tsx](../tauri-app/app/src/views/ImageView.tsx) (main
+plot + magnifier inset) and
+[PreImageView.tsx](../tauri-app/app/src/views/PreImageView.tsx) read
+`snapToSquare` from context and pass
+`aspectMode={snapToSquare ? 'pixel' : 'sky'}` to ImagePlot. The
+existing per-view `lockAspect` button state is untouched — Snap to
+Square only changes which formula the lock uses when on, it doesn't
+override the on/off toggle.
+
+The Image menu item in
+[MainWindow.tsx](../tauri-app/app/src/views/MainWindow.tsx) renders
+`✓ Snap to Square` when active and `   Snap to Square` when not
+(three leading spaces to keep label position stable). Clicking
+closes the menu and flips the context value. A test in
+[MainWindow.menu.test.tsx](../tauri-app/app/src/__tests__/MainWindow.menu.test.tsx)
+asserts the checkmark toggles on each click.
+
+### Acceptance criteria
+- [x] **Snap to Square** appears in the Image menu, always enabled,
+      unchecked by default.
+- [x] Checkmark toggles on each click; the setting persists across
+      view switches (Pre Image ↔ Image) within the same app session.
+- [x] When checked, ImagePlot uses the pixel-grid scaleratio (FEAT-008
+      v1 formula); when unchecked, the cos(dec) sky-shape scaleratio
+      (FEAT-008 v3 formula).
+- [x] Lock Aspect off-state behavior unchanged — stretches to fill
+      regardless of Snap to Square.
+- [x] Test added in
+      [MainWindow.menu.test.tsx](../tauri-app/app/src/__tests__/MainWindow.menu.test.tsx).
+
+### Out of scope
+- Persisting the toggle across app launches.
+- Surfacing the same toggle on RgbImagePlot.
+- A third "stretch" option in the menu — Lock Aspect's off-state
+  already covers that.
+- Per-view Snap to Square (the global setting is intentional — the
+  user toggles it once and both views agree).
+
+### Open questions
+
 
 ---
 

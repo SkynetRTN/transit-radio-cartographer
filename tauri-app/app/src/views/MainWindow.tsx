@@ -28,6 +28,9 @@ type MenuKey = 'file' | 'image' | 'survey' | 'scan' | 'calibration' | null;
 export function MainWindow() {
   const [auxView, setAuxView] = useState<AuxView>(null);
   const [openMenu, setOpenMenu] = useState<MenuKey>(null);
+  // FEAT-011: tracks whether the Image > Image Display side submenu is open.
+  // Reset to false whenever the parent Image menu closes (see effect below).
+  const [imageDisplayMenuOpen, setImageDisplayMenuOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const menuRef = useRef<HTMLElement | null>(null);
   const {
@@ -53,6 +56,8 @@ export function MainWindow() {
     setSurveyName,
     magnifierHalfSize,
     setMagnifierHalfSize,
+    imageDisplay,
+    setImageDisplay,
   } = useSurvey();
   const {
     scan,
@@ -223,6 +228,12 @@ export function MainWindow() {
     };
     window.addEventListener('mousedown', onClickOutside);
     return () => window.removeEventListener('mousedown', onClickOutside);
+  }, [openMenu]);
+
+  // FEAT-011: when the parent Image menu closes, drop the submenu open state
+  // so re-opening Image doesn't auto-show the Image Display side popup.
+  useEffect(() => {
+    if (openMenu !== 'image') setImageDisplayMenuOpen(false);
   }, [openMenu]);
 
   const pickAndOpenSurvey = useCallback(async () => {
@@ -1372,6 +1383,62 @@ export function MainWindow() {
               >
                 Change Image Name…
               </button>
+              <div className="menu-sep" />
+              <div className="menu-submenu-host">
+                <button
+                  role="menuitem"
+                  aria-haspopup="menu"
+                  aria-expanded={imageDisplayMenuOpen}
+                  onClick={() => setImageDisplayMenuOpen((v) => !v)}
+                  title="Choose how the image's aspect ratio is rendered."
+                >
+                  Image Display ▸
+                </button>
+                {imageDisplayMenuOpen && (
+                  <div role="menu" className="menu-submenu">
+                    <button
+                      role="menuitem"
+                      onClick={() => {
+                        setOpenMenu(null);
+                        setImageDisplay('sky');
+                      }}
+                      title="Apply cos(declination) correction at the image center so the displayed shape matches the true sky. Default."
+                    >
+                      {imageDisplay === 'sky' ? '✓ ' : '   '}Declination Corrected
+                    </button>
+                    <button
+                      role="menuitem"
+                      onClick={() => {
+                        setOpenMenu(null);
+                        setImageDisplay('raw');
+                      }}
+                      title="Lock aspect using only the RA-seconds → degrees conversion (1/240). Accurate at the celestial equator."
+                    >
+                      {imageDisplay === 'raw' ? '✓ ' : '   '}No Declination Correction
+                    </button>
+                    <button
+                      role="menuitem"
+                      onClick={() => {
+                        setOpenMenu(null);
+                        setImageDisplay('pixel');
+                      }}
+                      title="Lock aspect so each pixel cell renders square on screen. Useful for inspecting very thin or wide surveys where the true sky shape is awkward."
+                    >
+                      {imageDisplay === 'pixel' ? '✓ ' : '   '}Snap to Square
+                    </button>
+                    <button
+                      role="menuitem"
+                      onClick={() => {
+                        setOpenMenu(null);
+                        setImageDisplay('stretch');
+                      }}
+                      title="Disable the aspect lock; let the plot stretch to fill the workspace area."
+                    >
+                      {imageDisplay === 'stretch' ? '✓ ' : '   '}Stretch to Fill
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>

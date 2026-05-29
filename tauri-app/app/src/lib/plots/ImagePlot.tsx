@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import Plotly from 'plotly.js-dist-min';
 import type { ImageMeta, ImagePixels, PaletteStop } from '../../ipc/client';
+import type { ImageDisplayMode } from '../../state/survey-context';
 
 export interface ImagePoint {
   ra: number;
@@ -32,9 +33,20 @@ interface Props {
   boxOverlay?: BoxOverlay | null;
   showColorBar?: boolean;
   fixedHeight?: number;
-  // When true, the plot keeps the pixel grid at its intrinsic aspect ratio
-  // (letterboxing/pillarboxing the container) instead of stretching to fill.
-  lockAspectRatio?: boolean;
+  // FEAT-011: selects how the bounded-mode plot lays out its aspect ratio.
+  // - 'sky' (default): cos(dec_center)/240 — true sky shape with cos(dec)
+  //   correction at the image center (FEAT-008 v3 formula).
+  // - 'raw': 1/240 — equator-only sky shape, no cos correction (matches the
+  //   legacy VB app's main paint loop).
+  // - 'pixel': (decRange*w)/(raRange*h) — each pixel cell is square on
+  //   screen. Geometrically wrong but useful for inspecting very thin or
+  //   very wide surveys.
+  // - 'stretch': no scaleanchor; image fills the workspace container in
+  //   both dimensions, ignoring intrinsic aspect.
+  // The first three apply scaleanchor:'y' + constrain:'domain'; 'stretch'
+  // drops the lock entirely. Pixel-mode (no RA/Dec bounds) keeps its
+  // existing scaleanchor with default scaleratio:1.
+  displayMode?: ImageDisplayMode;
 }
 
 function paletteToColorscale(stops: PaletteStop[]): Array<[number, string]> {
@@ -149,7 +161,7 @@ export function ImagePlot({
   boxOverlay,
   showColorBar = true,
   fixedHeight,
-  lockAspectRatio = true,
+  displayMode = 'sky',
 }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
   // Keep the most recent hovered cell so the container's onContextMenu handler
@@ -247,30 +259,42 @@ export function ImagePlot({
     // Aspect-lock branching: in RA/Dec mode a naive `scaleanchor: 'y'` with
     // the default `scaleratio: 1` collapses the image to a horizontal line
     // because RA is stored in sidereal seconds (range ~thousands) and Dec in
-    // degrees (range ~tens). When `lockAspectRatio` is on we use
-    // `scaleratio: cos(dec_center) / 240`:
-    //   - `1/240` converts RA-seconds to RA-degrees (24h of RA = 360°, so
-    //     1 RA-sec = 15" = 1/240°).
-    //   - `cos(dec_center)` accounts for RA-line convergence toward the
-    //     poles — at dec=0° one RA-degree equals one Dec-degree of sky-arc,
-    //     but at dec=60° it's only half. This is the standard rectangular
-    //     projection used by DS9 and most FITS viewers, accurate at the
-    //     image center and increasingly approximate toward top/bottom.
-    //     The legacy VB app (vb/survform.frm:1606-1714) skips this
-    //     correction; FEAT-008 v3 adds it back as a deliberate improvement.
-    // In pixel mode the default `scaleratio: 1` already does the right thing
-    // (one data unit = one pixel cell on each axis).
+    // degrees (range ~tens). FEAT-011 makes the aspect a 4-way choice:
+    //   - 'sky' (default, FEAT-008 v3): `cos(dec_center) / 240`. `1/240`
+    //     converts RA-seconds to RA-degrees (24h of RA = 360°, so
+    //     1 RA-sec = 15" = 1/240°); `cos(dec_center)` accounts for RA-line
+    //     convergence toward the poles. Rectangular projection accurate at
+    //     the image center, used by DS9 and most FITS viewers.
+    //   - 'raw' (FEAT-008 v2): `1/240` only. Equator-only sky shape; matches
+    //     the legacy VB app (vb/survform.frm:1606-1714) which skips cos.
+    //   - 'pixel' ("Snap to Square"): `(decRange * w) / (raRange * h)`. Each
+    //     pixel cell renders square on screen. Wrong geometrically but
+    //     useful for inspecting very thin / wide surveys.
+    //   - 'stretch': no scaleanchor; axes scale independently to fill the
+    //     workspace container.
+    // In pixel mode (no RA/Dec bounds) the default `scaleratio: 1` already
+    // does the right thing (one data unit = one pixel cell on each axis).
     const decCenter = hasBounds ? (meta!.min_dec + meta!.max_dec) / 2 : 0;
+    const boundedScaleratio = (() => {
+      if (!hasBounds) return 1;
+      if (displayMode === 'raw') return 1 / 240;
+      if (displayMode === 'pixel') {
+        return ((meta!.max_dec - meta!.min_dec) * w) /
+          ((meta!.max_ra - meta!.min_ra) * h);
+      }
+      // 'sky' default
+      return Math.cos((decCenter * Math.PI) / 180) / 240;
+    })();
     const lockBounded: Partial<Plotly.LayoutAxis> =
-      hasBounds && lockAspectRatio
+      hasBounds && displayMode !== 'stretch'
         ? {
             scaleanchor: 'y' as const,
-            scaleratio: Math.cos((decCenter * Math.PI) / 180) / 240,
+            scaleratio: boundedScaleratio,
             constrain: 'domain' as const,
           }
         : {};
     const lockPixel: Partial<Plotly.LayoutAxis> =
-      !hasBounds && lockAspectRatio
+      !hasBounds && displayMode !== 'stretch'
         ? { scaleanchor: 'y' as const, constrain: 'domain' as const }
         : {};
     const xaxis: Partial<Plotly.LayoutAxis> = {
@@ -285,7 +309,7 @@ export function ImagePlot({
     const yaxis: Partial<Plotly.LayoutAxis> = {
       title: { text: 'Declination' },
       ...(hasBounds ? {} : { autorange: 'reversed' as const }),
-      ...(lockAspectRatio ? { constrain: 'domain' as const } : {}),
+      ...(displayMode !== 'stretch' ? { constrain: 'domain' as const } : {}),
       ...(decTicks
         ? { tickmode: 'array', tickvals: decTicks.tickvals, ticktext: decTicks.ticktext }
         : {}),
@@ -396,7 +420,7 @@ export function ImagePlot({
       plotEl.removeAllListeners?.('plotly_relayout');
       Plotly.purge(node);
     };
-  }, [image, meta, title, palette, fluxRange, boxOverlay, showColorBar, lockAspectRatio, onHover, onClick]);
+  }, [image, meta, title, palette, fluxRange, boxOverlay, showColorBar, displayMode, onHover, onClick]);
 
   const handleContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
     // Always suppress the browser context menu on the heatmap. Without this,

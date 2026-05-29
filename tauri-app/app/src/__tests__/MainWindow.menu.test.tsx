@@ -107,6 +107,58 @@ test('image submenu items are disabled before an image exists', () => {
   expect(screen.getByRole('menuitem', { name: 'Show Palette…' })).toBeDisabled();
 });
 
+test('Image Display submenu selects between four modes (FEAT-011)', () => {
+  renderApp();
+  // Helper: open Image menu, click the "Image Display ▸" parent to reveal
+  // the side submenu, then return the four mode items.
+  const openSubmenu = () => {
+    fireEvent.click(screen.getByText('Image'));
+    fireEvent.click(screen.getByRole('menuitem', { name: /Image Display/ }));
+  };
+  openSubmenu();
+  // Default state: ✓ on Declination Corrected, none on the other three.
+  const labels = [
+    'Declination Corrected',
+    'No Declination Correction',
+    'Snap to Square',
+    'Stretch to Fill',
+  ];
+  const initial = labels.map((label) =>
+    screen.getByRole('menuitem', { name: new RegExp(label) }),
+  );
+  expect(initial[0].textContent).toMatch(/✓/);
+  expect(initial[1].textContent).not.toMatch(/✓/);
+  expect(initial[2].textContent).not.toMatch(/✓/);
+  expect(initial[3].textContent).not.toMatch(/✓/);
+  // Click No Declination Correction → closes both menus, ✓ moves.
+  fireEvent.click(initial[1]);
+  openSubmenu();
+  expect(
+    screen.getByRole('menuitem', { name: /Declination Corrected/ }).textContent,
+  ).not.toMatch(/✓/);
+  expect(
+    screen.getByRole('menuitem', { name: /No Declination Correction/ }).textContent,
+  ).toMatch(/✓/);
+  // Click Snap to Square → ✓ moves again.
+  fireEvent.click(screen.getByRole('menuitem', { name: /Snap to Square/ }));
+  openSubmenu();
+  expect(
+    screen.getByRole('menuitem', { name: /Snap to Square/ }).textContent,
+  ).toMatch(/✓/);
+  // Click Stretch to Fill → ✓ moves.
+  fireEvent.click(screen.getByRole('menuitem', { name: /Stretch to Fill/ }));
+  openSubmenu();
+  expect(
+    screen.getByRole('menuitem', { name: /Stretch to Fill/ }).textContent,
+  ).toMatch(/✓/);
+  // Back to Declination Corrected.
+  fireEvent.click(screen.getByRole('menuitem', { name: /Declination Corrected/ }));
+  openSubmenu();
+  expect(
+    screen.getByRole('menuitem', { name: /Declination Corrected/ }).textContent,
+  ).toMatch(/✓/);
+});
+
 test('save scan menu items respect hasScan and savePath state', () => {
   renderApp();
   fireEvent.click(screen.getByText('Scan'));
