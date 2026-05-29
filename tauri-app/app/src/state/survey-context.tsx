@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from 'react';
 import {
+  isStaleHandleError,
   rpcClient,
   type ImageMeta,
   type ImagePixels,
@@ -94,6 +95,10 @@ export interface SurveyState {
   revertImageFluxCalibration: () => Promise<void>;
   save: (path?: string) => Promise<string | null>;
   markDirty: () => void;
+  // BUG-012: clear all handle-bearing state after an engine restart and
+  // return whether the survey had unsaved edits at the time. Does not call
+  // closeHandle (the engine that owned those handles is already gone).
+  resetForEngineRestart: () => boolean;
 }
 
 const SurveyContext = createContext<SurveyState | null>(null);
@@ -136,6 +141,10 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   const imageNameRef = useRef<string>(imageName);
   const savePathRef = useRef<string | null>(savePath);
   const acceptedSweepsRef = useRef<Set<number>>(acceptedSweeps);
+  // BUG-012: resetForEngineRestart needs the current dirty flag without
+  // taking a useCallback dep on `dirty` (it would re-create on every edit
+  // and re-fire any useEffect that subscribes to the Tauri restart event).
+  const dirtyRef = useRef<boolean>(dirty);
   useEffect(() => {
     surveyRef.current = survey;
   }, [survey]);
@@ -163,6 +172,51 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     acceptedSweepsRef.current = acceptedSweeps;
   }, [acceptedSweeps]);
+  useEffect(() => {
+    dirtyRef.current = dirty;
+  }, [dirty]);
+
+  const resetForEngineRestart = useCallback((): boolean => {
+    const wasDirty = dirtyRef.current;
+    // Do NOT call closeHandle on any of these — the engine that knew them
+    // is already gone; the call would just return another 1001.
+    setSurvey(null);
+    setWorkspace(null);
+    setWorkspaceHandle(null);
+    setImage(null);
+    setImagePixels(null);
+    setRgbImageState(null);
+    setRgbImagePixels(null);
+    setImagePaletteState(null);
+    setImageFluxRangeState(null);
+    setImageSavePath(null);
+    setImageNameState('image');
+    setViewMode('survey');
+    setCurrentSweepIndex(0);
+    setAcceptedSweeps(new Set());
+    setSavePath(null);
+    setDirty(false);
+    setLoading(false);
+    setReducing(false);
+    setSaving(false);
+    setError(null);
+    return wasDirty;
+  }, []);
+
+  // BUG-012: centralised catch-block helper. Stale-handle errors (race
+  // condition or future engine bug) clear local state and surface a
+  // clear-to-the-user message instead of "1001:unknown handle: N".
+  const handleRpcError = useCallback(
+    (e: unknown) => {
+      if (isStaleHandleError(e)) {
+        resetForEngineRestart();
+        setError('Engine handle expired. Please re-open your files.');
+        return;
+      }
+      handleRpcError(e);
+    },
+    [resetForEngineRestart],
+  );
 
   const open = useCallback(async (path: string) => {
     setLoading(true);
@@ -218,7 +272,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       closeInBackground(prevWorkspaceHandle);
       closeInBackground(prevImage?.handle);
     } catch (e) {
-      setError((e as Error).message);
+      handleRpcError(e);
       setSurvey(null);
       setWorkspace(null);
       setWorkspaceHandle(null);
@@ -287,7 +341,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       // reaches here means the workspace state diverged from disk.
       setDirty(true);
     } catch (e) {
-      setError((e as Error).message);
+      handleRpcError(e);
     }
   }, []);
 
@@ -312,7 +366,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
         setDirty(true);
         if (result.handle !== undefined) closeInBackground(prevHandle);
       } catch (e) {
-        setError((e as Error).message);
+        handleRpcError(e);
       } finally {
         setReducing(false);
       }
@@ -342,7 +396,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       closeInBackground(prevImage?.handle);
       return meta;
     } catch (e) {
-      setError((e as Error).message);
+      handleRpcError(e);
       return null;
     } finally {
       setReducing(false);
@@ -412,7 +466,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       setWorkspace(overview);
       setDirty(true);
     } catch (e) {
-      setError((e as Error).message);
+      handleRpcError(e);
     }
   }, []);
 
@@ -462,7 +516,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       setImageSavePath(r.path);
       return r.path;
     } catch (e) {
-      setError((e as Error).message);
+      handleRpcError(e);
       return null;
     }
   }, []);
@@ -493,7 +547,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
         setImageFluxRangeState({ min: prev.min * slope, max: prev.max * slope });
       }
     } catch (e) {
-      setError((e as Error).message);
+      handleRpcError(e);
     }
   }, []);
 
@@ -511,7 +565,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
         setImageFluxRangeState({ min: prev.min / slope, max: prev.max / slope });
       }
     } catch (e) {
-      setError((e as Error).message);
+      handleRpcError(e);
     }
   }, []);
 
@@ -533,7 +587,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       setDirty(false);
       return result.path;
     } catch (e) {
-      setError((e as Error).message);
+      handleRpcError(e);
       return null;
     } finally {
       setSaving(false);
@@ -586,6 +640,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       revertImageFluxCalibration,
       save,
       markDirty,
+      resetForEngineRestart,
     }),
     [
       loading,
@@ -630,6 +685,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       revertImageFluxCalibration,
       save,
       markDirty,
+      resetForEngineRestart,
     ],
   );
 

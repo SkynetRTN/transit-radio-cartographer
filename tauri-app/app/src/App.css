@@ -570,19 +570,31 @@ body {
 
 /* ---------- transient warning toast ------------ */
 
+/* Centered near the top of the viewport so long messages (engine-restart
+   recovery, RPC errors) are immediately visible — the previous bottom-right
+   placement clipped messages behind the status bar. Click to dismiss. */
 .warning-toast {
   position: fixed;
-  bottom: 16px;
-  right: 16px;
-  max-width: 360px;
-  padding: 10px 14px;
+  top: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(640px, 90vw);
+  padding: 14px 22px;
   background: #fff7cc;
   border: 1px solid #c0a000;
-  border-radius: 4px;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
-  font-size: 12px;
+  border-radius: 6px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+  font-size: 14px;
+  line-height: 1.4;
+  text-align: center;
   cursor: pointer;
   z-index: 200;
+}
+
+.warning-toast.error {
+  background: #ffe6e6;
+  border-color: #b00000;
+  color: #6a0000;
 }
 
 /* ---------- palette editor ------------ */

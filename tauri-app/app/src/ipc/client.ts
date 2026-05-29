@@ -1,9 +1,29 @@
 import { invoke } from '@tauri-apps/api/core';
 
 export type RpcId = number;
-export type RpcError = { code: number; message: string; data?: unknown };
-export type RpcResponse<T> = { jsonrpc: '2.0'; id: RpcId; result?: T; error?: RpcError };
+export type RpcErrorPayload = { code: number; message: string; data?: unknown };
+export type RpcResponse<T> = { jsonrpc: '2.0'; id: RpcId; result?: T; error?: RpcErrorPayload };
 export type BinaryRef = { token: string; size: number };
+
+// BUG-012: RPC errors are now structured so consumers can branch on `.code`
+// (e.g. STALE_HANDLE_CODE) rather than parsing the message string. The
+// `.message` format is preserved as "CODE:MESSAGE" so existing UI surfaces
+// (status-bar error text, toasts) keep rendering unchanged.
+export class RpcError extends Error {
+  readonly code: number;
+  readonly data?: unknown;
+  constructor(code: number, message: string, data?: unknown) {
+    super(`${code}:${message}`);
+    this.name = 'RpcError';
+    this.code = code;
+    this.data = data;
+  }
+}
+
+export const STALE_HANDLE_CODE = 1001;
+export function isStaleHandleError(e: unknown): boolean {
+  return e instanceof RpcError && e.code === STALE_HANDLE_CODE;
+}
 
 export interface WorkspaceOverview {
   name: string;
@@ -275,7 +295,7 @@ export class RpcClient {
       setTimeout(() => rej(new Error('sidecar_timeout')), this.timeoutMs),
     );
     const resp = await Promise.race([p, timeout]);
-    if (resp.error) throw new Error(`${resp.error.code}:${resp.error.message}`);
+    if (resp.error) throw new RpcError(resp.error.code, resp.error.message, resp.error.data);
     if (resp.result === undefined) throw new Error('missing_result');
     return resp.result;
   }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { listen } from '@tauri-apps/api/event';
 import { SurveyView } from './SurveyView';
 import { ScanView } from './ScanView';
 import { CalibrateScanView } from './CalibrateScanView';
@@ -58,6 +59,7 @@ export function MainWindow() {
     setMagnifierHalfSize,
     imageDisplay,
     setImageDisplay,
+    resetForEngineRestart: resetSurveyForEngineRestart,
   } = useSurvey();
   const {
     scan,
@@ -73,6 +75,7 @@ export function MainWindow() {
     setScanName,
     peakFitKind,
     setPeakFitKind,
+    resetForEngineRestart: resetScanForEngineRestart,
   } = useScan();
   const fluxCal = useFluxCal();
   const hasSurvey = survey !== null;
@@ -190,6 +193,31 @@ export function MainWindow() {
   // user clicks an Open/New button. `onConfirm` runs on OK; Cancel just
   // dismisses without changing state.
   const [discardPrompt, setDiscardPrompt] = useState<{ onConfirm: () => void } | null>(null);
+  // Tracks the last error message the user clicked away. Survey/scan context
+  // errors auto-clear on the next successful operation, but we don't want to
+  // re-show a toast for the same error message after it has been dismissed.
+  const [dismissedError, setDismissedError] = useState<string | null>(null);
+
+  // BUG-012: the Rust harness emits `engine_restarted` whenever the Python
+  // sidecar dies and gets respawned. The handles every context holds are
+  // now stale; clear them and surface a single toast. Dirty-aware so the
+  // user knows they lost unsaved edits (the sidecar crashing destroyed
+  // them; we cannot recover by re-opening from the on-disk path).
+  useEffect(() => {
+    const unlistenPromise = listen('engine_restarted', () => {
+      const surveyWasDirty = resetSurveyForEngineRestart();
+      const scanWasDirty = resetScanForEngineRestart();
+      const wasDirty = surveyWasDirty || scanWasDirty;
+      setWarning(
+        wasDirty
+          ? 'Engine restarted. Unsaved changes could not be recovered. Please re-open your files.'
+          : 'Engine restarted; please re-open your files.',
+      );
+    });
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, [resetSurveyForEngineRestart, resetScanForEngineRestart]);
 
   // Names of currently-loaded workspaces, in display order. Scalar and RGB
   // image are mutually exclusive in the context, so collapse to one "Image".
@@ -1604,13 +1632,12 @@ export function MainWindow() {
             </div>
           )}
         </div>
+
       </nav>
 
-      {(loading || error || scanLoading || scanError || (survey && workspace) || (scan && scanOverview)) && (
+      {(loading || scanLoading || (survey && workspace) || (scan && scanOverview)) && (
         <div className="status-bar" role="status">
           {(loading || scanLoading) && <span>Loading…</span>}
-          {error && !loading && <span className="error">Error: {error}</span>}
-          {scanError && !scanLoading && <span className="error">Error: {scanError}</span>}
           {!loading && !error && survey && workspace && (
             <span>
               {workspace.name}
@@ -1747,6 +1774,23 @@ export function MainWindow() {
           {warning}
         </div>
       )}
+      {/* Survey/scan RPC errors are rendered as a centered toast (red variant)
+          so long messages — e.g. "Engine handle expired. Please re-open your
+          files." — are readable. Clicking it pins the dismissal until the
+          next, different error message arrives. */}
+      {(() => {
+        const errorMessage = error ?? scanError ?? null;
+        if (!errorMessage || errorMessage === dismissedError) return null;
+        return (
+          <div
+            className="warning-toast error"
+            role="status"
+            onClick={() => setDismissedError(errorMessage)}
+          >
+            {errorMessage}
+          </div>
+        );
+      })()}
       {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
 
       <footer style={{ display: 'none' }}>

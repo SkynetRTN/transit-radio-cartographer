@@ -50,8 +50,9 @@ fn workspace_dir() -> PathBuf {
 
 #[tauri::command]
 fn rpc_request(
+    app: tauri::AppHandle,
     bridge: tauri::State<'_, SidecarBridge>,
     payload: serde_json::Value,
 ) -> serde_json::Value {
-    bridge.rpc(payload)
+    bridge.rpc(&app, payload)
 }

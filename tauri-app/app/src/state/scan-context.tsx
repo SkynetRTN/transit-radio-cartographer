@@ -8,7 +8,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { rpcClient, type ScanMeta, type ScanOverview } from '../ipc/client';
+import { isStaleHandleError, rpcClient, type ScanMeta, type ScanOverview } from '../ipc/client';
 
 export type ScanViewMode = 'scan' | 'calibrate-scan';
 
@@ -44,6 +44,9 @@ export interface ScanState {
   save: (path?: string) => Promise<string | null>;
   peakFitKind: PeakFitKind;
   setPeakFitKind: (kind: PeakFitKind) => void;
+  // BUG-012: clear all handle-bearing state after an engine restart and
+  // return whether the scan had unsaved edits at the time.
+  resetForEngineRestart: () => boolean;
 }
 
 const ScanContext = createContext<ScanState | null>(null);
@@ -67,12 +70,44 @@ export function ScanProvider({ children }: { children: ReactNode }) {
 
   const handleRef = useRef<number | null>(handle);
   const savePathRef = useRef<string | null>(savePath);
+  // BUG-012: see survey-context — read dirty out-of-band so the reset
+  // callback can have empty deps and not retrigger restart-event effects.
+  const dirtyRef = useRef<boolean>(dirty);
   useEffect(() => {
     handleRef.current = handle;
   }, [handle]);
   useEffect(() => {
     savePathRef.current = savePath;
   }, [savePath]);
+  useEffect(() => {
+    dirtyRef.current = dirty;
+  }, [dirty]);
+
+  const resetForEngineRestart = useCallback((): boolean => {
+    const wasDirty = dirtyRef.current;
+    setScan(null);
+    setOverview(null);
+    setHandle(null);
+    setViewMode('scan');
+    setSavePath(null);
+    setDirty(false);
+    setLoading(false);
+    setSaving(false);
+    setError(null);
+    return wasDirty;
+  }, []);
+
+  const handleRpcError = useCallback(
+    (e: unknown) => {
+      if (isStaleHandleError(e)) {
+        resetForEngineRestart();
+        setError('Engine handle expired. Please re-open your files.');
+        return;
+      }
+      handleRpcError(e);
+    },
+    [resetForEngineRestart],
+  );
 
   const open = useCallback(async (path: string) => {
     setLoading(true);
@@ -91,7 +126,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       setDirty(false);
       closeInBackground(prev);
     } catch (e) {
-      setError((e as Error).message);
+      handleRpcError(e);
       setScan(null);
       setOverview(null);
       setHandle(null);
@@ -124,7 +159,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       setOverview(overview);
       setDirty(true);
     } catch (e) {
-      setError((e as Error).message);
+      handleRpcError(e);
     }
   }, []);
 
@@ -135,7 +170,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       const o = await rpcClient.getScanOverview(h);
       setOverview(o);
     } catch (e) {
-      setError((e as Error).message);
+      handleRpcError(e);
     }
   }, []);
 
@@ -152,7 +187,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       setDirty(false);
       return result.path;
     } catch (e) {
-      setError((e as Error).message);
+      handleRpcError(e);
       return null;
     } finally {
       setSaving(false);
@@ -180,6 +215,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       save,
       peakFitKind,
       setPeakFitKind,
+      resetForEngineRestart,
     }),
     [
       loading,
@@ -198,6 +234,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       refreshOverview,
       save,
       peakFitKind,
+      resetForEngineRestart,
     ],
   );
 

@@ -4,6 +4,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Mutex;
+use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppError {
@@ -48,6 +49,11 @@ pub struct PythonSidecar {
     bundled_exe: Option<PathBuf>,
     command_override: Option<Vec<String>>,
     io: Option<ChildIo>,
+    // BUG-012: distinguish first-ever spawn (no event) from a respawn
+    // after a crash (emit `engine_restarted`). `restart_signal` carries
+    // the new child's pid until the bridge drains it via take_restart_signal.
+    started_at_least_once: bool,
+    restart_signal: Option<u32>,
 }
 
 impl PythonSidecar {
@@ -70,6 +76,23 @@ impl PythonSidecar {
             bundled_exe,
             command_override,
             io: None,
+            started_at_least_once: false,
+            restart_signal: None,
+        }
+    }
+
+    pub fn take_restart_signal(&mut self) -> Option<u32> {
+        self.restart_signal.take()
+    }
+
+    // BUG-012: first call marks "we've started"; every subsequent call arms
+    // the restart signal with the new child's pid. Kept as a small helper so
+    // the unit test exercises the same code as the production `start()` path.
+    fn arm_restart_signal(&mut self, pid: u32) {
+        if self.started_at_least_once {
+            self.restart_signal = Some(pid);
+        } else {
+            self.started_at_least_once = true;
         }
     }
 
@@ -172,6 +195,7 @@ impl SidecarOps for PythonSidecar {
             code: "spawn_failed".into(),
             message: format!("failed to spawn sidecar: {err}"),
         })?;
+        let pid = child.id();
         let stdin = child.stdin.take().ok_or_else(|| AppError {
             code: "stdin_unavailable".into(),
             message: "sidecar stdin pipe missing".into(),
@@ -185,6 +209,10 @@ impl SidecarOps for PythonSidecar {
             stdin,
             stdout: BufReader::new(stdout),
         });
+        // BUG-012: First spawn -> just remember we've started; do not emit a
+        // restart event. Any subsequent spawn is by definition a restart, so
+        // arm the signal for the bridge to drain and emit `engine_restarted`.
+        self.arm_restart_signal(pid);
         Ok(())
     }
 
@@ -215,13 +243,21 @@ impl SidecarBridge {
         }
     }
 
-    pub fn rpc(&self, payload: Value) -> Value {
+    pub fn rpc(&self, app: &AppHandle, payload: Value) -> Value {
         let id = payload.get("id").cloned().unwrap_or(Value::Null);
         let mut sidecar = match self.inner.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        match sidecar.send(&payload) {
+        let result = sidecar.send(&payload);
+        // BUG-012: drain the restart signal AFTER send() so we emit
+        // `engine_restarted` whether the triggering call ultimately succeeded
+        // or returned a transport error (sidecar_eof / write_failed / etc.).
+        if let Some(pid) = sidecar.take_restart_signal() {
+            let _ = app.emit("engine_restarted", json!({ "pid": pid }));
+        }
+        drop(sidecar);
+        match result {
             Ok(response) => response,
             Err(err) => json!({
                 "jsonrpc": "2.0",
@@ -235,5 +271,46 @@ impl SidecarBridge {
         if let Ok(mut sidecar) = self.inner.lock() {
             sidecar.stop();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // BUG-012: the restart signal must NOT fire on the first spawn — that's
+    // a normal app start, not a recovery. Only respawns (after a crash) are
+    // user-visible "engine restarted" events.
+    #[test]
+    fn first_start_does_not_arm_restart_signal() {
+        let mut s = PythonSidecar::new(PathBuf::from("."), None);
+        assert!(s.take_restart_signal().is_none());
+        s.arm_restart_signal(101);
+        assert!(
+            s.take_restart_signal().is_none(),
+            "first spawn must not arm the signal"
+        );
+    }
+
+    #[test]
+    fn second_start_arms_signal_with_new_pid() {
+        let mut s = PythonSidecar::new(PathBuf::from("."), None);
+        s.arm_restart_signal(101); // first spawn
+        s.arm_restart_signal(202); // restart
+        assert_eq!(s.take_restart_signal(), Some(202));
+        assert!(
+            s.take_restart_signal().is_none(),
+            "signal drains once — bridge must not double-emit"
+        );
+    }
+
+    #[test]
+    fn restart_signal_re_arms_on_subsequent_crashes() {
+        let mut s = PythonSidecar::new(PathBuf::from("."), None);
+        s.arm_restart_signal(101); // first spawn
+        s.arm_restart_signal(202); // restart 1
+        let _ = s.take_restart_signal();
+        s.arm_restart_signal(303); // restart 2 after the bridge already drained
+        assert_eq!(s.take_restart_signal(), Some(303));
     }
 }
