@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { rpcClient, type ScanViewPayload } from '../ipc/client';
 import { useScan } from '../state/scan-context';
+import { useTheme } from '../state/theme-context';
 import { PointScatter, type Point } from '../lib/plots/PointScatter';
+import { dataColors } from '../lib/plots/plot-theme';
 
 function formatRa(seconds: number): string {
   // RA in `.md1` is given in arc-time seconds (matches the survey format).
@@ -45,6 +47,8 @@ export function ScanView() {
     markDirty,
     peakFitKind,
   } = useScan();
+  const { theme } = useTheme();
+  const dc = useMemo(() => dataColors(theme), [theme]);
   const [view, setView] = useState<ScanViewPayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -125,8 +129,8 @@ export function ScanView() {
       const kept = pts.filter((_, i) => view.source.mask[i]);
       const cut = pts.filter((_, i) => !view.source.mask[i]);
       return [
-        { points: cut, color: '#d80000', name: 'cut', faded: true },
-        { points: kept, color: '#d80000', name: 'source' },
+        { points: cut, color: dc.seriesPrimary, name: 'cut', faded: true },
+        { points: kept, color: dc.seriesPrimary, name: 'source' },
       ];
     }
     const make = (
@@ -147,13 +151,13 @@ export function ScanView() {
     // through `verticalLines` are what tell the user where the cal-on /
     // cal-off / source blocks begin and end.
     return [
-      { points: make(view.initial_on.ra, view.initial_on.dec, view.initial_on.flux, view.initial_on.mask), color: '#d80000', name: 'initial-on' },
-      { points: make(view.initial_off.ra, view.initial_off.dec, view.initial_off.flux, view.initial_off.mask), color: '#d80000', name: 'initial-off' },
-      { points: make(view.source.ra, view.source.dec, view.source.flux, view.source.mask), color: '#d80000', name: 'source' },
-      { points: make(view.terminal_on.ra, view.terminal_on.dec, view.terminal_on.flux, view.terminal_on.mask), color: '#d80000', name: 'terminal-on' },
-      { points: make(view.terminal_off.ra, view.terminal_off.dec, view.terminal_off.flux, view.terminal_off.mask), color: '#d80000', name: 'terminal-off' },
+      { points: make(view.initial_on.ra, view.initial_on.dec, view.initial_on.flux, view.initial_on.mask), color: dc.seriesPrimary, name: 'initial-on' },
+      { points: make(view.initial_off.ra, view.initial_off.dec, view.initial_off.flux, view.initial_off.mask), color: dc.seriesPrimary, name: 'initial-off' },
+      { points: make(view.source.ra, view.source.dec, view.source.flux, view.source.mask), color: dc.seriesPrimary, name: 'source' },
+      { points: make(view.terminal_on.ra, view.terminal_on.dec, view.terminal_on.flux, view.terminal_on.mask), color: dc.seriesPrimary, name: 'terminal-on' },
+      { points: make(view.terminal_off.ra, view.terminal_off.dec, view.terminal_off.flux, view.terminal_off.mask), color: dc.seriesPrimary, name: 'terminal-off' },
     ];
-  }, [view]);
+  }, [view, dc]);
 
   const decSeries = useMemo(() => {
     if (!view) return [];
@@ -168,20 +172,20 @@ export function ScanView() {
       const kept = pts.filter((_, i) => view.source.mask[i]);
       const cut = pts.filter((_, i) => !view.source.mask[i]);
       return [
-        { points: cut, color: '#1855c0', name: 'cut', faded: true },
-        { points: kept, color: '#1855c0', name: 'source' },
+        { points: cut, color: dc.seriesSecondary, name: 'cut', faded: true },
+        { points: kept, color: dc.seriesSecondary, name: 'source' },
       ];
     }
     const make = (raArr: number[], decArr: number[], fluxArr: number[], mask: boolean[]): Point[] =>
       raArr.map((ra, i) => ({ x: ra, y: decArr[i], ra, dec: decArr[i], flux: fluxArr[i] })).filter((_, i) => mask[i]);
     return [
-      { points: make(view.initial_on.ra, view.initial_on.dec, view.initial_on.flux, view.initial_on.mask), color: '#1855c0', name: 'initial-on' },
-      { points: make(view.initial_off.ra, view.initial_off.dec, view.initial_off.flux, view.initial_off.mask), color: '#1855c0', name: 'initial-off' },
-      { points: make(view.source.ra, view.source.dec, view.source.flux, view.source.mask), color: '#1855c0', name: 'source' },
-      { points: make(view.terminal_on.ra, view.terminal_on.dec, view.terminal_on.flux, view.terminal_on.mask), color: '#1855c0', name: 'terminal-on' },
-      { points: make(view.terminal_off.ra, view.terminal_off.dec, view.terminal_off.flux, view.terminal_off.mask), color: '#1855c0', name: 'terminal-off' },
+      { points: make(view.initial_on.ra, view.initial_on.dec, view.initial_on.flux, view.initial_on.mask), color: dc.seriesSecondary, name: 'initial-on' },
+      { points: make(view.initial_off.ra, view.initial_off.dec, view.initial_off.flux, view.initial_off.mask), color: dc.seriesSecondary, name: 'initial-off' },
+      { points: make(view.source.ra, view.source.dec, view.source.flux, view.source.mask), color: dc.seriesSecondary, name: 'source' },
+      { points: make(view.terminal_on.ra, view.terminal_on.dec, view.terminal_on.flux, view.terminal_on.mask), color: dc.seriesSecondary, name: 'terminal-on' },
+      { points: make(view.terminal_off.ra, view.terminal_off.dec, view.terminal_off.flux, view.terminal_off.mask), color: dc.seriesSecondary, name: 'terminal-off' },
     ];
-  }, [view]);
+  }, [view, dc]);
 
   // Pre-cal vertical separator lines (legacy `vb/scanform.frm:1385-1396`):
   // at the midpoint between cal-on/off and at each cal/source boundary.
@@ -398,11 +402,11 @@ export function ScanView() {
           { x: pendingBaselinePoint.ra, y: pendingBaselinePoint.flux },
           { x: hoverPoint.ra, y: hoverPoint.flux },
         ],
-        color: '#c020c0',
+        color: dc.baseline,
         width: 1,
       },
     ];
-  }, [mode.kind, pendingBaselinePoint, hoverPoint]);
+  }, [mode.kind, pendingBaselinePoint, hoverPoint, dc]);
 
   if (!scan || !overview || handle === null) {
     return (
@@ -421,7 +425,7 @@ export function ScanView() {
     ? [
         {
           points: pendingPeakFit.ra.map((ra, i) => ({ x: ra, y: pendingPeakFit.flux[i] })),
-          color: '#0080ff',
+          color: dc.peak,
           width: 2,
         },
       ]
@@ -488,7 +492,7 @@ export function ScanView() {
                         : null
                     }
                     highlightRange={dragRange}
-                    highlightColor={mode.kind === 'peak' ? '#5fb7ff' : undefined}
+                    highlightColor={mode.kind === 'peak' ? dc.peakSoft : undefined}
                     onDragStart={fluxDragHandlers.onDragStart}
                     onDragUpdate={fluxDragHandlers.onDragUpdate}
                     onDragEnd={fluxDragHandlers.onDragEnd}

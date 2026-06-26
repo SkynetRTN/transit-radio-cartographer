@@ -4,6 +4,7 @@ import { ErrorBoundary } from './views/ErrorBoundary';
 import { SurveyProvider, useSurvey } from './state/survey-context';
 import { ScanProvider, useScan } from './state/scan-context';
 import { FluxCalibrationProvider } from './state/flux-cal-context';
+import { ThemeProvider } from './state/theme-context';
 
 function ErrorFallback({ error, reset }: { error: Error | null; reset: () => void }) {
   // Reset hook fires inside the providers so it can wipe every workspace.
@@ -31,16 +32,18 @@ function ErrorFallback({ error, reset }: { error: Error | null; reset: () => voi
 
 export default function App() {
   return (
-    <SurveyProvider>
-      <ScanProvider>
-        <FluxCalibrationProvider>
-          <ErrorBoundary
-            fallback={({ error, reset }) => <ErrorFallback error={error} reset={reset} />}
-          >
-            <MainWindow />
-          </ErrorBoundary>
-        </FluxCalibrationProvider>
-      </ScanProvider>
-    </SurveyProvider>
+    <ThemeProvider>
+      <SurveyProvider>
+        <ScanProvider>
+          <FluxCalibrationProvider>
+            <ErrorBoundary
+              fallback={({ error, reset }) => <ErrorFallback error={error} reset={reset} />}
+            >
+              <MainWindow />
+            </ErrorBoundary>
+          </FluxCalibrationProvider>
+        </ScanProvider>
+      </SurveyProvider>
+    </ThemeProvider>
   );
 }

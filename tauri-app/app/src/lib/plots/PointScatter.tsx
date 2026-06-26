@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react';
 import Plotly from 'plotly.js-dist-min';
+import { useTheme } from '../../state/theme-context';
+import { plotChrome, dataColors } from './plot-theme';
 
 export interface Point {
   x: number;
@@ -76,7 +78,9 @@ function buildShapes(
   highlightRange?: { x0: number; x1: number } | null,
   verticalLines?: number[],
   highlightYRange?: { y0: number; y1: number } | null,
-  highlightColor: string = '#00c000',
+  highlightColor: string = '#22c55e',
+  cursorColor: string = '#475569',
+  bandColor: string = '#fbbf24',
 ): Partial<Plotly.Shape>[] {
   const shapes: Partial<Plotly.Shape>[] = [];
   if (highlightRange) {
@@ -95,7 +99,8 @@ function buildShapes(
     });
   }
   if (highlightYRange) {
-    // Yellow horizontal band — matches the legacy "Select Declination" overlay.
+    // Amber horizontal band — the modern take on the legacy "Select
+    // Declination" overlay.
     shapes.push({
       type: 'rect',
       xref: 'paper',
@@ -104,7 +109,7 @@ function buildShapes(
       x1: 1,
       y0: highlightYRange.y0,
       y1: highlightYRange.y1,
-      fillcolor: '#f7e000',
+      fillcolor: bandColor,
       opacity: 0.55,
       line: { width: 0 },
       layer: 'above',
@@ -120,7 +125,7 @@ function buildShapes(
         x1: x,
         y0: 0,
         y1: 1,
-        line: { color: '#000', width: 1 },
+        line: { color: cursorColor, width: 1 },
       });
     }
   }
@@ -156,6 +161,7 @@ export function PointScatter({
   xTickFormatter,
 }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
+  const { theme } = useTheme();
   const hoverRef = useRef(onHover);
   const clickRef = useRef(onPointClick);
   const emptyClickRef = useRef(onEmptyClick);
@@ -186,11 +192,14 @@ export function PointScatter({
     const node = ref.current;
     if (!node) return;
 
+    const chrome = plotChrome(theme);
+    const dc = dataColors(theme);
     // `faded` series (cut / outside-of-Dec-selection samples) render as
-    // light-grey outlined squares so they stay visible without competing
-    // with the kept red/blue series — important for dense scans where a
-    // dimmed-red diamond is hard to tell apart from the kept-red ones.
-    const FADED_COLOR = '#c8c8c8';
+    // dim outlined squares so they stay visible without competing with the
+    // kept red/blue series — important for dense scans where a dimmed-red
+    // diamond is hard to tell apart from the kept-red ones. The neutral is
+    // theme-aware so it reads correctly on both light and dark backgrounds.
+    const FADED_COLOR = chrome.fadedColor;
     const traces: Plotly.Data[] = series.map((s) => {
       const color = s.faded ? FADED_COLOR : s.color;
       return {
@@ -226,7 +235,7 @@ export function PointScatter({
         marker: {
           symbol: 'circle-open',
           size: 16,
-          line: { color: '#f5b400', width: 3 },
+          line: { color: dc.pinned, width: 3 },
         },
         hoverinfo: 'skip',
         showlegend: false,
@@ -243,7 +252,7 @@ export function PointScatter({
         marker: {
           symbol: 'circle-open',
           size: 16,
-          line: { color: highlightPoint.color ?? '#0080ff', width: 3 },
+          line: { color: highlightPoint.color ?? dc.peak, width: 3 },
         },
         hoverinfo: 'skip',
         showlegend: false,
@@ -258,7 +267,7 @@ export function PointScatter({
           y: line.points.map((p) => p.y),
           type: 'scatter',
           mode: 'lines',
-          line: { color: line.color ?? '#c020c0', width: line.width ?? 2 },
+          line: { color: line.color ?? dc.baseline, width: line.width ?? 2 },
           hoverinfo: 'skip',
           showlegend: false,
           name: 'baseline',
@@ -289,18 +298,19 @@ export function PointScatter({
 
     const layout: Partial<Plotly.Layout> = {
       margin: { l: 56, r: 16, t: 8, b: showXTicks ? 36 : 16 },
-      paper_bgcolor: '#ffffff',
-      plot_bgcolor: '#ffffff',
-      font: { family: 'Tahoma, "Segoe UI", sans-serif', size: 11, color: '#111' },
+      paper_bgcolor: chrome.paperBg,
+      plot_bgcolor: chrome.plotBg,
+      font: { family: 'Tahoma, "Segoe UI", sans-serif', size: 11, color: chrome.fontColor },
       xaxis: {
         title: { text: xAxisLabel, font: { size: 12 } },
         zeroline: false,
         showgrid: true,
-        gridcolor: '#e6e6e6',
+        gridcolor: chrome.gridColor,
         gridwidth: 1,
         ticks: showXTicks ? 'outside' : '',
         showticklabels: showXTicks,
-        linecolor: '#000',
+        linecolor: chrome.axisColor,
+        tickcolor: chrome.axisColor,
         mirror: true,
         ...(fixedXRange ? { range: fixedXRange, autorange: false } : {}),
         ...(xTickArrays
@@ -311,14 +321,22 @@ export function PointScatter({
         title: { text: yAxisLabel, font: { size: 12 } },
         zeroline: false,
         showgrid: true,
-        gridcolor: '#e6e6e6',
+        gridcolor: chrome.gridColor,
         gridwidth: 1,
         ticks: 'outside',
-        linecolor: '#000',
+        linecolor: chrome.axisColor,
+        tickcolor: chrome.axisColor,
         mirror: true,
         ...(fixedYRange ? { range: fixedYRange, autorange: false } : {}),
       },
-      shapes: buildShapes(highlightRange, verticalLines, highlightYRange, highlightColor),
+      shapes: buildShapes(
+        highlightRange,
+        verticalLines,
+        highlightYRange,
+        highlightColor ?? dc.selectionFill,
+        chrome.cursorColor,
+        dc.selectionBand,
+      ),
       showlegend: false,
       hovermode: 'closest',
       dragmode: false,
@@ -382,7 +400,7 @@ export function PointScatter({
       node.removeEventListener('click', onDomClick);
       Plotly.purge(node);
     };
-  }, [series, xAxisLabel, yAxisLabel, fixedXRange, fixedYRange, showXTicks, pinnedPoint, highlightPoint, overlayLines, xTickFormatter]);
+  }, [series, xAxisLabel, yAxisLabel, fixedXRange, fixedYRange, showXTicks, pinnedPoint, highlightPoint, overlayLines, xTickFormatter, theme]);
 
   // ── Effect 2: cheap shape-only updates via relayout. This is what makes the
   //   drag-highlight follow the cursor smoothly without rebuilding the plot.
@@ -392,9 +410,16 @@ export function PointScatter({
     const internal = node as unknown as LayoutInternal;
     if (!internal._fullLayout) return; // plot not initialised yet
     Plotly.relayout(node, {
-      shapes: buildShapes(highlightRange, verticalLines, highlightYRange, highlightColor),
+      shapes: buildShapes(
+        highlightRange,
+        verticalLines,
+        highlightYRange,
+        highlightColor ?? dataColors(theme).selectionFill,
+        plotChrome(theme).cursorColor,
+        dataColors(theme).selectionBand,
+      ),
     }).catch(() => {});
-  }, [highlightRange, verticalLines, highlightYRange, highlightColor]);
+  }, [highlightRange, verticalLines, highlightYRange, highlightColor, theme]);
 
   // ── Effect 3: drag-to-cut. Attached once and always live so cursor and
   //   listener state can flip with dragEnabled (read via ref) without

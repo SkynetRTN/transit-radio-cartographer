@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { rpcClient, type CalibrationView, type CalibrationBracket } from '../ipc/client';
 import { useSurvey } from '../state/survey-context';
 import { PointScatter, type Point } from '../lib/plots/PointScatter';
+import { dataColors } from '../lib/plots/plot-theme';
+import { useTheme } from '../state/theme-context';
 
 function formatRa(volts: number): string {
   const total = Math.max(0, volts);
@@ -104,6 +106,8 @@ function splitKeptCut(points: ScatterPoint[], color: string) {
 
 export function CalibrateSurveyView() {
   const { workspace, workspaceHandle, setViewMode, refreshWorkspace } = useSurvey();
+  const { theme } = useTheme();
+  const dc = dataColors(theme);
   const [view, setView] = useState<CalibrationView | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -316,7 +320,7 @@ export function CalibrateSurveyView() {
                   {error && <div className="plot-status error">{error}</div>}
                   {view && initialLayout && (
                     <PointScatter
-                      series={splitKeptCut(initialLayout.fluxPoints, '#d80000')}
+                      series={splitKeptCut(initialLayout.fluxPoints, dc.seriesPrimary)}
                       xAxisLabel=""
                       yAxisLabel=""
                       onHover={handleHover}
@@ -346,7 +350,7 @@ export function CalibrateSurveyView() {
                 <div className="plot-cell">
                   {view && terminalLayout && (
                     <PointScatter
-                      series={splitKeptCut(terminalLayout.fluxPoints, '#d80000')}
+                      series={splitKeptCut(terminalLayout.fluxPoints, dc.seriesPrimary)}
                       xAxisLabel=""
                       yAxisLabel=""
                       onHover={handleHover}
@@ -387,7 +391,7 @@ export function CalibrateSurveyView() {
                 <div className="plot-cell">
                   {view && initialLayout && (
                     <PointScatter
-                      series={splitKeptCut(initialLayout.decPoints, '#1855c0')}
+                      series={splitKeptCut(initialLayout.decPoints, dc.seriesSecondary)}
                       xAxisLabel=""
                       yAxisLabel=""
                       onHover={handleHover}
@@ -423,7 +427,7 @@ export function CalibrateSurveyView() {
                 <div className="plot-cell">
                   {view && terminalLayout && (
                     <PointScatter
-                      series={splitKeptCut(terminalLayout.decPoints, '#1855c0')}
+                      series={splitKeptCut(terminalLayout.decPoints, dc.seriesSecondary)}
                       xAxisLabel=""
                       yAxisLabel=""
                       onHover={handleHover}

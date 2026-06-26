@@ -37,10 +37,11 @@ vi.mock('../ipc/client', () => ({
 }));
 vi.mock('../lib/plots/SweepPlot', () => ({ SweepPlot: () => null }));
 vi.mock('../lib/plots/ImagePlot', () => ({ ImagePlot: () => null }));
-// Headless PointScatter mock: exposes the per-panel point-click and drag
-// callbacks as hidden buttons keyed off `testId`. Lets the workflow tests
-// drive a Remove RFI baseline draw on the top panel and a restore-drag on
-// the bottom panel without a real Plotly render.
+// Headless PointScatter mock: exposes the per-panel point-click and free
+// cursor-click callbacks as hidden buttons keyed off `testId`. Lets the
+// workflow tests drive a Remove RFI baseline draw (two snapped point clicks)
+// on the top panel and a recover-line draw (two free cursor clicks) on the
+// bottom panel without a real Plotly render.
 vi.mock('../lib/plots/PointScatter', () => ({
   PointScatter: (props: {
     testId?: string;
@@ -52,9 +53,8 @@ vi.mock('../lib/plots/PointScatter', () => ({
       flux: number;
       sampleIndex?: number;
     }) => void;
-    onDragStart?: (v: number) => void;
-    onDragUpdate?: (v: number) => void;
-    onDragEnd?: () => void;
+    onCursorClick?: (x: number, y: number) => void;
+    onCursorMove?: (x: number, y: number) => void;
   }) => {
     const id = props.testId ?? 'plot';
     return (
@@ -71,17 +71,15 @@ vi.mock('../lib/plots/PointScatter', () => ({
             props.onPointClick?.({ x: 12, y: 0.5, ra: 3, dec: 12, flux: 0.5, sampleIndex: 2 })
           }
         />
+        {/* Free recovery-line endpoints drawn at removed≈0 across the full
+            dec span [9, 13], which fully recovers every removed sample. */}
         <button
-          data-testid={`${id}-drag-start`}
-          onClick={() => props.onDragStart?.(9)}
+          data-testid={`${id}-line-first`}
+          onClick={() => props.onCursorClick?.(9, 0)}
         />
         <button
-          data-testid={`${id}-drag-update`}
-          onClick={() => props.onDragUpdate?.(13)}
-        />
-        <button
-          data-testid={`${id}-drag-end`}
-          onClick={() => props.onDragEnd?.()}
+          data-testid={`${id}-line-second`}
+          onClick={() => props.onCursorClick?.(13, 0)}
         />
       </div>
     );
@@ -220,7 +218,7 @@ test('Remove RFI toggles the per-sweep RFI draw mode (FEAT-004)', async () => {
   expect(screen.getByText(/Remove RFI \(click/)).toBeInTheDocument();
 });
 
-test('Drag-region on Removed plot restores points while Remove RFI stays selected (BUG-004)', async () => {
+test('Recovery line on Removed plot recovers points while Remove RFI stays selected (BUG-004)', async () => {
   const calibrated: WorkspaceOverview = { ...workspaceOverview, calibrated: true };
   await act(async () => {
     render(
@@ -253,14 +251,14 @@ test('Drag-region on Removed plot restores points while Remove RFI stays selecte
     ).not.toBeInTheDocument(),
   );
 
-  // Drag a 9..13 region across the Removed panel — covers every removed sample.
-  fireEvent.click(screen.getByTestId('baseline-plot-drag-start'));
-  fireEvent.click(screen.getByTestId('baseline-plot-drag-update'));
+  // Draw a recovery line at removed≈0 across the dec span [9, 13] on the
+  // Removed panel — fully recovers every removed sample (residual → 0).
+  fireEvent.click(screen.getByTestId('baseline-plot-line-first'));
   await act(async () => {
-    fireEvent.click(screen.getByTestId('baseline-plot-drag-end'));
+    fireEvent.click(screen.getByTestId('baseline-plot-line-second'));
   });
 
-  // Placeholder is back → every removed sample was restored.
+  // Placeholder is back → every removed sample was recovered.
   await waitFor(() =>
     expect(
       screen.getByText(/Removed samples appear here/),
@@ -270,7 +268,7 @@ test('Drag-region on Removed plot restores points while Remove RFI stays selecte
   expect(screen.getByText(/Remove RFI \(click/)).toBeInTheDocument();
 });
 
-test('Undo button reverts the last Remove RFI removal or restore', async () => {
+test('Undo button reverts the last Remove RFI removal or recovery', async () => {
   const calibrated: WorkspaceOverview = { ...workspaceOverview, calibrated: true };
   await act(async () => {
     render(
@@ -304,11 +302,10 @@ test('Undo button reverts the last Remove RFI removal or restore', async () => {
   );
   expect(screen.getByText('Undo')).not.toBeDisabled();
 
-  // Drag-region restore wipes them back out.
-  fireEvent.click(screen.getByTestId('baseline-plot-drag-start'));
-  fireEvent.click(screen.getByTestId('baseline-plot-drag-update'));
+  // Recovery line (drawn at removed≈0 across [9, 13]) wipes them back out.
+  fireEvent.click(screen.getByTestId('baseline-plot-line-first'));
   await act(async () => {
-    fireEvent.click(screen.getByTestId('baseline-plot-drag-end'));
+    fireEvent.click(screen.getByTestId('baseline-plot-line-second'));
   });
   await waitFor(() =>
     expect(
@@ -316,7 +313,7 @@ test('Undo button reverts the last Remove RFI removal or restore', async () => {
     ).toBeInTheDocument(),
   );
 
-  // Undo #1 → reverses the restore. Removed samples reappear on the bottom plot.
+  // Undo #1 → reverses the recovery. Removed samples reappear on the bottom plot.
   fireEvent.click(screen.getByText('Undo'));
   await waitFor(() =>
     expect(

@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { rpcClient, type SourceSweep } from '../ipc/client';
 import { useSurvey } from '../state/survey-context';
+import { useTheme } from '../state/theme-context';
 import { PointScatter, type Point } from '../lib/plots/PointScatter';
+import { dataColors } from '../lib/plots/plot-theme';
 
 function formatRa(volts: number): string {
   // RA in the .md2 fixtures is given in arc-time seconds.  Format as HH:MM:SS.
@@ -60,6 +62,8 @@ export function SurveyView() {
     acceptCurrentSweep,
     markDirty,
   } = useSurvey();
+  const { theme } = useTheme();
+  const dc = useMemo(() => dataColors(theme), [theme]);
   const sweepIndex = currentSweepIndex;
   const [sweep, setSweep] = useState<SourceSweep | null>(null);
   const [loading, setLoading] = useState(false);
@@ -76,15 +80,23 @@ export function SurveyView() {
   // reads the new baseline flux from disk).
   const [removedBySweep, setRemovedBySweep] = useState<Record<number, RemovedMap>>({});
   // Per-sweep stack of prior `removedBySweep[i]` snapshots. Every Remove RFI
-  // removal AND every drag-region restore pushes one entry, so a single Undo
+  // removal AND every recover-line draw pushes one entry, so a single Undo
   // reverts whichever happened last on this sweep. Cleared on workspace change
   // and on Accept Sweep (the prior states no longer make sense once the engine
   // owns the flux array).
   const [historyBySweep, setHistoryBySweep] = useState<Record<number, RemovedMap[]>>({});
-  const [restoreDragRange, setRestoreDragRange] = useState<
-    { x0: number; x1: number } | null
+  // First endpoint of the recovery line drawn on the bottom "Removed" plot.
+  // Mirrors `pendingBaselinePoint` for the top plot, but in (Dec, removed-amount)
+  // space and with FREE coordinates (not snapped to a removed sample) — see
+  // vb/survform.frm:5732-5749 (Picture3 second-line gesture).
+  const [pendingRecoverPoint, setPendingRecoverPoint] = useState<
+    { dec: number; removed: number } | null
   >(null);
-  const restoreDragOrigin = useRef<number | null>(null);
+  // Live free-cursor position on the bottom plot, used to rubber-band the
+  // recovery line preview from `pendingRecoverPoint` to the cursor.
+  const [recoverCursor, setRecoverCursor] = useState<
+    { dec: number; removed: number } | null
+  >(null);
   const [committing, setCommitting] = useState(false);
   const [sweepInput, setSweepInput] = useState<string>(() => String(sweepIndex + 1));
 
@@ -95,6 +107,8 @@ export function SurveyView() {
     setStickyPoint(null);
     setBaselineMode(false);
     setPendingBaselinePoint(null);
+    setPendingRecoverPoint(null);
+    setRecoverCursor(null);
   }, [workspaceHandle, workspace?.calibrated, workspace?.flux_calibrated, sweepIndex]);
 
   // When the workspace itself changes (different .md2 / .srv opened), drop
@@ -163,8 +177,8 @@ export function SurveyView() {
       dec: sweep.dec[i],
       flux: flux[i],
     }));
-    return [{ points, color: '#d80000', name: 'Sweep' }];
-  }, [sweep, correctedFlux]);
+    return [{ points, color: dc.seriesPrimary, name: 'Sweep' }];
+  }, [sweep, correctedFlux, dc]);
 
   const bottomSeries = useMemo(() => {
     if (!sweep || !hasPendingRemoved) return [];
@@ -180,8 +194,8 @@ export function SurveyView() {
         sampleIndex: i,
       });
     }
-    return [{ points, color: '#3060c0', name: 'Removed' }];
-  }, [sweep, removed, hasPendingRemoved]);
+    return [{ points, color: dc.seriesSecondary, name: 'Removed' }];
+  }, [sweep, removed, hasPendingRemoved, dc]);
 
   const baselineOverlays = useMemo(() => {
     const lines: { points: { x: number; y: number }[]; color: string; width: number }[] = [];
@@ -193,13 +207,30 @@ export function SurveyView() {
             { x: pendingBaselinePoint.dec, y: pendingBaselinePoint.flux },
             { x: target.dec, y: target.flux },
           ],
-          color: '#c020c0',
+          color: dc.baseline,
           width: 1,
         });
       }
     }
     return lines;
-  }, [pendingBaselinePoint, hoverPoint, stickyPoint]);
+  }, [pendingBaselinePoint, hoverPoint, stickyPoint, dc]);
+
+  // Rubber-band preview for the recovery line on the bottom "Removed" plot,
+  // drawn from the first endpoint to the free cursor (un-snapped).
+  const recoverOverlays = useMemo(() => {
+    const lines: { points: { x: number; y: number }[]; color: string; width: number }[] = [];
+    if (pendingRecoverPoint && recoverCursor) {
+      lines.push({
+        points: [
+          { x: pendingRecoverPoint.dec, y: pendingRecoverPoint.removed },
+          { x: recoverCursor.dec, y: recoverCursor.removed },
+        ],
+        color: dc.seriesSecondary,
+        width: 1,
+      });
+    }
+    return lines;
+  }, [pendingRecoverPoint, recoverCursor, dc]);
 
   const handleHover = useCallback((p: Point | null) => {
     setHoverPoint(p);
@@ -207,7 +238,7 @@ export function SurveyView() {
 
   // Replace this sweep's RemovedMap with `next` and remember the previous
   // value on the undo stack so a subsequent Undo can revert this one mutation
-  // (either a Remove RFI removal or a drag-region restore — both go through
+  // (either a Remove RFI removal or a recovery-line draw — both go through
   // here).
   const commitRemoved = useCallback(
     (next: RemovedMap) => {
@@ -252,42 +283,63 @@ export function SurveyView() {
     [baselineMode, pendingBaselinePoint, sweepIndex, sweep, removedBySweep, commitRemoved],
   );
 
-  // Drag a region across the Removed plot to restore every removed sample
-  // whose declination falls inside it. Mirrors the "Select Declination" UX
-  // from the calibration views — see BUG-004.
-  const handleRestoreDragStart = useCallback((x: number) => {
-    restoreDragOrigin.current = x;
-    setRestoreDragRange({ x0: x, x1: x });
-  }, []);
-
-  const handleRestoreDragUpdate = useCallback((x: number) => {
-    if (restoreDragOrigin.current === null) return;
-    const origin = restoreDragOrigin.current;
-    setRestoreDragRange({ x0: Math.min(origin, x), x1: Math.max(origin, x) });
-  }, []);
-
-  const handleRestoreDragEnd = useCallback(() => {
-    const range = restoreDragRange;
-    restoreDragOrigin.current = null;
-    setRestoreDragRange(null);
-    if (!range || range.x0 === range.x1 || !sweep) return;
-    const current = removedBySweep[sweepIndex];
-    if (!current) return;
-    const next: RemovedMap = { ...current };
-    let changed = false;
-    for (const key of Object.keys(current)) {
-      const i = Number(key);
-      const d = sweep.dec[i];
-      if (d >= range.x0 && d <= range.x1) {
-        delete next[i];
-        changed = true;
+  // Recover removed samples by drawing a second, FREE (un-snapped) line across
+  // the bottom "Removed" plot — the exact inverse of the Remove RFI line on the
+  // top plot. For every already-removed sample whose Dec falls in the drawn
+  // line's Dec span, the removed amount is reset to the line's value: drawing
+  // the line at ~0 fully recovers the sample, while drawing it through the
+  // residual keeps the part below the line as baseline and feeds the part above
+  // back into the flux — i.e. recreates the noise structure. Mirrors the legacy
+  // Picture3 gesture (vb/survform.frm:5732-5749).
+  const handleRecoverClick = useCallback(
+    (x: number, y: number) => {
+      if (!baselineMode || !hasPendingRemoved || !sweep) return;
+      if (!pendingRecoverPoint) {
+        setPendingRecoverPoint({ dec: x, removed: y });
+        return;
       }
-    }
-    if (!changed) return;
-    commitRemoved(next);
-  }, [restoreDragRange, sweep, sweepIndex, removedBySweep, commitRemoved]);
+      const dec0 = pendingRecoverPoint.dec;
+      const removed0 = pendingRecoverPoint.removed;
+      const lo = Math.min(dec0, x);
+      const hi = Math.max(dec0, x);
+      const slope = x === dec0 ? 0 : (y - removed0) / (x - dec0);
+      const current = removedBySweep[sweepIndex] ?? {};
+      const next: RemovedMap = { ...current };
+      for (const key of Object.keys(current)) {
+        const i = Number(key);
+        const d = sweep.dec[i];
+        if (d < lo || d > hi) continue;
+        const lineValue = removed0 + slope * (d - dec0);
+        if (Math.abs(lineValue) < 1e-9) {
+          delete next[i];
+        } else {
+          next[i] = lineValue;
+        }
+      }
+      commitRemoved(next);
+      setPendingRecoverPoint(null);
+      setRecoverCursor(null);
+    },
+    [
+      baselineMode,
+      hasPendingRemoved,
+      sweep,
+      pendingRecoverPoint,
+      sweepIndex,
+      removedBySweep,
+      commitRemoved,
+    ],
+  );
 
-  // Pop the most recent removal/restore on this sweep off the history stack.
+  const handleRecoverCursorMove = useCallback(
+    (x: number, y: number) => {
+      if (!baselineMode || !hasPendingRemoved) return;
+      setRecoverCursor({ dec: x, removed: y });
+    },
+    [baselineMode, hasPendingRemoved],
+  );
+
+  // Pop the most recent removal/recovery on this sweep off the history stack.
   // Disabled when the stack is empty (Undo button reflects this).
   const handleUndo = useCallback(() => {
     const stack = historyBySweep[sweepIndex] ?? [];
@@ -310,6 +362,8 @@ export function SurveyView() {
   const toggleBaselineMode = useCallback(() => {
     setBaselineMode((m) => !m);
     setPendingBaselinePoint(null);
+    setPendingRecoverPoint(null);
+    setRecoverCursor(null);
   }, []);
 
   const handleAcceptSweep = useCallback(async () => {
@@ -421,18 +475,31 @@ export function SurveyView() {
                   series={bottomSeries}
                   xAxisLabel=""
                   yAxisLabel=""
-                  highlightRange={restoreDragRange}
-                  highlightColor="#3060c0"
-                  onDragStart={handleRestoreDragStart}
-                  onDragUpdate={handleRestoreDragUpdate}
-                  onDragEnd={handleRestoreDragEnd}
-                  dragEnabled={hasPendingRemoved}
+                  overlayLines={recoverOverlays}
+                  pinnedPoint={
+                    pendingRecoverPoint
+                      ? { x: pendingRecoverPoint.dec, y: pendingRecoverPoint.removed }
+                      : null
+                  }
+                  onCursorClick={
+                    baselineMode && hasPendingRemoved ? handleRecoverClick : undefined
+                  }
+                  onCursorMove={
+                    baselineMode && hasPendingRemoved ? handleRecoverCursorMove : undefined
+                  }
                   testId="baseline-plot"
                   height={200}
                 />
                 {!hasPendingRemoved && (
                   <div className="plot-status">
-                    Removed samples appear here. Drag a declination range to restore them.
+                    Removed samples appear here, draw a line across this plot to recover them
+                  </div>
+                )}
+                {hasPendingRemoved && baselineMode && (
+                  <div className="plot-status">
+                    {pendingRecoverPoint
+                      ? 'Recover: click line endpoint…'
+                      : 'Recover: click first point of a line…'}
                   </div>
                 )}
               </div>
@@ -478,14 +545,14 @@ export function SurveyView() {
                 onClick={toggleBaselineMode}
                 disabled={!workspace.calibrated}
                 className={baselineMode ? 'active' : ''}
-                title="Click two points on the flux vs declination plot to replace the segment between them with a straight line. Drag a declination range on the Removed plot to restore those samples."
+                title="Click two points on the flux vs declination plot to replace the segment between them with a straight line. Then draw a line across the Removed plot to recover those samples — drawing it low recovers fully, drawing it through the residual recreates the noise structure."
               >
                 {baselineMode ? 'Remove RFI (click…)' : 'Remove RFI'}
               </button>
               <button
                 onClick={handleUndo}
                 disabled={!canUndo}
-                title="Undo the most recent Remove RFI removal or restore on this sweep"
+                title="Undo the most recent Remove RFI removal or recovery on this sweep"
               >
                 Undo
               </button>

@@ -21,10 +21,18 @@ import { HelpDialog } from './help/HelpDialog';
 import { useSurvey } from '../state/survey-context';
 import { useScan, type PeakFitKind } from '../state/scan-context';
 import { useFluxCal } from '../state/flux-cal-context';
+import { useTheme, type Theme } from '../state/theme-context';
 import { rpcClient, type ChannelColor, type ImageMeta, type RgbImageMeta } from '../ipc/client';
 
 type AuxView = 'flux-cal' | 'pal' | 'about' | null;
 type MenuKey = 'file' | 'image' | 'survey' | 'scan' | 'calibration' | null;
+
+/** Entries for the Help > Theme submenu. Order = display order. */
+const THEME_OPTIONS: ReadonlyArray<{ value: Theme; label: string; title: string }> = [
+  { value: 'light', label: 'Modern Light', title: 'Clean light theme (default).' },
+  { value: 'dark', label: 'Modern Dark', title: 'Low-light dark theme.' },
+  { value: 'retro', label: 'Retro', title: 'The classic 90s Radio Cartographer look.' },
+];
 
 export function MainWindow() {
   const [auxView, setAuxView] = useState<AuxView>(null);
@@ -32,6 +40,9 @@ export function MainWindow() {
   // FEAT-011: tracks whether the Image > Image Display side submenu is open.
   // Reset to false whenever the parent Image menu closes (see effect below).
   const [imageDisplayMenuOpen, setImageDisplayMenuOpen] = useState(false);
+  // Tracks whether the Help > Theme side submenu is open. Reset whenever the
+  // parent Help menu closes (see effect below), mirroring Image Display.
+  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const menuRef = useRef<HTMLElement | null>(null);
   const {
@@ -78,6 +89,7 @@ export function MainWindow() {
     resetForEngineRestart: resetScanForEngineRestart,
   } = useScan();
   const fluxCal = useFluxCal();
+  const { theme, setTheme } = useTheme();
   const hasSurvey = survey !== null;
   // Image-menu items act on a built image, so they enable as soon as one
   // exists — whether we're currently on the Image screen or back on Pre Image.
@@ -262,6 +274,7 @@ export function MainWindow() {
   // so re-opening Image doesn't auto-show the Image Display side popup.
   useEffect(() => {
     if (openMenu !== 'image') setImageDisplayMenuOpen(false);
+    if (openMenu !== 'file') setThemeMenuOpen(false);
   }, [openMenu]);
 
   const pickAndOpenSurvey = useCallback(async () => {
@@ -1279,6 +1292,35 @@ export function MainWindow() {
               >
                 Tutorial
               </button>
+              <div className="menu-submenu-host">
+                <button
+                  role="menuitem"
+                  aria-haspopup="menu"
+                  aria-expanded={themeMenuOpen}
+                  onClick={() => setThemeMenuOpen((v) => !v)}
+                  title="Choose the application's visual theme."
+                >
+                  Theme ▸
+                </button>
+                {themeMenuOpen && (
+                  <div role="menu" className="menu-submenu">
+                    {THEME_OPTIONS.map(({ value, label, title }) => (
+                      <button
+                        key={value}
+                        role="menuitem"
+                        onClick={() => {
+                          setOpenMenu(null);
+                          setTheme(value);
+                        }}
+                        title={title}
+                      >
+                        {theme === value ? '✓ ' : '   '}
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               <div className="menu-sep" />
               <button
                 role="menuitem"

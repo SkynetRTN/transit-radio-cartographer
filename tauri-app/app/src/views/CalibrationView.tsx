@@ -4,6 +4,8 @@ import { rpcClient } from '../ipc/client';
 import { useFluxCal } from '../state/flux-cal-context';
 import { useScan } from '../state/scan-context';
 import { PointScatter, type Point, type PointSeries } from '../lib/plots/PointScatter';
+import { dataColors } from '../lib/plots/plot-theme';
+import { useTheme } from '../state/theme-context';
 
 function promptKnownJy(defaultJy: number, name: string): number | null {
   const raw = window.prompt(`Known flux (Jy) for ${name || 'source'}:`, String(defaultJy));
@@ -30,6 +32,8 @@ export function FluxCalibrationView() {
     setCaption,
   } = useFluxCal();
   const { overview: scanOverview, handle: scanHandle } = useScan();
+  const { theme } = useTheme();
+  const dc = useMemo(() => dataColors(theme), [theme]);
 
   const handleAddFromFile = useCallback(async () => {
     let path: string | null = null;
@@ -90,8 +94,8 @@ export function FluxCalibrationView() {
         dec: 0,
         flux: e.measured_flux,
       })) ?? [];
-    return [{ points, color: '#1f3fff', name: 'calibrators' }];
-  }, [table]);
+    return [{ points, color: dc.seriesSecondary, name: 'calibrators' }];
+  }, [table, dc]);
 
   const fitLine = useMemo(() => {
     if (slope === null || slope === 0 || !table || table.entries.length === 0) return [];
@@ -103,11 +107,11 @@ export function FluxCalibrationView() {
           { x: 0, y: 0 },
           { x: maxX, y: maxX * slope },
         ],
-        color: '#c020c0',
+        color: dc.baseline,
         width: 2,
       },
     ];
-  }, [slope, table]);
+  }, [slope, table, dc]);
 
   if (!table) {
     return (
@@ -134,7 +138,7 @@ export function FluxCalibrationView() {
           onChange={(e) => setCaption(e.target.value)}
           style={{ fontSize: 14, padding: '2px 6px', minWidth: 220 }}
         />
-        <span style={{ color: '#555', fontSize: 12 }}>
+        <span style={{ color: 'var(--text-subtle)', fontSize: 12 }}>
           {filePath ?? '(unsaved)'}
           {dirty ? ' *' : ''}
           {loading && ' · loading…'}
@@ -181,7 +185,7 @@ export function FluxCalibrationView() {
             }}
           >
             <thead>
-              <tr style={{ textAlign: 'left', borderBottom: '1px solid #ccc' }}>
+              <tr style={{ textAlign: 'left', borderBottom: '1px solid var(--border)' }}>
                 <th style={{ padding: '4px 6px' }}>Name</th>
                 <th style={{ padding: '4px 6px', textAlign: 'right' }}>Measured (GCU)</th>
                 <th style={{ padding: '4px 6px', textAlign: 'right' }}>Known (Jy)</th>
@@ -211,7 +215,7 @@ export function FluxCalibrationView() {
               ))}
               {table.entries.length === 0 && (
                 <tr>
-                  <td colSpan={4} style={{ padding: 12, color: '#777', textAlign: 'center' }}>
+                  <td colSpan={4} style={{ padding: 12, color: 'var(--text-subtle)', textAlign: 'center' }}>
                     Add at least one calibration source to fit.
                   </td>
                 </tr>

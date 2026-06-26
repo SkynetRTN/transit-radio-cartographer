@@ -6,6 +6,8 @@ import {
 } from '../ipc/client';
 import { useScan } from '../state/scan-context';
 import { PointScatter, type Point } from '../lib/plots/PointScatter';
+import { dataColors } from '../lib/plots/plot-theme';
+import { useTheme } from '../state/theme-context';
 
 function formatRa(seconds: number): string {
   const total = Math.max(0, seconds);
@@ -96,6 +98,8 @@ function splitKeptCut(points: ScatterPoint[], color: string) {
 
 export function CalibrateScanView() {
   const { overview, handle, setViewMode, refreshOverview, setOverview, markDirty } = useScan();
+  const { theme } = useTheme();
+  const dc = dataColors(theme);
   const [view, setView] = useState<ScanCalibrationView | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -293,7 +297,7 @@ export function CalibrateScanView() {
                   {error && <div className="plot-status error">{error}</div>}
                   {view && initialLayout && (
                     <PointScatter
-                      series={splitKeptCut(initialLayout.fluxPoints, '#d80000')}
+                      series={splitKeptCut(initialLayout.fluxPoints, dc.seriesPrimary)}
                       xAxisLabel=""
                       yAxisLabel=""
                       onHover={handleHover}
@@ -321,7 +325,7 @@ export function CalibrateScanView() {
                 <div className="plot-cell">
                   {view && terminalLayout && (
                     <PointScatter
-                      series={splitKeptCut(terminalLayout.fluxPoints, '#d80000')}
+                      series={splitKeptCut(terminalLayout.fluxPoints, dc.seriesPrimary)}
                       xAxisLabel=""
                       yAxisLabel=""
                       onHover={handleHover}
@@ -360,7 +364,7 @@ export function CalibrateScanView() {
                 <div className="plot-cell">
                   {view && initialLayout && (
                     <PointScatter
-                      series={splitKeptCut(initialLayout.decPoints, '#1855c0')}
+                      series={splitKeptCut(initialLayout.decPoints, dc.seriesSecondary)}
                       xAxisLabel=""
                       yAxisLabel=""
                       onHover={handleHover}
@@ -394,7 +398,7 @@ export function CalibrateScanView() {
                 <div className="plot-cell">
                   {view && terminalLayout && (
                     <PointScatter
-                      series={splitKeptCut(terminalLayout.decPoints, '#1855c0')}
+                      series={splitKeptCut(terminalLayout.decPoints, dc.seriesSecondary)}
                       xAxisLabel=""
                       yAxisLabel=""
                       onHover={handleHover}

@@ -2,6 +2,8 @@ import { useEffect, useRef } from 'react';
 import Plotly from 'plotly.js-dist-min';
 import type { ImageMeta, ImagePixels, PaletteStop } from '../../ipc/client';
 import type { ImageDisplayMode } from '../../state/survey-context';
+import { useTheme } from '../../state/theme-context';
+import { plotChrome } from './plot-theme';
 
 export interface ImagePoint {
   ra: number;
@@ -164,6 +166,7 @@ export function ImagePlot({
   displayMode = 'sky',
 }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
+  const { theme } = useTheme();
   // Keep the most recent hovered cell so the container's onContextMenu handler
   // can report it without needing Plotly's native (suppressed) right-click.
   const lastHoverRef = useRef<ImagePoint | null>(null);
@@ -297,8 +300,12 @@ export function ImagePlot({
       !hasBounds && displayMode !== 'stretch'
         ? { scaleanchor: 'y' as const, constrain: 'domain' as const }
         : {};
+    const chrome = plotChrome(theme);
     const xaxis: Partial<Plotly.LayoutAxis> = {
       title: { text: 'Right Ascension' },
+      gridcolor: chrome.gridColor,
+      linecolor: chrome.axisColor,
+      tickcolor: chrome.axisColor,
       ...(hasBounds ? { autorange: 'reversed' as const } : {}),
       ...lockBounded,
       ...lockPixel,
@@ -308,6 +315,9 @@ export function ImagePlot({
     };
     const yaxis: Partial<Plotly.LayoutAxis> = {
       title: { text: 'Declination' },
+      gridcolor: chrome.gridColor,
+      linecolor: chrome.axisColor,
+      tickcolor: chrome.axisColor,
       ...(hasBounds ? {} : { autorange: 'reversed' as const }),
       ...(displayMode !== 'stretch' ? { constrain: 'domain' as const } : {}),
       ...(decTicks
@@ -333,13 +343,14 @@ export function ImagePlot({
     const layout: Partial<Plotly.Layout> = {
       title: { text: title },
       margin: { l: 70, r: 20, t: title ? 40 : 12, b: 50 },
-      paper_bgcolor: '#f3f3f3',
+      paper_bgcolor: chrome.paperBg,
       // BUG-014: no-coverage cells arrive as `null` (engine NaN sentinel,
       // JSON-encoded as null). Plotly's heatmap renders them transparent,
-      // so the plot background shows through — set to white to match the
-      // legacy "blank sky" appearance for append/superimpose gutters.
-      plot_bgcolor: '#ffffff',
-      font: { family: 'Tahoma, sans-serif', size: 11 },
+      // so the plot background shows through — set to the theme's plot
+      // background to match the "blank sky" appearance for append/superimpose
+      // gutters (white in light/retro, dark zinc in dark mode).
+      plot_bgcolor: chrome.plotBg,
+      font: { family: 'Tahoma, sans-serif', size: 11, color: chrome.fontColor },
       xaxis,
       yaxis,
       shapes,
@@ -420,7 +431,7 @@ export function ImagePlot({
       plotEl.removeAllListeners?.('plotly_relayout');
       Plotly.purge(node);
     };
-  }, [image, meta, title, palette, fluxRange, boxOverlay, showColorBar, displayMode, onHover, onClick]);
+  }, [image, meta, title, palette, fluxRange, boxOverlay, showColorBar, displayMode, onHover, onClick, theme]);
 
   const handleContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
     // Always suppress the browser context menu on the heatmap. Without this,

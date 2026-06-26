@@ -1,6 +1,8 @@
 import { useEffect, useRef } from 'react';
 import Plotly from 'plotly.js-dist-min';
 import type { RgbImageMeta, RgbImagePixels } from '../../ipc/client';
+import { useTheme } from '../../state/theme-context';
+import { plotChrome } from './plot-theme';
 
 interface Props {
   image: RgbImagePixels;
@@ -53,6 +55,7 @@ function sexagesimalTicks(
 
 export function RgbImagePlot({ image, meta, title = '', testId }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
+  const { theme } = useTheme();
 
   useEffect(() => {
     const node = ref.current;
@@ -151,6 +154,7 @@ export function RgbImagePlot({ image, meta, title = '', testId }: Props) {
       ? sexagesimalTicks(meta!.min_dec, meta!.max_dec, 5, formatDecDegrees)
       : null;
 
+    const chrome = plotChrome(theme);
     const xaxis: Partial<Plotly.LayoutAxis> = {
       title: { text: 'Right Ascension' },
       // RGB composites paint over the full plot area as a single bitmap; the
@@ -158,6 +162,8 @@ export function RgbImagePlot({ image, meta, title = '', testId }: Props) {
       // overlay each footprint and obscure source structure.
       showgrid: false,
       zeroline: false,
+      linecolor: chrome.axisColor,
+      tickcolor: chrome.axisColor,
       ...(hasBounds ? { autorange: 'reversed' as const } : {}),
       ...(raTicks
         ? { tickmode: 'array', tickvals: raTicks.tickvals, ticktext: raTicks.ticktext }
@@ -167,6 +173,8 @@ export function RgbImagePlot({ image, meta, title = '', testId }: Props) {
       title: { text: 'Declination' },
       showgrid: false,
       zeroline: false,
+      linecolor: chrome.axisColor,
+      tickcolor: chrome.axisColor,
       ...(decTicks
         ? { tickmode: 'array', tickvals: decTicks.tickvals, ticktext: decTicks.ticktext }
         : {}),
@@ -203,13 +211,14 @@ export function RgbImagePlot({ image, meta, title = '', testId }: Props) {
     const layout: Partial<Plotly.Layout> = {
       title: { text: title },
       margin: { l: 70, r: 20, t: title ? 40 : 12, b: 50 },
-      paper_bgcolor: '#f3f3f3',
+      paper_bgcolor: chrome.paperBg,
       // BUG-013: the bitmap covers only the union footprint, so anything the
       // user sees outside the painted area (and through any transparent canvas
-      // pixels, though we paint alpha=255 everywhere) should be blank white —
-      // matching legacy bi-color where un-imaged sky is white, not black.
-      plot_bgcolor: '#ffffff',
-      font: { family: 'Tahoma, sans-serif', size: 11 },
+      // pixels, though we paint alpha=255 everywhere) should be blank — the
+      // theme's plot background (white in light/retro, dark zinc in dark mode),
+      // matching legacy bi-color where un-imaged sky is blank, not black.
+      plot_bgcolor: chrome.plotBg,
+      font: { family: 'Tahoma, sans-serif', size: 11, color: chrome.fontColor },
       xaxis,
       yaxis,
       // Cast: Plotly's TS types for layout images are stricter than the
@@ -221,7 +230,7 @@ export function RgbImagePlot({ image, meta, title = '', testId }: Props) {
     return () => {
       Plotly.purge(node);
     };
-  }, [image, meta, title]);
+  }, [image, meta, title, theme]);
 
   return (
     <div
