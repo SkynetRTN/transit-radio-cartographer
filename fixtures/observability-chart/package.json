@@ -1,0 +1,53 @@
+{
+  "name": "@skynet-rtn/observability-chart",
+  "version": "0.1.0-pre.1",
+  "description": "Framework-agnostic observability-chart core (per-site target altitude-vs-time series, bucketised by observability). React adapter under ./react.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./react": {
+      "types": "./src/react/index.ts",
+      "default": "./src/react/index.ts"
+    }
+  },
+  "files": [
+    "src/",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@skynet-rtn/sky-chart": "*",
+    "astronomy-engine": "^2.0.4",
+    "satellite.js": "^5.0.0",
+    "skynet-sdk": "*"
+  },
+  "peerDependencies": {
+    "plotly.js-dist-min": "^3.0.0",
+    "react": "^19.0.0",
+    "react-plotly.js": "^2.6.0"
+  },
+  "peerDependenciesMeta": {
+    "react": { "optional": true },
+    "react-plotly.js": { "optional": true },
+    "plotly.js-dist-min": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/plotly.js": "^3.0.10",
+    "@types/react": "^19.0.2",
+    "@types/react-plotly.js": "^2.6.4",
+    "plotly.js-dist-min": "^3.5.1",
+    "react": "^19.0.0",
+    "react-plotly.js": "^2.6.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

@@ -1,4 +1,9 @@
 import { useState } from 'react';
+import FormControl from '@mui/material/FormControl';
+import InputLabel from '@mui/material/InputLabel';
+import Select from '@mui/material/Select';
+import MenuItem from '@mui/material/MenuItem';
+import { AppDialog, useIsModern } from './AppDialog';
 
 export interface SelectOption {
   value: string;
@@ -19,6 +24,7 @@ interface Props {
 }
 
 export function SelectInputDialog({ prompt, onCancel }: Props) {
+  const modern = useIsModern();
   const [value, setValue] = useState<string>(prompt.defaultValue);
 
   const submit = () => {
@@ -26,9 +32,33 @@ export function SelectInputDialog({ prompt, onCancel }: Props) {
   };
 
   return (
-    <div className="modal-backdrop" role="dialog" aria-label={prompt.title}>
-      <div className="modal">
-        <div className="modal-title">{prompt.title}</div>
+    <AppDialog
+      title={prompt.title}
+      onClose={onCancel}
+      buttons={[
+        { label: 'OK', onClick: submit, primary: true },
+        { label: 'Cancel', onClick: onCancel },
+      ]}
+    >
+      {modern ? (
+        <FormControl fullWidth size="small" margin="dense">
+          <InputLabel id="select-input-dialog-label">{prompt.label}</InputLabel>
+          <Select
+            labelId="select-input-dialog-label"
+            label={prompt.label}
+            aria-label={prompt.label}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            autoFocus
+          >
+            {prompt.options.map((opt) => (
+              <MenuItem key={opt.value} value={opt.value}>
+                {opt.label}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+      ) : (
         <div className="modal-row">
           <span>{prompt.label}</span>
           <select
@@ -48,13 +78,7 @@ export function SelectInputDialog({ prompt, onCancel }: Props) {
             ))}
           </select>
         </div>
-        <div className="modal-buttons">
-          <button onClick={submit} className="primary">
-            OK
-          </button>
-          <button onClick={onCancel}>Cancel</button>
-        </div>
-      </div>
-    </div>
+      )}
+    </AppDialog>
   );
 }

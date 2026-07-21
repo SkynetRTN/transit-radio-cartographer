@@ -18,6 +18,8 @@ import { YesNoCancelDialog } from './dialogs/YesNoCancelDialog';
 import { ColorPickDialog } from './dialogs/ColorPickDialog';
 import { ConfirmDialog } from './dialogs/ConfirmDialog';
 import { HelpDialog } from './help/HelpDialog';
+import { MenuBarShell, MenuTrigger } from './chrome/MenuBar';
+import { StatusBar } from './chrome/StatusBar';
 import { useSurvey } from '../state/survey-context';
 import { useScan, type PeakFitKind } from '../state/scan-context';
 import { useFluxCal } from '../state/flux-cal-context';
@@ -1263,15 +1265,13 @@ export function MainWindow() {
 
   return (
     <div className="main-window">
-      <nav aria-label="main menu" className="menu-bar" ref={menuRef}>
+      <MenuBarShell ref={menuRef}>
         <div className="menu-root">
-          <button
+          <MenuTrigger
+            label="Help"
+            open={openMenu === 'file'}
             onClick={() => toggleMenu('file')}
-            aria-haspopup="menu"
-            aria-expanded={openMenu === 'file'}
-          >
-            Help
-          </button>
+          />
           {openMenu === 'file' && (
             <div role="menu" className="menu-popup">
               <button
@@ -1334,7 +1334,11 @@ export function MainWindow() {
         </div>
 
         <div className="menu-root">
-          <button onClick={() => toggleMenu('image')}>Image</button>
+          <MenuTrigger
+            label="Image"
+            open={openMenu === 'image'}
+            onClick={() => toggleMenu('image')}
+          />
           {openMenu === 'image' && (
             <div role="menu" className="menu-popup">
               <button
@@ -1514,7 +1518,11 @@ export function MainWindow() {
         </div>
 
         <div className="menu-root">
-          <button onClick={() => toggleMenu('survey')}>Survey</button>
+          <MenuTrigger
+            label="Survey"
+            open={openMenu === 'survey'}
+            onClick={() => toggleMenu('survey')}
+          />
           {openMenu === 'survey' && (
             <div role="menu" className="menu-popup">
               <button
@@ -1556,7 +1564,11 @@ export function MainWindow() {
         </div>
 
         <div className="menu-root">
-          <button onClick={() => toggleMenu('scan')}>Scan</button>
+          <MenuTrigger
+            label="Scan"
+            open={openMenu === 'scan'}
+            onClick={() => toggleMenu('scan')}
+          />
           {openMenu === 'scan' && (
             <div role="menu" className="menu-popup">
               <button
@@ -1629,7 +1641,11 @@ export function MainWindow() {
         </div>
 
         <div className="menu-root">
-          <button onClick={() => toggleMenu('calibration')}>Flux Calibration</button>
+          <MenuTrigger
+            label="Flux Calibration"
+            open={openMenu === 'calibration'}
+            onClick={() => toggleMenu('calibration')}
+          />
           {openMenu === 'calibration' && (
             <div role="menu" className="menu-popup">
               <button role="menuitem" onClick={() => void pickAndLoadCal()}>
@@ -1675,10 +1691,10 @@ export function MainWindow() {
           )}
         </div>
 
-      </nav>
+      </MenuBarShell>
 
       {(loading || scanLoading || (survey && workspace) || (scan && scanOverview)) && (
-        <div className="status-bar" role="status">
+        <StatusBar>
           {(loading || scanLoading) && <span>Loading…</span>}
           {!loading && !error && survey && workspace && (
             <span>
@@ -1706,7 +1722,7 @@ export function MainWindow() {
               {scanViewMode === 'calibrate-scan' && ' · Calibrate Scan'}
             </span>
           )}
-        </div>
+        </StatusBar>
       )}
 
       <div className="view-area">

@@ -209,9 +209,11 @@ test('Change Determine Peak Fit menu item opens a dropdown with six options (FEA
     ).not.toBeDisabled();
   });
   fireEvent.click(screen.getByRole('menuitem', { name: 'Change Determine Peak Fit…' }));
-  const select = (await screen.findByLabelText('Fit kind:')) as HTMLSelectElement;
+  // Modern theme renders an MUI Select (a combobox), not a native <select>.
+  const combobox = await screen.findByRole('combobox', { name: 'Fit kind:' });
+  fireEvent.mouseDown(combobox);
   // Spec order: Gaussian → Squared Cosine → 2/3/4 Polynomial → Max Value.
-  const labels = Array.from(select.options).map((o) => o.text);
+  const labels = screen.getAllByRole('option').map((o) => o.textContent);
   expect(labels).toEqual([
     'Gaussian',
     'Squared Cosine',
@@ -221,12 +223,12 @@ test('Change Determine Peak Fit menu item opens a dropdown with six options (FEA
     'Max Value',
   ]);
   // Default selection is Gaussian.
-  expect(select.value).toBe('gaussian');
-  fireEvent.change(select, { target: { value: 'cos2' } });
+  expect(combobox).toHaveTextContent('Gaussian');
+  fireEvent.click(screen.getByRole('option', { name: 'Squared Cosine' }));
   fireEvent.click(screen.getByRole('button', { name: 'OK' }));
   // Dialog dismisses after submit.
   await vi.waitFor(() => {
-    expect(screen.queryByLabelText('Fit kind:')).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: 'Fit kind:' })).not.toBeInTheDocument();
   });
 });
 

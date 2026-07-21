@@ -1,4 +1,6 @@
 import { useState } from 'react';
+import TextField from '@mui/material/TextField';
+import { AppDialog, useIsModern } from './AppDialog';
 
 export interface NumericPrompt {
   title: string;
@@ -13,6 +15,7 @@ interface Props {
 }
 
 export function NumericInputDialog({ prompt, onCancel }: Props) {
+  const modern = useIsModern();
   const [value, setValue] = useState<string>(String(prompt.defaultValue));
   const [error, setError] = useState<string | null>(null);
 
@@ -25,33 +28,52 @@ export function NumericInputDialog({ prompt, onCancel }: Props) {
     prompt.onSubmit(num);
   };
 
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') submit();
+    if (e.key === 'Escape') onCancel();
+  };
+
   return (
-    <div className="modal-backdrop" role="dialog" aria-label={prompt.title}>
-      <div className="modal">
-        <div className="modal-title">{prompt.title}</div>
-        <div className="modal-row">
-          <span>{prompt.label}</span>
-          <input
-            type="number"
-            step="any"
-            aria-label={prompt.label}
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            autoFocus
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') submit();
-              if (e.key === 'Escape') onCancel();
-            }}
-          />
-        </div>
-        {error && <div className="modal-error">{error}</div>}
-        <div className="modal-buttons">
-          <button onClick={submit} className="primary">
-            OK
-          </button>
-          <button onClick={onCancel}>Cancel</button>
-        </div>
-      </div>
-    </div>
+    <AppDialog
+      title={prompt.title}
+      onClose={onCancel}
+      buttons={[
+        { label: 'OK', onClick: submit, primary: true },
+        { label: 'Cancel', onClick: onCancel },
+      ]}
+    >
+      {modern ? (
+        <TextField
+          type="number"
+          label={prompt.label}
+          slotProps={{ htmlInput: { step: 'any', 'aria-label': prompt.label } }}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={onKeyDown}
+          error={!!error}
+          helperText={error ?? undefined}
+          autoFocus
+          fullWidth
+          size="small"
+          margin="dense"
+        />
+      ) : (
+        <>
+          <div className="modal-row">
+            <span>{prompt.label}</span>
+            <input
+              type="number"
+              step="any"
+              aria-label={prompt.label}
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              autoFocus
+              onKeyDown={onKeyDown}
+            />
+          </div>
+          {error && <div className="modal-error">{error}</div>}
+        </>
+      )}
+    </AppDialog>
   );
 }

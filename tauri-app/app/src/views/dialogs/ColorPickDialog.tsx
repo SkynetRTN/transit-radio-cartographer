@@ -1,5 +1,7 @@
 import { useEffect } from 'react';
+import DialogContentText from '@mui/material/DialogContentText';
 import type { ChannelColor } from '../../ipc/client';
+import { AppDialog, useIsModern, type DialogButton } from './AppDialog';
 
 interface Props {
   title: string;
@@ -15,6 +17,8 @@ const SWATCH: Record<ChannelColor, string> = {
   b: 'rgb(40, 80, 220)',
 };
 
+const NAME: Record<ChannelColor, string> = { r: 'Red', g: 'Green', b: 'Blue' };
+
 export function ColorPickDialog({
   title,
   message,
@@ -22,6 +26,7 @@ export function ColorPickDialog({
   onPick,
   onCancel,
 }: Props) {
+  const modern = useIsModern();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onCancel();
@@ -31,32 +36,28 @@ export function ColorPickDialog({
   }, [onCancel]);
 
   const colors: ChannelColor[] = ['r', 'g', 'b'];
+  const buttons: DialogButton[] = [
+    ...colors.map((c) => ({
+      label: NAME[c],
+      onClick: () => onPick(c),
+      disabled: disabledColors.includes(c),
+      title: disabledColors.includes(c) ? 'Already used' : undefined,
+      background: SWATCH[c],
+      color: 'white',
+      minWidth: 64,
+    })),
+    { label: 'Cancel', onClick: onCancel },
+  ];
+
   return (
-    <div className="modal-backdrop" role="dialog" aria-label={title}>
-      <div className="modal">
-        <div className="modal-title">{title}</div>
+    <AppDialog title={title} onClose={onCancel} buttons={buttons}>
+      {modern ? (
+        <DialogContentText>{message}</DialogContentText>
+      ) : (
         <div className="modal-row">
           <span>{message}</span>
         </div>
-        <div className="modal-buttons">
-          {colors.map((c) => (
-            <button
-              key={c}
-              onClick={() => onPick(c)}
-              disabled={disabledColors.includes(c)}
-              title={disabledColors.includes(c) ? 'Already used' : ''}
-              style={{
-                background: SWATCH[c],
-                color: 'white',
-                minWidth: 64,
-              }}
-            >
-              {c === 'r' ? 'Red' : c === 'g' ? 'Green' : 'Blue'}
-            </button>
-          ))}
-          <button onClick={onCancel}>Cancel</button>
-        </div>
-      </div>
-    </div>
+      )}
+    </AppDialog>
   );
 }
