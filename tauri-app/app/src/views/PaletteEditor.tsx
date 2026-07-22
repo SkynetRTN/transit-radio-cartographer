@@ -90,6 +90,47 @@ function rgbCss({ r, g, b }: { r: number; g: number; b: number }): string {
   return `rgb(${ri}, ${gi}, ${bi})`;
 }
 
+// Editor-internal stop carrying a stable id, so selection survives the array
+// being re-sorted as anchors move. Ids are stripped before the palette leaves
+// the editor.
+export interface EditStop extends PaletteStop {
+  id: number;
+}
+
+// Minimum separation between adjacent anchors. Kept well above the downstream
+// colorscale's float epsilon (1e-6 normalized ≈ 2.5e-4 anchor units) so two
+// stops can never collapse into a duplicate — a duplicate anchor crashes
+// Plotly. This is what makes stacking pegs on the edge, dropping one onto
+// another, and ~50-stop palettes safe (BUG-018 / BUG-021).
+const MIN_ANCHOR_GAP = 0.5;
+
+// Sort by anchor and force strictly-increasing anchors separated by at least
+// MIN_ANCHOR_GAP, clamped to [0, 255]. Ids are preserved. A forward pass pushes
+// colliding stops right; a backward pass pulls them back under 255 so the
+// result stays in range and strictly increasing. Stops with a non-finite
+// anchor are dropped (they can't be placed on the strip).
+export function spaceStops(stops: EditStop[]): EditStop[] {
+  const sorted = stops
+    .filter((s) => Number.isFinite(s.anchor))
+    .map((s) => ({ ...s, anchor: clamp(s.anchor, 0, 255) }))
+    .sort((a, b) => a.anchor - b.anchor);
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i].anchor < sorted[i - 1].anchor + MIN_ANCHOR_GAP) {
+      sorted[i].anchor = Math.min(255, sorted[i - 1].anchor + MIN_ANCHOR_GAP);
+    }
+  }
+  for (let i = sorted.length - 2; i >= 0; i--) {
+    if (sorted[i].anchor > sorted[i + 1].anchor - MIN_ANCHOR_GAP) {
+      sorted[i].anchor = Math.max(0, sorted[i + 1].anchor - MIN_ANCHOR_GAP);
+    }
+  }
+  return sorted;
+}
+
+function stripIds(stops: EditStop[]): PaletteStop[] {
+  return stops.map(({ anchor, r, g, b }) => ({ anchor, r, g, b }));
+}
+
 function componentPolygonPoints(
   stops: PaletteStop[],
   channel: 'r' | 'g' | 'b',
@@ -213,19 +254,26 @@ export function PaletteEditor({ onClose }: Props = {}) {
     () => imagePalette ?? PRESETS['Default (Radio Cartographer)'],
     [imagePalette],
   );
-  const [stops, setStops] = useState<PaletteStop[]>(defaultStops);
-  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const idRef = useRef(0);
+  const withIds = useCallback(
+    (arr: PaletteStop[]): EditStop[] => arr.map((s) => ({ ...s, id: idRef.current++ })),
+    [],
+  );
+  // Stored stops are kept sorted by anchor and carry a stable id so selection
+  // follows a peg as the array reorders under it (BUG-018 / BUG-021).
+  const [stops, setStops] = useState<EditStop[]>(() => defaultStops.map((s) => ({ ...s, id: idRef.current++ })));
+  const [selectedId, setSelectedId] = useState<number | null>(null);
   const initialMin = imageFluxRange?.min ?? image?.min_flux ?? 0;
   const initialMax = imageFluxRange?.max ?? image?.max_flux ?? 1;
   const [fluxMin, setFluxMin] = useState<number>(initialMin);
   const [fluxMax, setFluxMax] = useState<number>(initialMax);
   const [error, setError] = useState<string | null>(null);
   const stripRef = useRef<HTMLDivElement | null>(null);
-  const draggingRef = useRef<{ index: number } | null>(null);
+  const draggingRef = useRef<{ id: number } | null>(null);
 
   useEffect(() => {
-    setStops(defaultStops);
-  }, [defaultStops]);
+    setStops(withIds(defaultStops));
+  }, [defaultStops, withIds]);
 
   const gradientCss = useMemo(() => {
     // Skip non-finite stops so a transient NaN (cleared input field) doesn't
@@ -249,20 +297,20 @@ export function PaletteEditor({ onClose }: Props = {}) {
       const rect = stripRef.current.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const anchor = clamp((x / rect.width) * 255, 0, 255);
-      // Hit-test existing pegs (within 6px).
-      const sorted = stops.map((s, i) => ({ s, i })).sort((a, b) => a.s.anchor - b.s.anchor);
-      const hit = sorted.find(({ s }) => Math.abs((s.anchor / 255) * rect.width - x) <= 6);
+      // Hit-test existing pegs (within 6px). Stops are already anchor-sorted.
+      const hit = stops.find((s) => Math.abs((s.anchor / 255) * rect.width - x) <= 6);
       if (hit) {
-        setSelectedIndex(hit.i);
-        draggingRef.current = { index: hit.i };
+        setSelectedId(hit.id);
+        draggingRef.current = { id: hit.id };
         return;
       }
       // Otherwise insert a new stop at this anchor with interpolated color.
+      // spaceStops keeps the array sorted and separated so the new stop can
+      // never land exactly on top of an existing one.
       const rgb = interpRgb(stops, anchor);
-      const next: PaletteStop = { anchor, r: rgb.r, g: rgb.g, b: rgb.b };
-      const updated = [...stops, next];
-      setStops(updated);
-      setSelectedIndex(updated.length - 1);
+      const next: EditStop = { anchor, r: rgb.r, g: rgb.g, b: rgb.b, id: idRef.current++ };
+      setStops(spaceStops([...stops, next]));
+      setSelectedId(next.id);
     },
     [stops],
   );
@@ -273,10 +321,9 @@ export function PaletteEditor({ onClose }: Props = {}) {
       if (rect.width <= 0) return;
       const x = e.clientX - rect.left;
       const hit = stops
-        .map((s, i) => ({ s, i }))
-        .filter(({ s }) => Number.isFinite(s.anchor))
-        .find(({ s }) => Math.abs((clamp(s.anchor, 0, 255) / 255) * rect.width - x) <= 6);
-      if (hit) setSelectedIndex(hit.i);
+        .filter((s) => Number.isFinite(s.anchor))
+        .find((s) => Math.abs((clamp(s.anchor, 0, 255) / 255) * rect.width - x) <= 6);
+      if (hit) setSelectedId(hit.id);
     },
     [stops],
   );
@@ -288,12 +335,22 @@ export function PaletteEditor({ onClose }: Props = {}) {
       if (rect.width <= 0) return; // safeguard if the strip isn't yet laid out
       const x = clamp(e.clientX - rect.left, 0, rect.width);
       const anchor = clamp((x / rect.width) * 255, 0, 255);
+      const id = draggingRef.current.id;
+      // Move the dragged stop and keep the array anchor-sorted; selection is by
+      // id so it follows the peg even as it crosses others. Final spacing is
+      // applied on release (below) so the drag itself stays smooth.
       setStops((prev) =>
-        prev.map((s, i) => (i === draggingRef.current!.index ? { ...s, anchor } : s)),
+        [...prev.map((s) => (s.id === id ? { ...s, anchor } : s))].sort(
+          (a, b) => a.anchor - b.anchor,
+        ),
       );
     };
     const onUp = () => {
+      if (!draggingRef.current) return;
       draggingRef.current = null;
+      // Space-on-drop: separate any stops that were dragged onto each other so
+      // the committed palette is always strictly increasing (BUG-018).
+      setStops((prev) => spaceStops(prev));
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
@@ -303,34 +360,43 @@ export function PaletteEditor({ onClose }: Props = {}) {
     };
   }, []);
 
-  const selectedStop = selectedIndex !== null ? stops[selectedIndex] : null;
+  const selectedStop = stops.find((s) => s.id === selectedId) ?? null;
+  const selectedNumber = selectedStop ? stops.findIndex((s) => s.id === selectedStop.id) + 1 : 0;
 
   const updateSelected = useCallback(
     (patch: Partial<PaletteStop>) => {
-      if (selectedIndex === null) return;
-      setStops((prev) => prev.map((s, i) => (i === selectedIndex ? { ...s, ...patch } : s)));
+      if (selectedId === null) return;
+      setStops((prev) => {
+        const next = prev.map((s) => (s.id === selectedId ? { ...s, ...patch } : s));
+        // Re-sort when the anchor changed so peg order tracks anchor order;
+        // colours don't affect ordering.
+        return 'anchor' in patch ? [...next].sort((a, b) => a.anchor - b.anchor) : next;
+      });
     },
-    [selectedIndex],
+    [selectedId],
   );
 
   const removeSelected = useCallback(() => {
-    if (selectedIndex === null) return;
+    if (selectedId === null) return;
     if (stops.length <= 2) {
       setError('A palette needs at least 2 stops.');
       return;
     }
-    setStops((prev) => prev.filter((_, i) => i !== selectedIndex));
-    setSelectedIndex(null);
+    setStops((prev) => prev.filter((s) => s.id !== selectedId));
+    setSelectedId(null);
     setError(null);
-  }, [selectedIndex, stops.length]);
+  }, [selectedId, stops.length]);
 
-  const applyPreset = useCallback((name: string) => {
-    const p = PRESETS[name];
-    if (!p) return;
-    setStops(p.map((s) => ({ ...s })));
-    setSelectedIndex(null);
-    setError(null);
-  }, []);
+  const applyPreset = useCallback(
+    (name: string) => {
+      const p = PRESETS[name];
+      if (!p) return;
+      setStops(withIds(p));
+      setSelectedId(null);
+      setError(null);
+    },
+    [withIds],
+  );
 
   const loadFromFile = useCallback(async () => {
     let path: string | null = null;
@@ -349,13 +415,13 @@ export function PaletteEditor({ onClose }: Props = {}) {
     if (!path) return;
     try {
       const result = await rpcClient.loadPalette(path);
-      setStops(result.stops);
-      setSelectedIndex(null);
+      setStops(spaceStops(withIds(result.stops)));
+      setSelectedId(null);
       setError(null);
     } catch (e) {
       setError((e as Error).message);
     }
-  }, []);
+  }, [withIds]);
 
   const saveToFile = useCallback(async () => {
     let path: string | null = null;
@@ -371,7 +437,7 @@ export function PaletteEditor({ onClose }: Props = {}) {
     }
     if (!path) return;
     try {
-      await rpcClient.savePalette(path, stops);
+      await rpcClient.savePalette(path, stripIds(spaceStops(stops)));
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -394,19 +460,21 @@ export function PaletteEditor({ onClose }: Props = {}) {
       setError('Flux Max must exceed Flux Min.');
       return;
     }
-    setImagePalette(stops, { min: fluxMin, max: fluxMax });
+    // Emit a clean, strictly-increasing palette so the downstream colorscale
+    // never sees duplicate/unsorted anchors (BUG-018 / BUG-021).
+    setImagePalette(stripIds(spaceStops(stops)), { min: fluxMin, max: fluxMax });
     onClose?.();
   }, [setImagePalette, stops, fluxMin, fluxMax, onClose]);
 
   const onCancel = useCallback(() => {
     // Revert local edits and dismiss — survey-context state is unchanged.
-    setStops(defaultStops);
+    setStops(withIds(defaultStops));
     setFluxMin(initialMin);
     setFluxMax(initialMax);
-    setSelectedIndex(null);
+    setSelectedId(null);
     setError(null);
     onClose?.();
-  }, [defaultStops, initialMin, initialMax, onClose]);
+  }, [withIds, defaultStops, initialMin, initialMax, onClose]);
 
   return (
     <div className="palette-editor">
@@ -455,10 +523,10 @@ export function PaletteEditor({ onClose }: Props = {}) {
           // the user can fix the value.
           if (!Number.isFinite(s.anchor)) return null;
           const left = (clamp(s.anchor, 0, 255) / 255) * STRIP_WIDTH;
-          const isSel = i === selectedIndex;
+          const isSel = s.id === selectedId;
           return (
             <div
-              key={i}
+              key={s.id}
               className="palette-peg"
               style={{
                 position: 'absolute',
@@ -506,13 +574,13 @@ export function PaletteEditor({ onClose }: Props = {}) {
               {points && (
                 <polygon points={points} fill={COMPONENT_FILLS[ch]} stroke="none" />
               )}
-              {stops.map((s, i) => {
+              {stops.map((s) => {
                 if (!Number.isFinite(s.anchor)) return null;
                 const x = (clamp(s.anchor, 0, 255) / 255) * STRIP_WIDTH;
-                const isSel = i === selectedIndex;
+                const isSel = s.id === selectedId;
                 return (
                   <line
-                    key={i}
+                    key={s.id}
                     x1={x}
                     x2={x}
                     y1={0}
@@ -565,7 +633,7 @@ export function PaletteEditor({ onClose }: Props = {}) {
       {selectedStop && (
         <>
           <div className="palette-row">
-            <strong>Selected stop {selectedIndex! + 1}</strong>
+            <strong>Selected stop {selectedNumber}</strong>
             <label>
               anchor (0–255):
               <input
