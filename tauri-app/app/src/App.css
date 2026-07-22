@@ -607,6 +607,13 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+.sweep-nav-hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-subtle);
+  text-align: center;
+}
+
 .survey-view.empty {
   text-align: center;
   padding: 32px 16px;

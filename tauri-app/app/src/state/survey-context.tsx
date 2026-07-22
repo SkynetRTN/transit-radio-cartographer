@@ -74,6 +74,7 @@ export interface SurveyState {
   setViewMode: (mode: WorkspaceViewMode) => void;
   setCurrentSweepIndex: (index: number) => void;
   acceptCurrentSweep: () => void;
+  acceptAll: () => void;
   resetSweepReview: () => void;
   refreshWorkspace: () => Promise<void>;
   applyReduction: (op: (handle: number) => Promise<ReductionResult>) => Promise<void>;
@@ -325,6 +326,18 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       }
     }
   }, [workspace?.source_count, currentSweepIndex, acceptedSweeps]);
+
+  // Bulk-accept every sweep at once (bound to a keyboard shortcut, not an
+  // exposed button — the one-by-one review is the intended default). Callers
+  // in SurveyView commit any pending RFI edits on the current sweep first.
+  const acceptAll = useCallback(() => {
+    const sourceCount = workspace?.source_count ?? 0;
+    if (sourceCount <= 0) return;
+    const next = new Set<number>();
+    for (let i = 0; i < sourceCount; i++) next.add(i);
+    setAcceptedSweeps(next);
+    setViewMode('pre-image');
+  }, [workspace?.source_count]);
 
   const resetSweepReview = useCallback(() => {
     setAcceptedSweeps(new Set());
@@ -623,6 +636,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       setViewMode,
       setCurrentSweepIndex,
       acceptCurrentSweep,
+      acceptAll,
       resetSweepReview,
       refreshWorkspace,
       applyReduction,
@@ -668,6 +682,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       open,
       close,
       acceptCurrentSweep,
+      acceptAll,
       resetSweepReview,
       refreshWorkspace,
       applyReduction,

@@ -332,6 +332,87 @@ test('Undo button reverts the last Remove RFI removal or recovery', async () => 
   expect(screen.getByText('Undo')).toBeDisabled();
 });
 
+test('clicking a point in Remove RFI mode still updates the RA/Dec/Flux readout', async () => {
+  const calibrated: WorkspaceOverview = { ...workspaceOverview, calibrated: true };
+  await act(async () => {
+    render(
+      <SurveyProvider>
+        <HydrateSurvey
+          meta={{
+            handle: 1,
+            metadata: { sweep_count: 9, path: '/tmp/and0a.md2' },
+            workspace_handle: 2,
+            workspace: calibrated,
+          }}
+        />
+        <SurveyView />
+      </SurveyProvider>,
+    );
+  });
+  await waitFor(() => expect(screen.getByText('Remove RFI')).toBeInTheDocument());
+  // Readout starts empty.
+  expect(screen.getByText('Dec: --:--:--')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByText('Remove RFI'));
+  // Clicking the first endpoint in Remove RFI mode should update the readout
+  // (dec 10 → 10:00:00), not just arm the baseline gesture.
+  fireEvent.click(screen.getByTestId('survey-plot-click-first'));
+  await waitFor(() => expect(screen.getByText('Dec: 10:00:00')).toBeInTheDocument());
+});
+
+test('ArrowRight accepts the current sweep and advances when calibrated', async () => {
+  const calibrated: WorkspaceOverview = { ...workspaceOverview, calibrated: true };
+  await act(async () => {
+    render(
+      <SurveyProvider>
+        <HydrateSurvey
+          meta={{
+            handle: 1,
+            metadata: { sweep_count: 9, path: '/tmp/and0a.md2' },
+            workspace_handle: 2,
+            workspace: calibrated,
+          }}
+        />
+        <SurveyView />
+      </SurveyProvider>,
+    );
+  });
+  await waitFor(() =>
+    expect(screen.getByText(/0 \/ 5 sweeps accepted/)).toBeInTheDocument(),
+  );
+  fireEvent.keyDown(document.body, { key: 'ArrowRight' });
+  await waitFor(() =>
+    expect(screen.getByText(/1 \/ 5 sweeps accepted/)).toBeInTheDocument(),
+  );
+});
+
+test('Ctrl+Shift+A accepts every sweep and moves to pre-image', async () => {
+  const calibrated: WorkspaceOverview = { ...workspaceOverview, calibrated: true };
+  let currentMode = '';
+  const onMode = (m: string) => {
+    currentMode = m;
+  };
+  await act(async () => {
+    render(
+      <SurveyProvider>
+        <HydrateSurvey
+          meta={{
+            handle: 1,
+            metadata: { sweep_count: 9, path: '/tmp/and0a.md2' },
+            workspace_handle: 2,
+            workspace: calibrated,
+          }}
+        />
+        <ViewModeProbe onChange={onMode} />
+        <SurveyView />
+      </SurveyProvider>,
+    );
+  });
+  await waitFor(() => expect(currentMode).toBe('survey'));
+  fireEvent.keyDown(document.body, { key: 'A', ctrlKey: true, shiftKey: true });
+  await waitFor(() => expect(currentMode).toBe('pre-image'));
+});
+
 test('Prev/Next sweep nav advances the source sweep index', async () => {
   const getSweep = rpcClient.getSourceSweep as unknown as ReturnType<typeof vi.fn>;
   await act(async () => {

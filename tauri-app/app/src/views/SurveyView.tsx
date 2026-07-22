@@ -60,6 +60,7 @@ export function SurveyView() {
     setCurrentSweepIndex,
     acceptedSweeps,
     acceptCurrentSweep,
+    acceptAll,
     markDirty,
   } = useSurvey();
   const { theme } = useTheme();
@@ -256,6 +257,10 @@ export function SurveyView() {
     (p: Point) => {
       if (baselineMode) {
         if (!sweep) return;
+        // Keep the RA/Dec/Flux readout live while removing RFI: clicking a
+        // point should still update the side readout even though the click is
+        // also being consumed as a baseline endpoint.
+        setStickyPoint(p);
         if (!pendingBaselinePoint) {
           setPendingBaselinePoint({ dec: p.dec, flux: p.flux });
         } else {
@@ -366,8 +371,11 @@ export function SurveyView() {
     setRecoverCursor(null);
   }, []);
 
-  const handleAcceptSweep = useCallback(async () => {
-    if (!sweep || workspaceHandle === null) return;
+  // Commit this sweep's pending RFI edits (if any) to the engine workspace.
+  // Returns false if the commit failed (so callers skip accepting) or there is
+  // no sweep loaded. Shared by Accept Sweep and Accept All.
+  const commitPendingEdits = useCallback(async (): Promise<boolean> => {
+    if (!sweep || workspaceHandle === null) return false;
     const pending = removedBySweep[sweepIndex];
     if (pending && Object.keys(pending).length > 0) {
       const newFlux = applyRemoved(sweep.flux, pending);
@@ -391,18 +399,68 @@ export function SurveyView() {
       } catch (e) {
         setError((e as Error).message);
         setCommitting(false);
-        return;
+        return false;
       }
       setCommitting(false);
     }
+    return true;
+  }, [sweep, workspaceHandle, removedBySweep, sweepIndex, markDirty]);
+
+  const handleAcceptSweep = useCallback(async () => {
+    if (!(await commitPendingEdits())) return;
     acceptCurrentSweep();
+  }, [commitPendingEdits, acceptCurrentSweep]);
+
+  const handleAcceptAll = useCallback(async () => {
+    if (!(await commitPendingEdits())) return;
+    acceptAll();
+  }, [commitPendingEdits, acceptAll]);
+
+  // Keyboard navigation over sweeps (ignored while typing in a field such as
+  // the sweep-number input):
+  //   ←            previous sweep (no accept)
+  //   →            accept the current sweep and advance (once calibrated);
+  //                before calibration it just moves to the next sweep
+  //   Ctrl/Cmd+Shift+A   accept every remaining sweep at once
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (
+        el &&
+        (el.tagName === 'INPUT' ||
+          el.tagName === 'TEXTAREA' ||
+          el.tagName === 'SELECT' ||
+          el.isContentEditable)
+      ) {
+        return;
+      }
+      const count = workspace?.source_count ?? 0;
+      if (count <= 0) return;
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'a' || e.key === 'A')) {
+        if (!workspace?.calibrated) return;
+        e.preventDefault();
+        void handleAcceptAll();
+        return;
+      }
+      if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        setCurrentSweepIndex(Math.max(0, currentSweepIndex - 1));
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        if (workspace?.calibrated) void handleAcceptSweep();
+        else setCurrentSweepIndex(Math.min(count - 1, currentSweepIndex + 1));
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
   }, [
-    sweep,
-    workspaceHandle,
-    removedBySweep,
-    sweepIndex,
-    acceptCurrentSweep,
-    markDirty,
+    currentSweepIndex,
+    workspace?.source_count,
+    workspace?.calibrated,
+    handleAcceptSweep,
+    handleAcceptAll,
+    setCurrentSweepIndex,
   ]);
 
   const readoutPoint = stickyPoint ?? hoverPoint;
@@ -631,6 +689,10 @@ export function SurveyView() {
               >
                 Next ›
               </button>
+            </div>
+
+            <div className="sweep-nav-hint">
+              Keys: ← back · → accept &amp; next · Ctrl+Shift+A accept all
             </div>
           </div>
         </div>

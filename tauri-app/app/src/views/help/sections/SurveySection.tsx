@@ -99,9 +99,23 @@ export function SurveySection() {
       <h3>4. Navigate sweeps</h3>
       <p>
         Use the <strong>Prev</strong> / <strong>Next</strong> buttons or{' '}
-        <strong>type a sweep number</strong> in the sweep input field. Using <strong>Prev</strong> / <strong>Next</strong> buttons or{' '}
-        <strong>typing a sweep number</strong> in the sweep input field does not accept sweeps. The
+        <strong>type a sweep number</strong> in the sweep input field — these
+        just move between sweeps and do <em>not</em> accept anything. The
         progress indicator <code>N / M sweeps accepted</code> updates live.
+      </p>
+      <p>
+        <strong>Keyboard shortcuts</strong> (active whenever the sweep-number
+        field isn't focused): <code>←</code> moves to the previous sweep, and{' '}
+        <code>→</code> <em>accepts</em> the current sweep and advances once the
+        survey is calibrated (before calibration it just moves forward).{' '}
+        <code>Ctrl</code>+<code>Shift</code>+<code>A</code> accepts every
+        remaining sweep at once.
+      </p>
+      <p>
+        Accepting a sweep jumps you to the next <em>unaccepted</em> one and wraps
+        around — so if you accept out of order, accepting the last sweep loops
+        back to the first sweep you still need to finish. That wrap is how you
+        track down any stragglers before the image can be built.
       </p>
 
       <h3>5. Save partway through (optional)</h3>
