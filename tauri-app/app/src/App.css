@@ -392,7 +392,10 @@ body {
 
 .workspace-body {
   display: grid;
-  grid-template-columns: 1fr 220px;
+  /* Side panel shrinks with the window (down to a usable floor) instead of
+     holding a fixed 220px and squeezing the plot column at medium widths.
+     minmax(0, …) on the plot column lets it actually shrink below its content. */
+  grid-template-columns: minmax(0, 1fr) clamp(150px, 16%, 220px);
   gap: 16px;
   padding: 16px;
   flex: 1;

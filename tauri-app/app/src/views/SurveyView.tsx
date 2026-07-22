@@ -446,7 +446,7 @@ export function SurveyView() {
                 {sweep && (
                   <PointScatter
                     series={topSeries}
-                    xAxisLabel="Declination"
+                    xAxisLabel=""
                     yAxisLabel=""
                     overlayLines={baselineOverlays}
                     onHover={handleHover}
@@ -461,9 +461,18 @@ export function SurveyView() {
                     }
                     testId="survey-plot"
                     height={260}
+                    showXTicks={false}
                   />
                 )}
               </div>
+            </div>
+
+            {/* Shared x-axis label sits between the two panels so the top plot's
+                ticks/title don't overlap the lower "Removed" panel — same pattern
+                ScanView uses (both panels share the Declination x-axis). */}
+            <div className="plot-row-label">
+              <div className="axis-label-y-spacer" />
+              <div className="x-axis-label">Declination</div>
             </div>
 
             <div className="plot-row">
