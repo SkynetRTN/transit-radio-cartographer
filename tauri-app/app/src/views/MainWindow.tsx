@@ -18,6 +18,7 @@ import { YesNoCancelDialog } from './dialogs/YesNoCancelDialog';
 import { ColorPickDialog } from './dialogs/ColorPickDialog';
 import { ConfirmDialog } from './dialogs/ConfirmDialog';
 import { HelpDialog } from './help/HelpDialog';
+import { useImageSave } from '../lib/useImageSave';
 import { MenuBarShell, MenuTrigger } from './chrome/MenuBar';
 import { StatusBar } from './chrome/StatusBar';
 import { useSurvey } from '../state/survey-context';
@@ -66,7 +67,6 @@ export function MainWindow() {
     setImageName,
     imageName,
     imageSavePath,
-    saveImage,
     setSurveyName,
     magnifierHalfSize,
     setMagnifierHalfSize,
@@ -91,6 +91,7 @@ export function MainWindow() {
     resetForEngineRestart: resetScanForEngineRestart,
   } = useScan();
   const fluxCal = useFluxCal();
+  const { saveImageQuick, saveImageAs, saveBitmapAs } = useImageSave();
   const { theme, setTheme } = useTheme();
   const hasSurvey = survey !== null;
   // Image-menu items act on a built image, so they enable as soon as one
@@ -546,72 +547,35 @@ export function MainWindow() {
     }
   }, [adoptImage, setImageName]);
 
+  // The three Image-menu save actions delegate to the shared useImageSave hook
+  // (the same path the in-view Save buttons use). Menu-specific concerns —
+  // closing the menu and surfacing errors as a warning banner — stay here.
   const handleSaveImage = useCallback(async () => {
     setOpenMenu(null);
-    if (!image) return;
-    if (imageSavePath) {
-      await saveImage(imageSavePath);
-      return;
-    }
-    let target: string | null = null;
     try {
-      const selected = await saveDialog({
-        title: 'Save Image As',
-        defaultPath: `${imageName || 'image'}.img`,
-        filters: [
-          { name: 'Image (.img)', extensions: ['img'] },
-          { name: 'FITS (.fits)', extensions: ['fits'] },
-        ],
-      });
-      target = typeof selected === 'string' ? selected : null;
-    } catch (err) {
-      console.error('save dialog failed', err);
-      return;
+      await saveImageQuick();
+    } catch (e) {
+      setWarning((e as Error).message);
     }
-    if (!target) return;
-    await saveImage(target);
-  }, [image, imageSavePath, imageName, saveImage]);
+  }, [saveImageQuick]);
 
   const handleSaveImageAs = useCallback(async () => {
     setOpenMenu(null);
-    if (!image) return;
-    let target: string | null = null;
     try {
-      const selected = await saveDialog({
-        title: 'Save Image As',
-        defaultPath: imageSavePath ?? `${imageName || 'image'}.img`,
-        filters: [
-          { name: 'Image (.img)', extensions: ['img'] },
-          { name: 'FITS (.fits)', extensions: ['fits'] },
-        ],
-      });
-      target = typeof selected === 'string' ? selected : null;
-    } catch (err) {
-      console.error('save dialog failed', err);
-      return;
+      await saveImageAs();
+    } catch (e) {
+      setWarning((e as Error).message);
     }
-    if (!target) return;
-    await saveImage(target);
-  }, [image, imageSavePath, imageName, saveImage]);
+  }, [saveImageAs]);
 
   const handleSaveBitmapAs = useCallback(async () => {
     setOpenMenu(null);
-    if (!image) return;
-    let target: string | null = null;
     try {
-      const selected = await saveDialog({
-        title: 'Save Bitmap As',
-        defaultPath: `${imageName || 'image'}.bmp`,
-        filters: [{ name: 'Bitmap (.bmp)', extensions: ['bmp'] }],
-      });
-      target = typeof selected === 'string' ? selected : null;
-    } catch (err) {
-      console.error('save dialog failed', err);
-      return;
+      await saveBitmapAs();
+    } catch (e) {
+      setWarning((e as Error).message);
     }
-    if (!target) return;
-    await saveImage(target);
-  }, [image, imageName, saveImage]);
+  }, [saveBitmapAs]);
 
   const startCompose = useCallback(
     async (mode: ComposeMode) => {

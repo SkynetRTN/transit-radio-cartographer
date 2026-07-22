@@ -33,6 +33,9 @@ interface Props {
   onClick?: (point: ImagePoint) => void;
   onContextMenu?: (point: ImagePoint | null) => void;
   boxOverlay?: BoxOverlay | null;
+  // BUG-020: draws a persistent target marker at the pinned (clicked) cell so
+  // the user can see where the flux readout was sampled after moving the cursor.
+  pinnedMarker?: { ra: number; dec: number } | null;
   showColorBar?: boolean;
   fixedHeight?: number;
   // FEAT-011: selects how the bounded-mode plot lays out its aspect ratio.
@@ -161,6 +164,7 @@ export function ImagePlot({
   onClick,
   onContextMenu,
   boxOverlay,
+  pinnedMarker,
   showColorBar = true,
   fixedHeight,
   displayMode = 'sky',
@@ -246,6 +250,36 @@ export function ImagePlot({
         hoverinfo: 'none',
       } as Plotly.Data,
     ];
+
+    // Pinned-cell marker (BUG-020): a target ring drawn over the heatmap at the
+    // clicked cell. Two overlaid open-circle traces give a white ring with a
+    // black halo so it stays visible on any palette color. `hoverinfo: 'skip'`
+    // keeps it out of hover/readout; clicks are still routed to the heatmap
+    // below by preferring the trace that carries a `z` value.
+    if (
+      pinnedMarker &&
+      Number.isFinite(pinnedMarker.ra) &&
+      Number.isFinite(pinnedMarker.dec)
+    ) {
+      const markerBase = {
+        x: [pinnedMarker.ra],
+        y: [pinnedMarker.dec],
+        type: 'scatter' as const,
+        mode: 'markers' as const,
+        hoverinfo: 'skip' as const,
+        showlegend: false,
+      };
+      data.push(
+        {
+          ...markerBase,
+          marker: { symbol: 'circle-open', size: 17, color: '#000', line: { color: '#000', width: 4 } },
+        } as Plotly.Data,
+        {
+          ...markerBase,
+          marker: { symbol: 'circle-open', size: 15, color: '#fff', line: { color: '#fff', width: 2 } },
+        } as Plotly.Data,
+      );
+    }
 
     const raTicks = hasBounds
       ? sexagesimalTicks(meta!.min_ra, meta!.max_ra, 5, formatRaSeconds)
@@ -367,7 +401,9 @@ export function ImagePlot({
     const onHoverWired = (data: unknown) => {
       const d = data as { points?: Array<{ x: number; y: number; z: number; pointIndex?: [number, number] }> };
       if (!d.points || d.points.length === 0) return;
-      const p = d.points[0];
+      // Prefer the heatmap point (it carries `z`) in case the cursor is also
+      // over the pinned-marker scatter trace.
+      const p = d.points.find((pt) => typeof pt.z === 'number') ?? d.points[0];
       const idx = p.pointIndex;
       const point: ImagePoint = {
         ra: p.x,
@@ -387,7 +423,7 @@ export function ImagePlot({
     const onClickWired = (data: unknown) => {
       const d = data as { points?: Array<{ x: number; y: number; z: number; pointIndex?: [number, number] }> };
       if (!d.points || d.points.length === 0 || !onClick) return;
-      const p = d.points[0];
+      const p = d.points.find((pt) => typeof pt.z === 'number') ?? d.points[0];
       const idx = p.pointIndex;
       onClick({
         ra: p.x,
@@ -431,7 +467,7 @@ export function ImagePlot({
       plotEl.removeAllListeners?.('plotly_relayout');
       Plotly.purge(node);
     };
-  }, [image, meta, title, palette, fluxRange, boxOverlay, showColorBar, displayMode, onHover, onClick, theme]);
+  }, [image, meta, title, palette, fluxRange, boxOverlay, pinnedMarker, showColorBar, displayMode, onHover, onClick, theme]);
 
   const handleContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
     // Always suppress the browser context menu on the heatmap. Without this,

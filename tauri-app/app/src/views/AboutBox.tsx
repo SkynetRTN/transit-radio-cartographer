@@ -35,7 +35,8 @@ export function AboutBox() {
         >
           OG Radio Cartographer
         </div>
-        <div style={{ marginTop: 8, fontSize: 13 }}>Copyright 2026</div>
+        <div style={{ marginTop: 8, fontSize: 13 }}>Version {__APP_VERSION__}</div>
+        <div style={{ marginTop: 2, fontSize: 13 }}>Copyright 2026</div>
 
         <div style={{ marginTop: 22, fontSize: 13 }}>Created By</div>
         <div style={{ marginTop: 4, fontSize: 18, fontWeight: 700 }}>

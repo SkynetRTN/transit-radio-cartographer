@@ -739,6 +739,13 @@ body {
   font-style: italic;
 }
 
+.side-error {
+  font-size: 11px;
+  color: var(--danger);
+  margin-top: 4px;
+  word-break: break-word;
+}
+
 .point-readout {
   margin-top: 8px;
   padding: 6px 8px;

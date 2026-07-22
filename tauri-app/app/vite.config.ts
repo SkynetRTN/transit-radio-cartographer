@@ -1,12 +1,22 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { readFileSync } from "fs";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
+// Single source of truth for the app version shown in the About box: read it
+// from the Tauri config so it never drifts from the packaged version.
+const appVersion: string = JSON.parse(
+  readFileSync(new URL("./src-tauri/tauri.conf.json", import.meta.url), "utf-8"),
+).version ?? "0.0.0";
+
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [react()],
+  define: {
+    __APP_VERSION__: JSON.stringify(appVersion),
+  },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

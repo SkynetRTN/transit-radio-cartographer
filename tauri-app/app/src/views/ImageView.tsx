@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSurvey } from '../state/survey-context';
 import { ImagePlot, type ImagePoint, type BoxOverlay } from '../lib/plots/ImagePlot';
 import { RgbImagePlot } from '../lib/plots/RgbImagePlot';
+import { useImageSave } from '../lib/useImageSave';
 import type { ImageMeta, ImagePixels } from '../ipc/client';
 
 function pad2(n: number): string {
@@ -149,13 +150,28 @@ export function ImageView() {
     setViewMode,
   } = useSurvey();
 
+  const { saveImageQuick, saveImageAs, saveBitmapAs } = useImageSave();
+
   const [hoverPoint, setHoverPoint] = useState<ImagePoint | null>(null);
   const [pinnedPoint, setPinnedPoint] = useState<ImagePoint | null>(null);
   const [magnifierCenter, setMagnifierCenter] = useState<ImagePoint | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const handleBack = useCallback(() => {
     setViewMode('pre-image');
   }, [setViewMode]);
+
+  // In-view Save buttons (BUG-024) so saving doesn't require the Image menu.
+  // They share the same path as the menu via useImageSave; errors surface
+  // inline here rather than as the menu's warning banner.
+  const runSave = useCallback(async (action: () => Promise<void>) => {
+    setSaveError(null);
+    try {
+      await action();
+    } catch (e) {
+      setSaveError((e as Error).message);
+    }
+  }, []);
 
   // Right-click on the main plot opens (or moves) the magnifier centered at
   // the cell currently under the cursor. The legacy guide describes this as
@@ -255,6 +271,9 @@ export function ImageView() {
                 onClick={handleClick}
                 onContextMenu={handleContextMenu}
                 boxOverlay={magnifier?.overlay ?? null}
+                pinnedMarker={
+                  pinnedPoint ? { ra: pinnedPoint.ra, dec: pinnedPoint.dec } : null
+                }
                 displayMode={imageDisplay}
               />
             ) : (
@@ -288,6 +307,21 @@ export function ImageView() {
               )}
               {pinnedPoint && (
                 <button onClick={() => setPinnedPoint(null)}>Unpin</button>
+              )}
+              {hasScalar && (
+                <>
+                  <div className="button-gap" />
+                  <button onClick={() => void runSave(saveImageQuick)}>
+                    Save Image
+                  </button>
+                  <button onClick={() => void runSave(saveImageAs)}>
+                    Save Image As…
+                  </button>
+                  <button onClick={() => void runSave(saveBitmapAs)}>
+                    Save Bitmap As…
+                  </button>
+                  {saveError && <div className="side-error">{saveError}</div>}
+                </>
               )}
             </div>
 

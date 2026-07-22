@@ -209,6 +209,12 @@ export function PreImageView() {
           </div>
 
           <div className="workspace-side">
+            {imagePixels && (
+              <div className="side-hint">
+                Right-click and drag on the image to zoom in; double-click to
+                reset.
+              </div>
+            )}
             <div className="side-buttons">
               <button
                 onClick={openMakeImagePrompt}

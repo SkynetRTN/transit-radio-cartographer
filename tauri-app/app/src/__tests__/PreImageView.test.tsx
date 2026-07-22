@@ -120,6 +120,29 @@ async function runSmoothBaselineAlign() {
   );
 }
 
+test('Pre Image shows the right-click-drag zoom hint once an image exists', async () => {
+  await act(async () => {
+    render(
+      <SurveyProvider>
+        <HydrateSurvey
+          meta={{
+            handle: 1,
+            metadata: { sweep_count: 1, path: '/tmp/and0a.md2' },
+            workspace_handle: 2,
+            workspace: workspaceOverview,
+          }}
+        />
+        <PreImageView />
+      </SurveyProvider>,
+    );
+  });
+  await waitFor(() =>
+    expect(
+      screen.getByText(/Right-click and drag on the image to zoom in/),
+    ).toBeInTheDocument(),
+  );
+});
+
 test('Make Image is gated until smooth, baseline, and align all run', async () => {
   await act(async () => {
     render(
