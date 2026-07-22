@@ -692,7 +692,7 @@ export function SurveyView() {
             </div>
 
             <div className="sweep-nav-hint">
-              Keys: ← back · → accept &amp; next · Ctrl+Shift+A accept all
+              Keys: ← back · → accept &amp; next
             </div>
           </div>
         </div>

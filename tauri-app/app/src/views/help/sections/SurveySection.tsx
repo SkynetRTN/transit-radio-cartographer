@@ -107,9 +107,7 @@ export function SurveySection() {
         <strong>Keyboard shortcuts</strong> (active whenever the sweep-number
         field isn't focused): <code>←</code> moves to the previous sweep, and{' '}
         <code>→</code> <em>accepts</em> the current sweep and advances once the
-        survey is calibrated (before calibration it just moves forward).{' '}
-        <code>Ctrl</code>+<code>Shift</code>+<code>A</code> accepts every
-        remaining sweep at once.
+        survey is calibrated (before calibration it just moves forward).
       </p>
       <p>
         Accepting a sweep jumps you to the next <em>unaccepted</em> one and wraps
