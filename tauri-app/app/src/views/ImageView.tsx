@@ -2,9 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { useSurvey } from '../state/survey-context';
 import { ImagePlot, type ImagePoint, type BoxOverlay } from '../lib/plots/ImagePlot';
-import { RgbImagePlot } from '../lib/plots/RgbImagePlot';
+import { RgbImagePlot, type RgbImagePoint } from '../lib/plots/RgbImagePlot';
 import { useImageSave } from '../lib/useImageSave';
-import { rpcClient, type ImageMeta, type ImagePixels } from '../ipc/client';
+import {
+  rpcClient,
+  type ImageMeta,
+  type ImagePixels,
+  type RgbImageMeta,
+  type RgbImagePixels,
+} from '../ipc/client';
 
 function pad2(n: number): string {
   return n < 10 ? `0${n}` : `${n}`;
@@ -136,6 +142,59 @@ function buildMagnifier(
   };
 }
 
+interface RgbMagnifierData {
+  pixels: RgbImagePixels;
+  meta: RgbImageMeta | null;
+  overlay: BoxOverlay | null;
+}
+
+// RGB counterpart of buildMagnifier (BUG-017): slice the 3 channels around the
+// cell and derive a sub-meta + box overlay. There's no flux/palette to rescale
+// — the composite already carries its own colour.
+function buildRgbMagnifier(
+  pixels: RgbImagePixels,
+  meta: RgbImageMeta | null,
+  center: { col: number; row: number },
+  half: number,
+): RgbMagnifierData {
+  const colMin = Math.max(0, center.col - half);
+  const colMax = Math.min(pixels.width - 1, center.col + half);
+  const rowMin = Math.max(0, center.row - half);
+  const rowMax = Math.min(pixels.height - 1, center.row + half);
+  const slice = (grid: (number | null)[][]) => {
+    const out: (number | null)[][] = [];
+    for (let r = rowMin; r <= rowMax; r++) out.push(grid[r].slice(colMin, colMax + 1));
+    return out;
+  };
+  const w = colMax - colMin + 1;
+  const h = rowMax - rowMin + 1;
+  let subMeta: RgbImageMeta | null = null;
+  let overlay: BoxOverlay | null = null;
+  if (meta && pixels.width > 1 && pixels.height > 1) {
+    // col 0 = max_ra, col (W-1) = min_ra (RA decreases with column).
+    const raAt = (c: number) =>
+      meta.max_ra - (c / (pixels.width - 1)) * (meta.max_ra - meta.min_ra);
+    const decAt = (r: number) =>
+      meta.min_dec + (r / (pixels.height - 1)) * (meta.max_dec - meta.min_dec);
+    const raLo = raAt(colMax);
+    const raHi = raAt(colMin);
+    const decLo = decAt(rowMin);
+    const decHi = decAt(rowMax);
+    subMeta = { ...meta, width: w, height: h, min_ra: raLo, max_ra: raHi, min_dec: decLo, max_dec: decHi };
+    overlay = {
+      raCenter: (raLo + raHi) / 2,
+      decCenter: (decLo + decHi) / 2,
+      raHalfWidth: (raHi - raLo) / 2,
+      decHalfHeight: (decHi - decLo) / 2,
+    };
+  }
+  return {
+    pixels: { r: slice(pixels.r), g: slice(pixels.g), b: slice(pixels.b), width: w, height: h },
+    meta: subMeta,
+    overlay,
+  };
+}
+
 export function ImageView() {
   const {
     workspace,
@@ -157,6 +216,10 @@ export function ImageView() {
   const [hoverPoint, setHoverPoint] = useState<ImagePoint | null>(null);
   const [pinnedPoint, setPinnedPoint] = useState<ImagePoint | null>(null);
   const [magnifierCenter, setMagnifierCenter] = useState<ImagePoint | null>(null);
+  // RGB-composite cursor + magnifier (BUG-017). Kept separate from the scalar
+  // state above because RGB cells carry no flux.
+  const [rgbHover, setRgbHover] = useState<RgbImagePoint | null>(null);
+  const [rgbMagCenter, setRgbMagCenter] = useState<RgbImagePoint | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   // Latest composited RGB bitmap (PNG data URL), captured from RgbImagePlot for
   // client-side export (BUG-015).
@@ -219,6 +282,16 @@ export function ImageView() {
     if (!magnifierCenter || !imagePixels) return null;
     return buildMagnifier(imagePixels, image, magnifierCenter, magnifierHalfSize);
   }, [magnifierCenter, imagePixels, image, magnifierHalfSize]);
+
+  // RGB-composite hover + right-click magnifier (BUG-017).
+  const handleRgbContextMenu = useCallback((p: RgbImagePoint | null) => {
+    if (p) setRgbMagCenter(p);
+  }, []);
+
+  const rgbMagnifier = useMemo(() => {
+    if (!rgbMagCenter || !rgbImagePixels) return null;
+    return buildRgbMagnifier(rgbImagePixels, rgbImage, rgbMagCenter, magnifierHalfSize);
+  }, [rgbMagCenter, rgbImagePixels, rgbImage, magnifierHalfSize]);
 
   // Arrow keys nudge the magnifier center while it's open. Hold Shift to
   // step in larger jumps. We skip the handler when an input is focused so
@@ -304,15 +377,17 @@ export function ImageView() {
                 displayMode={imageDisplay}
               />
             ) : (
-              // RGB composite (bi/tri-color). Magnifier/pin features are
-              // intentionally not wired here yet — those rely on per-cell flux
-              // semantics that don't carry over to a 3-channel image.
+              // RGB composite (bi/tri-color): zooms in data coords, with a
+              // right-click magnifier and RA/Dec hover readout (BUG-017).
               <RgbImagePlot
                 image={rgbImagePixels!}
                 meta={rgbImage}
                 title=""
                 testId="rgb-image-plot"
                 onBitmap={handleRgbBitmap}
+                onHover={setRgbHover}
+                onContextMenu={handleRgbContextMenu}
+                boxOverlay={rgbMagnifier?.overlay ?? null}
               />
             )}
           </div>
@@ -324,12 +399,23 @@ export function ImageView() {
                 {magnifierCenter && <> Arrow keys move it (Shift = ×5).</>}
               </div>
             )}
+            {hasRgb && (
+              <div className="side-hint">
+                Drag to zoom (double-click to reset) · right-click to open the
+                magnifier.
+              </div>
+            )}
             <div className="side-buttons">
               {workspace && (
                 <button onClick={handleBack}>Back to Pre Image</button>
               )}
               {magnifierCenter && (
                 <button onClick={() => setMagnifierCenter(null)}>
+                  Close Magnifier
+                </button>
+              )}
+              {rgbMagCenter && (
+                <button onClick={() => setRgbMagCenter(null)}>
                   Close Magnifier
                 </button>
               )}
@@ -386,6 +472,12 @@ export function ImageView() {
                   {pinnedPoint && <div className="pinned-tag">pinned</div>}
                 </div>
               )}
+              {hasRgb && (
+                <div className="point-readout">
+                  <div>RA: {rgbHover ? formatRaSeconds(rgbHover.ra) : '—'}</div>
+                  <div>Dec: {rgbHover ? formatDecDegrees(rgbHover.dec) : '—'}</div>
+                </div>
+              )}
             </div>
 
             {magnifier && (
@@ -403,6 +495,19 @@ export function ImageView() {
                   showColorBar={false}
                   fixedHeight={200}
                   displayMode={imageDisplay}
+                />
+              </div>
+            )}
+
+            {rgbMagnifier && (
+              <div className="magnifier-panel">
+                <div className="magnifier-label">Magnifier</div>
+                <RgbImagePlot
+                  image={rgbMagnifier.pixels}
+                  meta={rgbMagnifier.meta}
+                  title=""
+                  testId="rgb-magnifier-plot"
+                  fixedHeight={200}
                 />
               </div>
             )}
