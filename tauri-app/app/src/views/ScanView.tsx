@@ -76,6 +76,33 @@ export function ScanView() {
   const dragOrigin = useRef<number | null>(null);
   const dragDecOrigin = useRef<number | null>(null);
 
+  // BUG-022: the fit-curve overlay is transient UI state the engine never
+  // persists, so a plain reload wipes it. To make Undo restore the model fit
+  // (not just the reverted peak flux), we keep a frontend history of the
+  // overlay, pushed before every source-side mutation so it stays 1:1 with the
+  // engine's source undo stack. On undo we stage the popped overlay and let the
+  // `[view]` reset effect re-apply it after the reload clears it.
+  type PeakOverlay = {
+    fit: { ra: number[]; flux: number[] } | null;
+    highlight: { ra: number; flux: number } | null;
+  };
+  const overlayHistoryRef = useRef<PeakOverlay[]>([]);
+  const overlayRestoreRef = useRef<PeakOverlay | null>(null);
+  const peakFitRef = useRef(pendingPeakFit);
+  const peakHighlightRef = useRef(pendingPeakHighlight);
+  useEffect(() => {
+    peakFitRef.current = pendingPeakFit;
+  }, [pendingPeakFit]);
+  useEffect(() => {
+    peakHighlightRef.current = pendingPeakHighlight;
+  }, [pendingPeakHighlight]);
+  const pushOverlayHistory = useCallback(() => {
+    overlayHistoryRef.current.push({
+      fit: peakFitRef.current,
+      highlight: peakHighlightRef.current,
+    });
+  }, []);
+
   const loadView = useCallback(async () => {
     if (handle === null) return;
     setLoading(true);
@@ -100,15 +127,26 @@ export function ScanView() {
   }, [loadView, overview?.flux_calibrated]);
 
   // Reset transient interaction state whenever the underlying view changes
-  // (e.g. after a Cut / Baseline Source / Determine Peak completes).
+  // (e.g. after a Cut / Baseline Source / Select Declination completes). The
+  // fit overlay is normally cleared too, unless an undo staged one to restore
+  // (BUG-022) — in which case we re-apply it here, after the reload.
   useEffect(() => {
     setStickyPoint(null);
     setPendingBaselinePoint(null);
     setDragRange(null);
     setDragDecRange(null);
-    setPendingPeakFit(null);
-    setPendingPeakHighlight(null);
+    const restore = overlayRestoreRef.current;
+    overlayRestoreRef.current = null;
+    setPendingPeakFit(restore ? restore.fit : null);
+    setPendingPeakHighlight(restore ? restore.highlight : null);
   }, [view]);
+
+  // Drop the overlay history when the scan itself changes or its flux
+  // calibration flips (both invalidate any earlier fit).
+  useEffect(() => {
+    overlayHistoryRef.current = [];
+    overlayRestoreRef.current = null;
+  }, [handle, overview?.flux_calibrated]);
 
   const unit: 'volts' | 'gain' | 'jy' = view?.unit ?? 'volts';
   const calibrated = view?.calibrated === true;
@@ -224,6 +262,7 @@ export function ScanView() {
           return;
         }
         try {
+          pushOverlayHistory();
           await rpcClient.baselineScanSource(
             handle,
             pendingBaselinePoint.ra,
@@ -281,6 +320,9 @@ export function ScanView() {
         }
         setDragRange(null);
         try {
+          // Record the pre-op overlay so an undo of this cut / peak fit can
+          // restore it (BUG-022).
+          pushOverlayHistory();
           if (activeMode === 'cut') {
             await rpcClient.cutScanSegment(handle, range.x0, range.x1);
             await Promise.all([loadView(), refreshOverview()]);
@@ -363,6 +405,7 @@ export function ScanView() {
         }
         setDragDecRange(null);
         try {
+          pushOverlayHistory();
           await rpcClient.selectScanDeclination(handle, range.y0, range.y1);
           await Promise.all([loadView(), refreshOverview()]);
           markDirty();
@@ -385,7 +428,14 @@ export function ScanView() {
   const handleUndo = useCallback(async () => {
     if (handle === null) return;
     try {
-      await rpcClient.undoScan(handle);
+      const res = await rpcClient.undoScan(handle);
+      // If a source op was reverted, stage the overlay that was current before
+      // it so the reload re-applies it (BUG-022). The history stays aligned
+      // with the engine's source undo stack; when it's empty the undo popped a
+      // pre-session (e.g. calibration) snapshot and there's nothing to restore.
+      if (res.undone && overlayHistoryRef.current.length > 0) {
+        overlayRestoreRef.current = overlayHistoryRef.current.pop() ?? null;
+      }
       await Promise.all([loadView(), refreshOverview()]);
       markDirty();
     } catch (e) {
