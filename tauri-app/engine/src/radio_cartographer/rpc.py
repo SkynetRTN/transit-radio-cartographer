@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import io
 import json
 import struct
@@ -455,6 +457,8 @@ class RpcServer:
                 result = self._extend_rgb_image(params)
             elif method == "get_rgb_image_pixels":
                 result = self._get_rgb_image_pixels(params)
+            elif method == "save_rgb_png":
+                result = self._save_rgb_png(params)
             elif method == "open_palette":
                 result = self._open_palette(params)
             elif method == "save_palette":
@@ -921,6 +925,30 @@ class RpcServer:
         except Exception as exc:  # noqa: BLE001
             raise RpcError(ERR_IO, f"failed to save bitmap: {exc}") from exc
         return {"path": str(path), "bytes_written": int(Path(str(path)).stat().st_size)}
+
+    def _save_rgb_png(self, params: dict[str, Any]) -> dict[str, Any]:
+        # Persist a client-rendered PNG (bi/tri-color composite). The webview
+        # composites the 3 channels to a canvas and hands us its data URL /
+        # base64; there is no scalar GriddedImage to route through save_image,
+        # so we just decode and write the bytes verbatim.
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        data = params.get("data")
+        if not isinstance(data, str) or not data:
+            raise RpcError(ERR_INVALID_PARAMS, "data (base64 PNG) is required")
+        # Accept an optional data-URL prefix ("data:image/png;base64,...").
+        if data.startswith("data:"):
+            _, _, data = data.partition(",")
+        try:
+            raw = base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, f"invalid base64 data: {exc}") from exc
+        try:
+            Path(str(path)).write_bytes(raw)
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to save png: {exc}") from exc
+        return {"path": str(path), "bytes_written": len(raw)}
 
     def _append_image(self, params: dict[str, Any]) -> dict[str, Any]:
         primary = self._resolve_image(int(params.get("handle", -1)))

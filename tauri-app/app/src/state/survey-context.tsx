@@ -81,6 +81,9 @@ export interface SurveyState {
   makeImage: (pix?: number) => Promise<ImageMeta | null>;
   setImage: (meta: ImageMeta, pixels: ImagePixels, savePath?: string | null) => void;
   setRgbImage: (meta: RgbImageMeta, pixels: RgbImagePixels) => void;
+  // Restore the scalar image a bi/tri-color composite was built from (BUG-016).
+  // Returns false when there's nothing stashed.
+  restoreScalarImage: () => boolean;
   setImagePalette: (palette: PaletteStop[] | null, flux: FluxRange | null) => void;
   setImageName: (name: string) => void;
   setSurveyName: (name: string) => Promise<void>;
@@ -122,6 +125,15 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   const [imageFluxRange, setImageFluxRangeState] = useState<FluxRange | null>(null);
   const [imageName, setImageNameState] = useState<string>('image');
   const [imageSavePath, setImageSavePath] = useState<string | null>(null);
+  // BUG-016: when a bi/tri-color composite is built, the scalar image it was
+  // seeded from is stashed here (its engine handle kept open) so "Back to Pre
+  // Image" can restore it instantly instead of routing back to the survey
+  // pre-image.
+  const [preComposeImage, setPreComposeImage] = useState<{
+    meta: ImageMeta;
+    pixels: ImagePixels;
+    savePath: string | null;
+  } | null>(null);
   const [magnifierHalfSize, setMagnifierHalfSizeState] = useState<number>(15);
   const [imageDisplay, setImageDisplayState] = useState<ImageDisplayMode>('sky');
   const [loading, setLoading] = useState(false);
@@ -136,6 +148,9 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   const surveyRef = useRef<SurveyMeta | null>(survey);
   const workspaceHandleRef = useRef<number | null>(workspaceHandle);
   const imageRef = useRef<ImageMeta | null>(image);
+  const imagePixelsRef = useRef<ImagePixels | null>(imagePixels);
+  const imageSavePathRef = useRef<string | null>(imageSavePath);
+  const preComposeImageRef = useRef(preComposeImage);
   const rgbImageRef = useRef<RgbImageMeta | null>(rgbImage);
   const imagePaletteRef = useRef<PaletteStop[] | null>(imagePalette);
   const imageFluxRangeRef = useRef<FluxRange | null>(imageFluxRange);
@@ -155,6 +170,15 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     imageRef.current = image;
   }, [image]);
+  useEffect(() => {
+    imagePixelsRef.current = imagePixels;
+  }, [imagePixels]);
+  useEffect(() => {
+    imageSavePathRef.current = imageSavePath;
+  }, [imageSavePath]);
+  useEffect(() => {
+    preComposeImageRef.current = preComposeImage;
+  }, [preComposeImage]);
   useEffect(() => {
     rgbImageRef.current = rgbImage;
   }, [rgbImage]);
@@ -188,6 +212,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     setImagePixels(null);
     setRgbImageState(null);
     setRgbImagePixels(null);
+    setPreComposeImage(null);
     setImagePaletteState(null);
     setImageFluxRangeState(null);
     setImageSavePath(null);
@@ -289,6 +314,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     closeInBackground(workspaceHandleRef.current);
     closeInBackground(imageRef.current?.handle);
     closeInBackground(rgbImageRef.current?.handle);
+    closeInBackground(preComposeImageRef.current?.meta.handle);
     setSurvey(null);
     setWorkspace(null);
     setWorkspaceHandle(null);
@@ -296,6 +322,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     setImagePixels(null);
     setRgbImageState(null);
     setRgbImagePixels(null);
+    setPreComposeImage(null);
     setImagePaletteState(null);
     setImageFluxRangeState(null);
     setImageSavePath(null);
@@ -420,10 +447,15 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     (meta: ImageMeta, pixels: ImagePixels, savePath: string | null = null) => {
       const prevImage = imageRef.current;
       const prevRgb = rgbImageRef.current;
+      const prevPreCompose = preComposeImageRef.current;
       setImage(meta);
       setImagePixels(pixels);
       setRgbImageState(null);
       setRgbImagePixels(null);
+      if (prevPreCompose) {
+        closeInBackground(prevPreCompose.meta.handle);
+        setPreComposeImage(null);
+      }
       setImageSavePath(savePath);
       // If the loaded file carried a palette (legacy .img), surface it. FITS
       // files have no palette, so leave the existing one alone — the user can
@@ -443,21 +475,53 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   const setRgbImageAction = useCallback(
     (meta: RgbImageMeta, pixels: RgbImagePixels) => {
       const prevImage = imageRef.current;
+      const prevImagePixels = imagePixelsRef.current;
       const prevRgb = rgbImageRef.current;
+      const prevPreCompose = preComposeImageRef.current;
       setRgbImageState(meta);
       setRgbImagePixels(pixels);
-      // Replacing whichever image was previously showing.
+      // BUG-016: keep the scalar image that seeded this composite alive (handle
+      // NOT closed) and stash it, so "Back to Pre Image" can restore it
+      // instantly. When the composite is built from an existing RGB (bi→tri),
+      // prevImage is null — keep the stash from when the bi-color was made.
+      if (prevImage && prevImagePixels) {
+        if (prevPreCompose && prevPreCompose.meta.handle !== prevImage.handle) {
+          closeInBackground(prevPreCompose.meta.handle);
+        }
+        setPreComposeImage({
+          meta: prevImage,
+          pixels: prevImagePixels,
+          savePath: imageSavePathRef.current,
+        });
+      }
       setImage(null);
       setImagePixels(null);
       setImageSavePath(null);
       setViewMode('image');
-      if (prevImage) closeInBackground(prevImage.handle);
       if (prevRgb && prevRgb.handle !== meta.handle) {
         closeInBackground(prevRgb.handle);
       }
     },
     [],
   );
+
+  // BUG-016: restore the scalar image stashed when the current RGB composite
+  // was built, and close the composite. Returns false if there's nothing to
+  // restore (so the caller can fall back to the survey pre-image).
+  const restoreScalarImage = useCallback((): boolean => {
+    const stash = preComposeImageRef.current;
+    if (!stash) return false;
+    const prevRgb = rgbImageRef.current;
+    setImage(stash.meta);
+    setImagePixels(stash.pixels);
+    setImageSavePath(stash.savePath);
+    setRgbImageState(null);
+    setRgbImagePixels(null);
+    setPreComposeImage(null);
+    setViewMode('image');
+    if (prevRgb) closeInBackground(prevRgb.handle);
+    return true;
+  }, []);
 
   const setImagePaletteAction = useCallback(
     (palette: PaletteStop[] | null, flux: FluxRange | null) => {
@@ -536,8 +600,13 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
 
   const clearImage = useCallback(async () => {
     closeInBackground(imageRef.current?.handle);
+    closeInBackground(rgbImageRef.current?.handle);
+    closeInBackground(preComposeImageRef.current?.meta.handle);
     setImage(null);
     setImagePixels(null);
+    setRgbImageState(null);
+    setRgbImagePixels(null);
+    setPreComposeImage(null);
     setImagePaletteState(null);
     setImageFluxRangeState(null);
     setImageSavePath(null);
@@ -643,6 +712,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       makeImage,
       setImage: setImageAction,
       setRgbImage: setRgbImageAction,
+      restoreScalarImage,
       setImagePalette: setImagePaletteAction,
       setImageName: setImageNameAction,
       setSurveyName: setSurveyNameAction,
@@ -689,6 +759,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       makeImage,
       setImageAction,
       setRgbImageAction,
+      restoreScalarImage,
       setImagePaletteAction,
       setImageNameAction,
       setSurveyNameAction,

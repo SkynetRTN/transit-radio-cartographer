@@ -9,6 +9,9 @@ interface Props {
   meta?: RgbImageMeta | null;
   title?: string;
   testId?: string;
+  // Reports the composited bitmap as a PNG data URL each render, so the view
+  // can export it client-side (BUG-015). Pass a stable (memoized) callback.
+  onBitmap?: (dataUrl: string) => void;
 }
 
 function pad2(n: number): string {
@@ -53,7 +56,7 @@ function sexagesimalTicks(
   return { tickvals, ticktext };
 }
 
-export function RgbImagePlot({ image, meta, title = '', testId }: Props) {
+export function RgbImagePlot({ image, meta, title = '', testId, onBitmap }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
   const { theme } = useTheme();
 
@@ -122,6 +125,8 @@ export function RgbImagePlot({ image, meta, title = '', testId }: Props) {
     }
     ctx.putImageData(imgData, 0, 0);
     const dataUrl = canvas.toDataURL();
+    // Hand the composited PNG up so the view can export exactly what's shown.
+    onBitmap?.(dataUrl);
 
     const hasBounds =
       !!meta &&
@@ -230,7 +235,7 @@ export function RgbImagePlot({ image, meta, title = '', testId }: Props) {
     return () => {
       Plotly.purge(node);
     };
-  }, [image, meta, title, theme]);
+  }, [image, meta, title, theme, onBitmap]);
 
   return (
     <div

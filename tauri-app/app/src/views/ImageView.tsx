@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { useSurvey } from '../state/survey-context';
 import { ImagePlot, type ImagePoint, type BoxOverlay } from '../lib/plots/ImagePlot';
 import { RgbImagePlot } from '../lib/plots/RgbImagePlot';
 import { useImageSave } from '../lib/useImageSave';
-import type { ImageMeta, ImagePixels } from '../ipc/client';
+import { rpcClient, type ImageMeta, type ImagePixels } from '../ipc/client';
 
 function pad2(n: number): string {
   return n < 10 ? `0${n}` : `${n}`;
@@ -148,6 +149,7 @@ export function ImageView() {
     magnifierHalfSize,
     imageDisplay,
     setViewMode,
+    restoreScalarImage,
   } = useSurvey();
 
   const { saveImageQuick, saveImageAs, saveBitmapAs } = useImageSave();
@@ -156,10 +158,19 @@ export function ImageView() {
   const [pinnedPoint, setPinnedPoint] = useState<ImagePoint | null>(null);
   const [magnifierCenter, setMagnifierCenter] = useState<ImagePoint | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Latest composited RGB bitmap (PNG data URL), captured from RgbImagePlot for
+  // client-side export (BUG-015).
+  const rgbBitmapRef = useRef<string | null>(null);
+  const handleRgbBitmap = useCallback((dataUrl: string) => {
+    rgbBitmapRef.current = dataUrl;
+  }, []);
 
   const handleBack = useCallback(() => {
+    // From a bi/tri-color composite, restore the scalar image it was built from
+    // rather than dropping back to the survey pre-image (BUG-016).
+    if (rgbImage && restoreScalarImage()) return;
     setViewMode('pre-image');
-  }, [setViewMode]);
+  }, [rgbImage, restoreScalarImage, setViewMode]);
 
   // In-view Save buttons (BUG-024) so saving doesn't require the Image menu.
   // They share the same path as the menu via useImageSave; errors surface
@@ -172,6 +183,22 @@ export function ImageView() {
       setSaveError((e as Error).message);
     }
   }, []);
+
+  // Export the bi/tri-color composite as a PNG (BUG-015). The bitmap is what
+  // RgbImagePlot rendered (display resolution); the engine just writes the
+  // decoded bytes to the chosen path.
+  const exportRgbPng = useCallback(async () => {
+    const dataUrl = rgbBitmapRef.current;
+    if (!dataUrl) return;
+    const selected = await saveDialog({
+      title: 'Export Image As',
+      defaultPath: `${imageName || 'image'}.png`,
+      filters: [{ name: 'PNG Image', extensions: ['png'] }],
+    });
+    const target = typeof selected === 'string' ? selected : null;
+    if (!target) return;
+    await rpcClient.saveRgbPng(target, dataUrl);
+  }, [imageName]);
 
   // Right-click on the main plot opens (or moves) the magnifier centered at
   // the cell currently under the cursor. The legacy guide describes this as
@@ -285,6 +312,7 @@ export function ImageView() {
                 meta={rgbImage}
                 title=""
                 testId="rgb-image-plot"
+                onBitmap={handleRgbBitmap}
               />
             )}
           </div>
@@ -320,9 +348,17 @@ export function ImageView() {
                   <button onClick={() => void runSave(saveBitmapAs)}>
                     Save Bitmap As…
                   </button>
-                  {saveError && <div className="side-error">{saveError}</div>}
                 </>
               )}
+              {hasRgb && (
+                <>
+                  <div className="button-gap" />
+                  <button onClick={() => void runSave(exportRgbPng)}>
+                    Export as PNG…
+                  </button>
+                </>
+              )}
+              {saveError && <div className="side-error">{saveError}</div>}
             </div>
 
             <div className="readout">

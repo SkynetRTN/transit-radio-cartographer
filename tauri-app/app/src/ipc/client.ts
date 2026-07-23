@@ -453,6 +453,15 @@ export class RpcClient {
     if (options?.flux_max !== undefined) params.flux_max = options.flux_max;
     return this.request<{ path: string; bytes_written: number }>('save_bitmap', params);
   }
+  // Write a client-rendered PNG (bi/tri-color composite) to disk. `data` is the
+  // canvas data URL / base64 PNG; the engine decodes and writes the bytes. Used
+  // for RGB export, which has no scalar image and so can't go through saveImage.
+  saveRgbPng(path: string, data: string) {
+    return this.request<{ path: string; bytes_written: number }>('save_rgb_png', {
+      path,
+      data,
+    });
+  }
   appendImage(
     handle: number,
     otherPath: string,
