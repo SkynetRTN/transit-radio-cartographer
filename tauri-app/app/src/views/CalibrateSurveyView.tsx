@@ -4,6 +4,7 @@ import { useSurvey } from '../state/survey-context';
 import { PointScatter, type Point } from '../lib/plots/PointScatter';
 import { dataColors } from '../lib/plots/plot-theme';
 import { useTheme } from '../state/theme-context';
+import { AppDialog } from './dialogs/AppDialog';
 
 function formatRa(volts: number): string {
   const total = Math.max(0, volts);
@@ -112,6 +113,10 @@ export function CalibrateSurveyView() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<'idle' | 'cut' | 'select-dec'>('idle');
+  // BUG-013: a blocking warning shown when Calibrate Survey can't proceed (no
+  // enabled bracket, or every cal sample cut) — the engine error was previously
+  // surfaced only as an easily-missed inline snippet, so "nothing happened".
+  const [warning, setWarning] = useState<string | null>(null);
   const [dragRange, setDragRange] = useState<
     | { bracket: 'initial' | 'terminal'; x0: number; x1: number }
     | null
@@ -264,14 +269,25 @@ export function CalibrateSurveyView() {
 
   const handleApplyCalibration = useCallback(async () => {
     if (workspaceHandle === null) return;
+    // Pre-check the obvious "nothing to calibrate with" case before hitting the
+    // engine, so the user gets a clear explanation rather than a silent no-op.
+    if (view && view.initial_enabled === false && view.terminal_enabled === false) {
+      setWarning(
+        'No calibration is selected. Enable at least one bracket ' +
+          '(Initial or Terminal) before calibrating.',
+      );
+      return;
+    }
     try {
       await rpcClient.applyGainCalibration(workspaceHandle);
       await refreshWorkspace();
       setViewMode('survey');
     } catch (e) {
-      setError((e as Error).message);
+      // Surface calibration failures (e.g. every cal sample cut) as a modal
+      // instead of the inline snippet that testers missed.
+      setWarning((e as Error).message);
     }
-  }, [workspaceHandle, refreshWorkspace, setViewMode]);
+  }, [workspaceHandle, view, refreshWorkspace, setViewMode]);
 
   const toggleInitial = useCallback(
     async (enabled: boolean) => {
@@ -473,7 +489,7 @@ export function CalibrateSurveyView() {
               <button
                 onClick={() => setMode((m) => (m === 'cut' ? 'idle' : 'cut'))}
                 className={mode === 'cut' ? 'active' : ''}
-                title="Drag on either flux panel to remove RA samples from that cal bracket"
+                title="REMOVES data: drag on a flux panel to delete the cal samples inside that RA range. (Opposite of Select Declination, which keeps.)"
               >
                 {mode === 'cut' ? 'Cut Segment (drag…)' : 'Cut Segment'}
               </button>
@@ -482,7 +498,7 @@ export function CalibrateSurveyView() {
                   setMode((m) => (m === 'select-dec' ? 'idle' : 'select-dec'))
                 }
                 className={mode === 'select-dec' ? 'active' : ''}
-                title="Drag a horizontal band on either declination panel to keep only cal samples inside that Dec range"
+                title="KEEPS data: drag a band on a declination panel to keep only the cal samples inside that Dec range (everything outside is removed). (Opposite of Cut Segment, which removes.)"
               >
                 {mode === 'select-dec' ? 'Select Declination (drag…)' : 'Select Declination'}
               </button>
@@ -527,6 +543,25 @@ export function CalibrateSurveyView() {
           </div>
         </div>
       </div>
+
+      {warning && (
+        <AppDialog
+          title="Cannot Calibrate Survey"
+          onClose={() => setWarning(null)}
+          buttons={[
+            {
+              label: 'OK',
+              onClick: () => setWarning(null),
+              primary: true,
+              autoFocus: true,
+            },
+          ]}
+        >
+          <div className="modal-row">
+            <span>{warning}</span>
+          </div>
+        </AppDialog>
+      )}
     </div>
   );
 }

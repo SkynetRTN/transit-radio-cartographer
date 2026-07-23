@@ -196,6 +196,49 @@ test('Apply Calibration calls the gain calibration rpc and returns to survey vie
   await waitFor(() => expect(mode).toBe('survey'));
 });
 
+test('Calibrate Survey surfaces a failure as a modal warning (BUG-013)', async () => {
+  (rpcClient.applyGainCalibration as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+    new Error('initial Cal1 is zero — too many samples cut'),
+  );
+  let mode = '';
+  function Probe() {
+    const { viewMode } = useSurvey();
+    useEffect(() => {
+      mode = viewMode;
+    }, [viewMode]);
+    return null;
+  }
+  await act(async () => {
+    render(
+      <SurveyProvider>
+        <HydrateSurvey
+          meta={{
+            handle: 1,
+            metadata: { sweep_count: 9, path: '/tmp/and0a.md2' },
+            workspace_handle: 2,
+            workspace: workspaceOverview,
+          }}
+        />
+        <Probe />
+        <CalibrateSurveyView />
+      </SurveyProvider>,
+    );
+  });
+  await waitFor(() => expect(mode).toBe('calibrate-survey'));
+  fireEvent.click(screen.getByRole('button', { name: /^Calibrate Survey$/ }));
+  // The engine error is shown as a dismissible modal, not a silent no-op…
+  await waitFor(() =>
+    expect(screen.getByText('Cannot Calibrate Survey')).toBeInTheDocument(),
+  );
+  expect(screen.getByText(/too many samples cut/)).toBeInTheDocument();
+  // …and the view does not advance.
+  expect(mode).toBe('calibrate-survey');
+  fireEvent.click(screen.getByRole('button', { name: 'OK' }));
+  await waitFor(() =>
+    expect(screen.queryByText('Cannot Calibrate Survey')).not.toBeInTheDocument(),
+  );
+});
+
 test('Select Declination stays sticky after a select (FEAT-002)', async () => {
   await act(async () => {
     render(

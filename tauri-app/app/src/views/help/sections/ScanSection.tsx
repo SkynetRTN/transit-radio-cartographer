@@ -93,6 +93,13 @@ export function ScanSection() {
         button toggles a mode and stays armed until you click it again or
         switch tools.
       </p>
+      <p>
+        <strong>Keep vs. remove:</strong> <code>Cut Segment</code>{' '}
+        <em>removes</em> the samples you drag over, while{' '}
+        <code>Select Declination</code> <em>keeps</em> the samples you drag over
+        (removing everything outside). They do opposite things — the same pair
+        appears in the calibration view.
+      </p>
 
       <h4>4a. Cut Segment</h4>
       <p>
@@ -130,9 +137,12 @@ export function ScanSection() {
       <p>
         <strong>Click</strong> <code>Determine Peak</code>, then{' '}
         <strong>drag a horizontal range</strong> across the peak on the Flux
-        plot. A Gaussian fit is overlaid in blue, and the peak flux appears
-        in the side panel. Adjusting <code>Peak Fit Degree</code> allows for a 2nd, 3rd or 4th 
-        degree polynomial fit instead.
+        plot. A fit is overlaid in blue, and the peak flux appears in the side
+        panel. The fit defaults to a Gaussian; to change it — Gaussian, Squared
+        Cosine, a <strong>2nd / 3rd / 4th-degree polynomial</strong>, or Max
+        Value — open <code>Scan → “Change Determine Peak Fit…”</code> from the
+        menu bar <em>before</em> dragging. (That menu item is where the
+        polynomial degree-of-freedom choice lives.)
       </p>
       <p className="help-figure-placeholder">
         [Screenshot: scan-determine-peak.png — blue fit curve over a source]

@@ -556,7 +556,7 @@ export function ScanView() {
                   <button
                     onClick={() => toggleMode('select-dec')}
                     className={mode.kind === 'select-dec' ? 'active' : ''}
-                    title="Drag on the declination plot to keep only source samples inside that band"
+                    title="KEEPS data: drag on the declination plot to keep only the source samples inside that band (everything outside is removed). (Opposite of Cut Segment, which removes.)"
                   >
                     {mode.kind === 'select-dec' ? 'Select Declination (drag…)' : 'Select Declination'}
                   </button>
@@ -581,7 +581,7 @@ export function ScanView() {
                   <button
                     onClick={() => toggleMode('cut')}
                     className={mode.kind === 'cut' ? 'active' : ''}
-                    title="Drag on the flux plot to remove source samples inside that RA range"
+                    title="REMOVES data: drag on the flux plot to delete the source samples inside that RA range. (Opposite of Select Declination, which keeps.)"
                   >
                     {mode.kind === 'cut' ? 'Cut Segment (drag…)' : 'Cut Segment'}
                   </button>
