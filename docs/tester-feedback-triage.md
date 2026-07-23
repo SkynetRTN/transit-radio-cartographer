@@ -19,6 +19,33 @@ fix**, with the file(s) to touch so it's actionable.
 
 ---
 
+## Implementation status
+
+The 🔧 fixes (plus agreed doc updates) are grouped into eight tasks, landing on
+the `tester-feedback-fixes` branch one commit per task. ✅ = complete, ⬜ = not
+started.
+
+| Task | Concerns covered | Status |
+|------|------------------|--------|
+| **1 — Layout & window sizing** | #1 responsive layout, #2 upper/lower x-axis overlap, #4 over/under-scroll | ✅ Complete |
+| **2 — Sweep workflow interactions** | #3 RFI-mode readout, #7–8 accept shortcut + arrow-key nav + tutorial note | ✅ Complete |
+| **3 — Scalar image view** | #24 in-view Save (scalar), #20 on-image click marker, #14 pre-image zoom hint, #11 About version | ✅ Complete |
+| **4 — Palette editor robustness** | #18 edge/stack bugs, #21 errors near 50 stops | ✅ Complete |
+| **5 — RGB export + back-navigation** | #15 / #24 RGB export (client-side PNG), #16 bi/tri back-button target | ⬜ Not started |
+| **6 — RGB zoom + magnifier** | #17 RGB zoom + magnifier | ⬜ Not started |
+| **7 — Calibration warning + Cut/Select clarity** | #13 empty-cal warning, #12 Cut/Select tooltips, #9a fitting-DOF help note | ⬜ Not started |
+| **8 — Scan undo restores model fit** | #22 undo restores the fitted curve | ⬜ Not started |
+
+**Not part of a task** — answered or intended, no code change: #5 (Make Image
+gating, intended), #6 (Smooth parameter, intended/optional), #9a (polynomial DOF
+already exists — help note lands in Task 7), #9b (fit uncertainty, optional),
+#10 (calibration-source recognition, answered), #11 About page (version string
+added in Task 3), #14 survey magnifier (optional; the Task 3 fix is the zoom
+hint), #19 (zoom/magnifier single shape, intended/optional), #23 (edge RFI
+removal, leave as-is).
+
+---
+
 ## Layout & window
 
 ### 1. Formatting degrades as the window shrinks (worst at a medium size) — 🔧
