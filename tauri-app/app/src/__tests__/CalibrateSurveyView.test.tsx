@@ -291,7 +291,7 @@ test('Initial / Terminal checkboxes toggle the cal brackets', async () => {
       </SurveyProvider>,
     );
   });
-  await waitFor(() => expect(screen.getByText(/Initial: 0\.340 V/)).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByText(/Pre: 0\.340 V/)).toBeInTheDocument());
   const checkboxes = screen.getAllByRole('checkbox');
   expect(checkboxes).toHaveLength(2);
   fireEvent.click(checkboxes[0]);

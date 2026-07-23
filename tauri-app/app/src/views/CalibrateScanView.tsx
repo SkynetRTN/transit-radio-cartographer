@@ -471,7 +471,7 @@ export function CalibrateScanView() {
                   checked={view?.initial_enabled ?? true}
                   onChange={(e) => void toggleInitial(e.target.checked)}
                 />
-                Initial: {(view?.cal1 ?? 0).toFixed(3)} V
+                Pre: {(view?.cal1 ?? 0).toFixed(3)} V
               </label>
               <label className="cal-row">
                 <input
@@ -479,7 +479,7 @@ export function CalibrateScanView() {
                   checked={view?.terminal_enabled ?? true}
                   onChange={(e) => void toggleTerminal(e.target.checked)}
                 />
-                Terminal: {(view?.cal2 ?? 0).toFixed(3)} V
+                Post: {(view?.cal2 ?? 0).toFixed(3)} V
               </label>
             </div>
 

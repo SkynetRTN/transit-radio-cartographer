@@ -274,7 +274,7 @@ export function CalibrateSurveyView() {
     if (view && view.initial_enabled === false && view.terminal_enabled === false) {
       setWarning(
         'No calibration is selected. Enable at least one bracket ' +
-          '(Initial or Terminal) before calibrating.',
+          '(Pre or Post) before calibrating.',
       );
       return;
     }
@@ -520,7 +520,7 @@ export function CalibrateSurveyView() {
                   checked={view?.initial_enabled ?? true}
                   onChange={(e) => void toggleInitial(e.target.checked)}
                 />
-                Initial: {(view?.cal1 ?? 0).toFixed(3)} V
+                Pre: {(view?.cal1 ?? 0).toFixed(3)} V
               </label>
               <label className="cal-row">
                 <input
@@ -528,7 +528,7 @@ export function CalibrateSurveyView() {
                   checked={view?.terminal_enabled ?? true}
                   onChange={(e) => void toggleTerminal(e.target.checked)}
                 />
-                Terminal: {(view?.cal2 ?? 0).toFixed(3)} V
+                Post: {(view?.cal2 ?? 0).toFixed(3)} V
               </label>
             </div>
 
