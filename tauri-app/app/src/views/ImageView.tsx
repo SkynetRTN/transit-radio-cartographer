@@ -407,7 +407,9 @@ export function ImageView() {
             )}
             <div className="side-buttons">
               {workspace && (
-                <button onClick={handleBack}>Back to Pre Image</button>
+                <button onClick={handleBack}>
+                  {rgbImage ? 'Back to Image' : 'Back to Pre Image'}
+                </button>
               )}
               {magnifierCenter && (
                 <button onClick={() => setMagnifierCenter(null)}>

@@ -125,20 +125,21 @@ export function RgbImagePlot({
     // So the rule is: paint white only when EVERY channel is non-finite; if
     // at least one channel carries data, treat the others as 0.
     //
-    // Canvas orientation for a DATA-coordinate layout image (BUG-017). Plotly
-    // maps the canvas source pixels linearly across the data box
-    // [min_ra, max_ra] × [min_dec, max_dec] with source-left → min_ra and
-    // source-top → max_dec (xanchor left / yanchor top). We orient the canvas
-    // to match, then let the reversed x-axis flip it for display so max_ra
-    // still shows on the visual LEFT:
-    //   - canvas col c → engine col (W-1-c): source col 0 = engine col W-1 =
-    //     min_ra, source last col = engine col 0 = max_ra.
+    // Canvas orientation for a DATA-coordinate layout image (BUG-017/BUG-025).
+    // Plotly's layout-image renderer does NOT honor a reversed axis: it anchors
+    // the image at the pixel for `x` and always paints its source pixels left→
+    // right, top→bottom from there. So the canvas must be oriented for the FINAL
+    // on-screen layout, and the image anchored at the visual-left data value
+    // (max_ra) — see the layoutImages block below. Sky convention (as in
+    // ImagePlot): max_ra on the visual LEFT, min_dec at the visual BOTTOM.
+    //   - canvas col c → engine col c: source col 0 = engine col 0 = max_ra
+    //     (visual left), source last col = engine col W-1 = min_ra.
     //   - canvas row r → engine row (H-1-r): source row 0 = engine row H-1 =
-    //     max_dec (visual top), source last row = min_dec.
+    //     max_dec (visual top), source last row = min_dec (visual bottom).
     for (let r = 0; r < h; r++) {
       for (let c = 0; c < w; c++) {
         const srcRow = h - 1 - r;
-        const srcCol = w - 1 - c;
+        const srcCol = c;
         const idx = (r * w + c) * 4;
         const rv = image.r[srcRow][srcCol];
         const gv = image.g[srcRow][srcCol];
@@ -223,19 +224,24 @@ export function RgbImagePlot({
 
     // Layout image placed in DATA coords (BUG-017) so it zooms/pans with the
     // axes — the previous paper-coord placement pinned the bitmap to the plot
-    // rectangle, so zooming moved the ticks but not the picture. The canvas is
-    // oriented (above) so source-left = min_ra and source-top = max_dec, which
-    // is exactly what xanchor:'left' / yanchor:'top' expect; the reversed
-    // x-axis then flips it for display (max_ra on the visual left). Using a
-    // real data box (x=min_ra, sizex=RA span) avoids the historical mis-sizing
-    // that came from mixing paper anchors with reversed data ranges.
+    // rectangle, so zooming moved the ticks but not the picture.
+    //
+    // BUG-025: Plotly's layout-image renderer ignores the reversed x-axis. It
+    // anchors at the pixel for `x` and paints RIGHTWARD by `sizex`. Anchoring at
+    // min_ra (the old code) puts the anchor at the REVERSED axis's right edge,
+    // so the whole bitmap was painted off the right side — leaving only a
+    // one-column sliver on screen. Anchor instead at max_ra, which maps to the
+    // LEFT plot edge on the reversed axis, so the image paints left→right across
+    // the full plot. The canvas is oriented (above) to match: source-left =
+    // max_ra, source-top = max_dec, exactly what xanchor:'left'/yanchor:'top'
+    // consume. sizex/sizey stay the positive data span.
     const layoutImages = hasBounds
       ? [
           {
             source: dataUrl,
             xref: 'x',
             yref: 'y',
-            x: meta!.min_ra,
+            x: meta!.max_ra,
             y: meta!.max_dec,
             sizex: meta!.max_ra - meta!.min_ra,
             sizey: meta!.max_dec - meta!.min_dec,
