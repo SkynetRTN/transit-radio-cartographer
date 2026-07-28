@@ -209,6 +209,7 @@ export function ImageView() {
     imageDisplay,
     setViewMode,
     restoreScalarImage,
+    canRestoreScalar,
   } = useSurvey();
 
   const { saveImageQuick, saveImageAs, saveBitmapAs } = useImageSave();
@@ -406,7 +407,7 @@ export function ImageView() {
               </div>
             )}
             <div className="side-buttons">
-              {workspace && (
+              {(workspace || (rgbImage && canRestoreScalar)) && (
                 <button onClick={handleBack}>
                   {rgbImage ? 'Back to Image' : 'Back to Pre Image'}
                 </button>

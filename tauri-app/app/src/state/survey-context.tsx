@@ -84,6 +84,10 @@ export interface SurveyState {
   // Restore the scalar image a bi/tri-color composite was built from (BUG-016).
   // Returns false when there's nothing stashed.
   restoreScalarImage: () => boolean;
+  // True when a scalar image is stashed behind the current composite, i.e.
+  // restoreScalarImage() would succeed. Lets the RGB view show a "Back to
+  // Image" button even with no survey workspace open (BUG-025).
+  canRestoreScalar: boolean;
   setImagePalette: (palette: PaletteStop[] | null, flux: FluxRange | null) => void;
   setImageName: (name: string) => void;
   setSurveyName: (name: string) => Promise<void>;
@@ -713,6 +717,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       setImage: setImageAction,
       setRgbImage: setRgbImageAction,
       restoreScalarImage,
+      canRestoreScalar: preComposeImage !== null,
       setImagePalette: setImagePaletteAction,
       setImageName: setImageNameAction,
       setSurveyName: setSurveyNameAction,
@@ -737,6 +742,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       imagePixels,
       rgbImage,
       rgbImagePixels,
+      preComposeImage,
       imagePalette,
       imageFluxRange,
       imageName,
