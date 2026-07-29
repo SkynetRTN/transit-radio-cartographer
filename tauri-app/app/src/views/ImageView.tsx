@@ -325,6 +325,13 @@ export function ImageView() {
   // Show pinned point in the readout if set, else the live hover point.
   const displayPoint = pinnedPoint ?? hoverPoint;
 
+  // Stable pinned-marker object so the plot effect doesn't re-run (and call
+  // Plotly.react mid-zoom-drag) on every hover while a point is pinned (BUG-025).
+  const pinnedMarker = useMemo(
+    () => (pinnedPoint ? { ra: pinnedPoint.ra, dec: pinnedPoint.dec } : null),
+    [pinnedPoint],
+  );
+
   const hasScalar = image !== null && imagePixels !== null;
   const hasRgb = rgbImage !== null && rgbImagePixels !== null;
   if (!hasScalar && !hasRgb) {
@@ -372,9 +379,7 @@ export function ImageView() {
                 onClick={handleClick}
                 onContextMenu={handleContextMenu}
                 boxOverlay={magnifier?.overlay ?? null}
-                pinnedMarker={
-                  pinnedPoint ? { ra: pinnedPoint.ra, dec: pinnedPoint.dec } : null
-                }
+                pinnedMarker={pinnedMarker}
                 displayMode={imageDisplay}
               />
             ) : (
@@ -421,9 +426,6 @@ export function ImageView() {
                 <button onClick={() => setRgbMagCenter(null)}>
                   Close Magnifier
                 </button>
-              )}
-              {pinnedPoint && (
-                <button onClick={() => setPinnedPoint(null)}>Unpin</button>
               )}
               {hasScalar && (
                 <>
@@ -473,6 +475,14 @@ export function ImageView() {
                       : '—'}
                   </div>
                   {pinnedPoint && <div className="pinned-tag">pinned</div>}
+                  {pinnedPoint && (
+                    <button
+                      className="unpin-button"
+                      onClick={() => setPinnedPoint(null)}
+                    >
+                      Unpin
+                    </button>
+                  )}
                 </div>
               )}
               {hasRgb && (

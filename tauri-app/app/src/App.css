@@ -766,6 +766,12 @@ body {
   letter-spacing: 0.5px;
 }
 
+/* Unpin sits directly under the RA/Dec/Flux readout it clears (BUG-025). */
+.point-readout .unpin-button {
+  margin-top: 6px;
+  align-self: flex-start;
+}
+
 .magnifier-panel {
   margin-top: 12px;
   padding: 6px;
