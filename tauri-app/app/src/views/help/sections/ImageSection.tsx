@@ -10,89 +10,196 @@
  * ============================================================================
  */
 
+import imageShot from '../images/image.png?url';
+import paletteShot from '../images/image-palette.png?url';
+import saveShot from '../images/image-save.png?url';
+
 export function ImageSection() {
   return (
     <section className="help-section">
       <h2>Image Workflow</h2>
 
       <p>
-        The Image view is where you inspect the final gridded radio map,
-        adjust the palette for publication-quality figures, and save outputs.
+        The Image view is where you inspect the final gridded radio map — pan
+        and zoom into it, pin and magnify pixels to read off values, tune the
+        palette for publication-quality figures, and save or compose outputs.
       </p>
 
       <h3>1. Inspecting the image</h3>
       <p>
-        After <strong>Make Image</strong> runs, the gridded map appears as a
-        2D color image. <strong>Hover</strong> any pixel to see its RA, Dec,
-        and flux value in the corner readout.
+        After <strong>Make Image</strong> runs, the gridded map appears as a 2D
+        color image, with Right Ascension on the horizontal axis (increasing to
+        the left, as on the sky) and Declination on the vertical.{' '}
+        <strong>Hover</strong> any pixel to see its RA, Dec, and flux in the
+        readout panel on the right; that panel also shows the image dimensions.
+        The readout keeps its last value when the cursor leaves the image.
       </p>
-      <p className="help-figure-placeholder">
-        [Screenshot: image-palette.png — image with corner readout]
+      <figure className="help-figure">
+        <img src={imageShot} alt="Gridded radio map with RA/Dec/flux side readout" />
+        <figcaption>
+          The Image view: the gridded map with RA on the horizontal axis and Dec
+          on the vertical, and the RA/Dec/flux readout in the side panel.
+        </figcaption>
+      </figure>
+
+      <h4>1a. Zoom and pan</h4>
+      <p>
+        <strong>Drag a box</strong> anywhere on the image to zoom the axes to
+        that region — any shape works, the view fits exactly what you draw.{' '}
+        <strong>Double-click</strong> to reset to the full map. The default view
+        preserves the true sky shape; because zooming is free, a zoomed-in
+        region may look stretched, which is expected.
       </p>
+
+      <h4>1b. Pin a pixel</h4>
+      <p>
+        <strong>Left-click</strong> a pixel to <strong>pin</strong> it. A target
+        ring marks the spot and the readout locks to that pixel's RA, Dec, and
+        flux (tagged <em>pinned</em>) so the numbers stay put while you move the
+        mouse or zoom elsewhere. Click <code>Unpin</code> — directly under the
+        readout — to release it. If you zoom to a region that doesn't contain
+        the pinned pixel, the readout still shows its values even though the ring
+        is off-screen.
+      </p>
+
+      <h4>1c. Magnifier</h4>
+      <p>
+        <strong>Right-click</strong> a pixel to open the{' '}
+        <strong>magnifier</strong> — a zoomed inset of the region around that
+        spot, shown in the side panel. Use the <strong>arrow keys</strong> to
+        nudge the magnified area (hold <code>Shift</code> for ×5 steps), and{' '}
+        <code>Close Magnifier</code> to dismiss it. Change how many cells it
+        covers with <code>Image → Change Magnifier Size…</code>. Right-clicking
+        only opens the magnifier — it never disturbs your current zoom.
+      </p>
+      <p>
+        While the magnifier is open, three buttons below the RA/Dec/Flux readout
+        let you total the flux in and around the magnified box:
+      </p>
+      <ul>
+        <li>
+          <code>Sum Flux (Box)</code> — adds up the flux of every covered pixel
+          inside the magnifier box, and shows how many pixels went into the sum.
+        </li>
+        <li>
+          <code>Average Flux (Box)</code> — the mean flux over those same
+          covered pixels (no-coverage cells are ignored, so blank sky in the box
+          doesn't pull the average down).
+        </li>
+        <li>
+          <code>Sum Flux (Outside Box)</code> — the total flux of the whole map
+          <em>excluding</em> the magnifier box, useful for separating a source
+          from its surroundings.
+        </li>
+      </ul>
+      <p>
+        Each button toggles its value on or off, and the numbers update{' '}
+        <strong>live</strong> as you move the box with the arrow keys or
+        right-click a new spot — so you can watch a total change as you slide the
+        box across a source. Values use the same flux unit as the pixel readout.
+      </p>
+
+      <h4>1d. Display shape</h4>
+      <p>
+        <code>Image → Image Display ▸</code> sets the aspect ratio of the
+        default (un-zoomed) view:
+      </p>
+      <ul>
+        <li>
+          <strong>Declination Corrected</strong> (default) — applies a
+          cos(declination) correction at the image center so the displayed shape
+          matches the true sky.
+        </li>
+        <li>
+          <strong>No Declination Correction</strong> — RA-seconds → degrees only
+          (1/240); accurate at the celestial equator.
+        </li>
+        <li>
+          <strong>Snap to Square</strong> — each pixel cell renders square on
+          screen; handy for inspecting very thin or very wide surveys.
+        </li>
+        <li>
+          <strong>Stretch to Fill</strong> — no aspect lock; the map stretches
+          to fill the workspace area.
+        </li>
+      </ul>
 
       <h3>2. Find the true peak</h3>
       <p>
-        The brightest-colored pixel isn't always the maximum flux pixel — if
-        the palette range clips, several pixels may share the top color. Move
-        the mouse over the suspected peak region and watch the corner flux
-        readout to identify the true maximum.
+        The brightest-colored pixel isn't always the maximum flux pixel — if the
+        palette range clips, several pixels may share the top color. Sweep the
+        cursor over the suspected peak region and watch the readout, or open the{' '}
+        <strong>magnifier</strong> on it, to identify the true maximum; then{' '}
+        <strong>pin</strong> it so its value stays on screen while you set the
+        palette range or compare candidates.
       </p>
-      <p className="help-todo">
-        [USER TODO] — Add: how often students misidentify the peak, why this
-        matters for flux calibration.
-      </p>
-
-      <h3>3. Open the Palette editor</h3>
+      <h3>3. Tune the palette</h3>
+      
       <p>
-        Open the palette controls (verify exact entry point during use — the
-        Palette editor may be reached from a side button or a menu item).
-        From there you can change the color mapping, the min and max flux
-        clipping range, and the channel colors.
+        Open the palette controls with <code>Image → Show Palette…</code>{' '}
+        (enabled once an image is built or loaded). From there you can change the
+        color mapping, the min and max flux clipping range, and — for composites
+        — the channel colors.
       </p>
+      <figure className="help-figure">
+        <img src={paletteShot} alt="Palette editor with color mapping and min/max flux controls" />
+        <figcaption>
+          The palette editor: change the color mapping, set the min and max flux
+          clipping range, and drag the color stops to build your own ramp.
+        </figcaption>
+      </figure>
 
       <h4>3a. Adjust max flux</h4>
       <p>
-        <strong>Type</strong> the maximum flux value in Jy. Anything above this
-        clips to the top color of the palette. Set it to your true peak (from
-        step 2) to maximize dynamic range.
-      </p>
-      <p className="help-figure-placeholder">
-        [Screenshot: image-max-flux.png — palette editor with max flux field]
+        <strong>Type</strong> the maximum flux value. Anything above it clips to
+        the top color of the palette. Set it to your true peak (from step 2) to
+        maximize dynamic range.
       </p>
 
       <h4>3b. Adjust min flux</h4>
       <p>
-        <strong>Type</strong> the minimum flux value in Jy. Anything below this
-        clips to the bottom color. Often a small negative value (just below the
-        noise floor) gives the cleanest background.
+        <strong>Type</strong> the minimum flux value. Anything below it clips to
+        the bottom color. 
       </p>
 
       <h4>3c. Pick a palette</h4>
       <p>
-        Choose a color mapping. Grayscale is good for publications; perceptual
-        color maps (viridis-style) preserve dynamic range visually; custom RGB
-        is useful for highlighting structure.
+        There are default presets, or you can load in a .pal file.
+        You can make your own by dragging the color stops. Stops
+        stay ordered and spaced automatically, so you can add many of them or
+        drag them to the edges without breaking the ramp. If you want to 
+        save the palette for later, click <code>Save Palette…</code> to write a .pal file.
       </p>
 
       <h3>4. Save the image</h3>
+      <p>
+        The scalar Image view has in-view buttons on the right —{' '}
+        <code>Save Image</code>, <code>Save Image As…</code>, and{' '}
+        <code>Save Bitmap As…</code> — so you can save without opening a menu.
+        The same actions are also on the <code>Image</code> menu:
+      </p>
       <ul>
         <li>
-          <code>Image → Save Image</code> — Saves the app-native image format
-          back to the current path.
+          <code>Save Image</code> — Saves the app-native image format back to
+          the current path.
         </li>
         <li>
-          <code>Image → Save Image As…</code> — Saves to a new path.
+          <code>Save Image As…</code> — Saves to a new path.
         </li>
         <li>
-          <code>Image → Save Bitmap As…</code> — Exports a <code>.png</code> /{' '}
+          <code>Save Bitmap As…</code> — Exports a <code>.png</code> /{' '}
           <code>.bmp</code> for use in papers / slides.
         </li>
       </ul>
-      <p className="help-figure-placeholder">
-        [Screenshot: image-save.png — Image menu with save options]
-      </p>
+      <figure className="help-figure">
+        <img src={saveShot} alt="In-view Save Image, Save Image As, and Save Bitmap As buttons" />
+        <figcaption>
+          The in-view Save buttons on the right of the Image view: Save Image,
+          Save Image As…, and Save Bitmap As….
+        </figcaption>
+      </figure>
 
-      <h3>5. Compose multiple images (advanced)</h3>
+      <h3>5. Compose multiple images</h3>
       <ul>
         <li>
           <code>Image → Append Image…</code> — Stitch two scalar maps side by
@@ -112,11 +219,13 @@ export function ImageSection() {
           by adding the unused channel.
         </li>
       </ul>
-
-      <p className="help-todo">
-        [USER TODO] — Add: common palette pitfalls (color blindness, clipping
-        the peak), when to use bi/tri-color vs. single channel, how to align
-        composites.
+      <p>
+        A composite (bi/tri-color) opens in the same view. It supports the same{' '}
+        <strong>drag-to-zoom</strong> and <strong>right-click magnifier</strong>,
+        and hovering shows an RA/Dec readout. Use{' '}
+        <code>Export as PNG…</code> to write the composite out as an image for
+        papers or slides, and <code>Back to Image</code> to return to the scalar
+        map it was built from.
       </p>
     </section>
   );

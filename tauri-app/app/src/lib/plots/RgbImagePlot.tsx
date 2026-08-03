@@ -31,6 +31,9 @@ interface Props {
   // Fixed pixel height (used by the magnifier panel); defaults to a flexible
   // min-height of 420 that fills the workspace.
   fixedHeight?: number;
+  // Render as a square (used by the magnifier) instead of filling the box, so
+  // the loupe isn't collapsed to the wide/tall shape of the source image.
+  square?: boolean;
 }
 
 function pad2(n: number): string {
@@ -47,32 +50,33 @@ function formatRaSeconds(ra: number): string {
   return `${pad2(hrs)}:${pad2(mins)}:${pad2(secs)}`;
 }
 
-function formatDecDegrees(dec: number): string {
-  const sign = dec < 0 ? '-' : '';
-  const abs = Math.abs(dec);
-  const deg = Math.floor(abs);
-  const mins = Math.floor((abs - deg) * 60);
-  const secs = Math.floor((abs - deg - mins / 60) * 3600);
-  return `${sign}${pad2(deg)}:${pad2(mins)}:${pad2(secs)}`;
+// Forced light-gray sky grid on 10° boundaries; Dec labeled in decimal degrees.
+// Mirrors ImagePlot so the scalar and RGB viewers match.
+const GRID_COLOR = '#e6e6e6';
+const SEC_PER_DEG_RA = 240;
+const GRID_STEP_DEG = 10;
+
+function formatDecDeg(dec: number): string {
+  const rounded = Math.round(dec * 10) / 10;
+  return Number.isInteger(rounded) ? `${rounded}°` : `${rounded.toFixed(1)}°`;
 }
 
-function sexagesimalTicks(
+function fixedIntervalTicks(
   lo: number,
   hi: number,
-  count: number,
+  interval: number,
   format: (v: number) => string,
 ): { tickvals: number[]; ticktext: string[] } {
-  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo || count < 2) {
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo || interval <= 0) {
     return { tickvals: [lo], ticktext: [format(lo)] };
   }
   const tickvals: number[] = [];
-  const ticktext: string[] = [];
-  for (let i = 0; i < count; i++) {
-    const v = lo + ((hi - lo) * i) / (count - 1);
-    tickvals.push(v);
-    ticktext.push(format(v));
+  const start = Math.ceil(lo / interval) * interval;
+  for (let v = start; v <= hi + 1e-9; v += interval) tickvals.push(v);
+  if (tickvals.length < 2) {
+    return { tickvals: [lo, hi], ticktext: [format(lo), format(hi)] };
   }
-  return { tickvals, ticktext };
+  return { tickvals, ticktext: tickvals.map(format) };
 }
 
 export function RgbImagePlot({
@@ -85,6 +89,7 @@ export function RgbImagePlot({
   onContextMenu,
   boxOverlay,
   fixedHeight,
+  square = false,
 }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
   const { theme } = useTheme();
@@ -189,23 +194,26 @@ export function RgbImagePlot({
       } as Plotly.Data,
     ];
 
+    // Sparse 10° sky grid: RA every 2400s (=10°, kept HH:MM:SS), Dec every 10°
+    // in decimal degrees.
     const raTicks = hasBounds
-      ? sexagesimalTicks(meta!.min_ra, meta!.max_ra, 5, formatRaSeconds)
+      ? fixedIntervalTicks(meta!.min_ra, meta!.max_ra, GRID_STEP_DEG * SEC_PER_DEG_RA, formatRaSeconds)
       : null;
     const decTicks = hasBounds
-      ? sexagesimalTicks(meta!.min_dec, meta!.max_dec, 5, formatDecDegrees)
+      ? fixedIntervalTicks(meta!.min_dec, meta!.max_dec, GRID_STEP_DEG, formatDecDeg)
       : null;
 
     const chrome = plotChrome(theme);
+    // A sparse light-gray 10° grid is unobtrusive enough to sit over the RGB
+    // bitmap without obscuring source structure (unlike a dense per-cell grid).
     const xaxis: Partial<Plotly.LayoutAxis> = {
       title: { text: 'Right Ascension' },
-      // RGB composites paint over the full plot area as a single bitmap; the
-      // gridlines that scalar heatmaps lean on for cell registration would
-      // overlay each footprint and obscure source structure.
-      showgrid: false,
+      showgrid: true,
+      gridcolor: GRID_COLOR,
+      gridwidth: 1,
       zeroline: false,
-      linecolor: chrome.axisColor,
-      tickcolor: chrome.axisColor,
+      linecolor: GRID_COLOR,
+      tickcolor: GRID_COLOR,
       ...(hasBounds ? { autorange: 'reversed' as const } : {}),
       ...(raTicks
         ? { tickmode: 'array', tickvals: raTicks.tickvals, ticktext: raTicks.ticktext }
@@ -213,10 +221,12 @@ export function RgbImagePlot({
     };
     const yaxis: Partial<Plotly.LayoutAxis> = {
       title: { text: 'Declination' },
-      showgrid: false,
+      showgrid: true,
+      gridcolor: GRID_COLOR,
+      gridwidth: 1,
       zeroline: false,
-      linecolor: chrome.axisColor,
-      tickcolor: chrome.axisColor,
+      linecolor: GRID_COLOR,
+      tickcolor: GRID_COLOR,
       ...(decTicks
         ? { tickmode: 'array', tickvals: decTicks.tickvals, ticktext: decTicks.ticktext }
         : {}),
@@ -366,14 +376,39 @@ export function RgbImagePlot({
     };
   }, [image, meta, title, theme, onBitmap, boxOverlay]);
 
+  // Refit Plotly when the container resizes — the workspace dividers change the
+  // column width / magnifier box without a window resize, which `responsive`
+  // alone wouldn't catch.
+  useEffect(() => {
+    const node = ref.current;
+    if (!node || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      if (node.getBoundingClientRect().width > 0) {
+        void (Plotly as unknown as { Plots: { resize: (n: HTMLElement) => void } }).Plots.resize(
+          node,
+        );
+      }
+    });
+    ro.observe(node);
+    return () => ro.disconnect();
+  }, []);
+
   return (
     <div
       data-testid={testId ?? 'rgb-image-plot'}
       ref={ref}
       style={
-        fixedHeight !== undefined
-          ? { width: '100%', height: fixedHeight }
-          : { width: '100%', height: '100%', minHeight: 420 }
+        square
+          ? {
+              // A square of side `fixedHeight`, capped to the container width
+              // and centered — matches ImagePlot's square magnifier.
+              width: `min(100%, ${fixedHeight ?? 200}px)`,
+              aspectRatio: '1 / 1',
+              margin: '0 auto',
+            }
+          : fixedHeight !== undefined
+            ? { width: '100%', height: fixedHeight }
+            : { width: '100%', height: '100%', minHeight: 420 }
       }
     />
   );

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { listen } from '@tauri-apps/api/event';
+import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { listen, emit } from '@tauri-apps/api/event';
 import { SurveyView } from './SurveyView';
 import { ScanView } from './ScanView';
 import { CalibrateScanView } from './CalibrateScanView';
@@ -17,7 +18,7 @@ import { TextInputDialog, type TextPrompt } from './dialogs/TextInputDialog';
 import { YesNoCancelDialog } from './dialogs/YesNoCancelDialog';
 import { ColorPickDialog } from './dialogs/ColorPickDialog';
 import { ConfirmDialog } from './dialogs/ConfirmDialog';
-import { HelpDialog } from './help/HelpDialog';
+import type { HelpSectionId } from './help/types';
 import { useImageSave } from '../lib/useImageSave';
 import { MenuBarShell, MenuTrigger } from './chrome/MenuBar';
 import { StatusBar } from './chrome/StatusBar';
@@ -46,7 +47,6 @@ export function MainWindow() {
   // Tracks whether the Help > Theme side submenu is open. Reset whenever the
   // parent Help menu closes (see effect below), mirroring Image Display.
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
-  const [helpOpen, setHelpOpen] = useState(false);
   const menuRef = useRef<HTMLElement | null>(null);
   const {
     survey,
@@ -129,6 +129,10 @@ export function MainWindow() {
   interface ComposeStep {
     mode: ComposeMode;
     otherPath: string;
+    // All picked files for an N-way append (length 1 for single-file append and
+    // for superimpose). When length > 1 the commit routes to append_image_multi
+    // so every source is resampled once; the per-file shift step is skipped.
+    otherPaths: string[];
     sameCalibration: boolean;
     weight: number; // 0..1, only used for superimpose
     raShiftSeconds: number;
@@ -603,23 +607,31 @@ export function MainWindow() {
             { name: 'Image (.img, .fits)', extensions: ['img', 'fits', 'fit'] },
             { name: 'All files', extensions: ['*'] },
           ];
-      let path: string | null = null;
+      // Append accepts several files at once (composed in one pass); superimpose
+      // is inherently pairwise (weighted), so it stays single-select.
+      let paths: string[] = [];
       try {
         const selected = await openDialog({
-          multiple: false,
+          multiple: mode === 'append',
           directory: false,
-          title: mode === 'append' ? 'Select Image to Append' : 'Select Image to Superimpose',
+          title:
+            mode === 'append' ? 'Select Image(s) to Append' : 'Select Image to Superimpose',
           filters,
         });
-        path = typeof selected === 'string' ? selected : null;
+        paths = Array.isArray(selected)
+          ? selected
+          : typeof selected === 'string'
+            ? [selected]
+            : [];
       } catch (err) {
         console.error('file dialog failed', err);
         return;
       }
-      if (!path) return;
+      if (paths.length === 0) return;
       setCompose({
         mode,
-        otherPath: path,
+        otherPath: paths[0],
+        otherPaths: paths,
         sameCalibration: true,
         weight: 0.5,
         raShiftSeconds: 0,
@@ -645,19 +657,26 @@ export function MainWindow() {
     const next = (patch: Partial<ComposeStep>) => setCompose((c) => (c ? { ...c, ...patch } : c));
 
     if (compose.stage === 'same-cal') {
+      // Multi-file append skips the per-file shift step (there's no sensible
+      // single shift across N files), so it jumps straight to the pixel prompt.
+      const isMultiAppend = compose.mode === 'append' && compose.otherPaths.length > 1;
+      const afterCal: ComposeStep['stage'] =
+        compose.mode === 'superimpose' ? 'equal-weight' : isMultiAppend ? 'pix' : 'shift-q';
       setYesNoPrompt({
         title: 'Calibration check',
-        message: 'Do the two images use the same calibration?',
+        message: isMultiAppend
+          ? 'Do all the images use the same calibration?'
+          : 'Do the two images use the same calibration?',
         onYes: () => {
           setYesNoPrompt(null);
-          next({ sameCalibration: true, stage: compose.mode === 'superimpose' ? 'equal-weight' : 'shift-q' });
+          next({ sameCalibration: true, stage: afterCal });
         },
         onNo: () => {
           setYesNoPrompt(null);
           setWarning(
             'Images with different calibrations may produce nonsensical composites — proceeding anyway.',
           );
-          next({ sameCalibration: false, stage: compose.mode === 'superimpose' ? 'equal-weight' : 'shift-q' });
+          next({ sameCalibration: false, stage: afterCal });
         },
       });
       return;
@@ -744,8 +763,9 @@ export function MainWindow() {
 
     if (compose.stage === 'pix') {
       setNumericPrompt({
-        title: 'Pixel resolution',
-        label: 'Pixel resolution (pixels):',
+        title: 'Grid coarseness',
+        label: 'Grid coarseness (1 = finest):',
+        hint: 'Subdivision of the native pixel size. 1 keeps each map at its own pixel size (0.06° by default); larger values subdivide the grid finer.',
         defaultValue: compose.pix,
         onSubmit: (value) => {
           setNumericPrompt(null);
@@ -763,11 +783,13 @@ export function MainWindow() {
         try {
           const meta =
             c.mode === 'append'
-              ? await rpcClient.appendImage(image.handle, c.otherPath, {
-                  ra_shift_seconds: c.raShiftSeconds,
-                  dec_shift_degrees: c.decShiftDegrees,
-                  pix: c.pix,
-                })
+              ? c.otherPaths.length > 1
+                ? await rpcClient.appendImageMulti(image.handle, c.otherPaths, { pix: c.pix })
+                : await rpcClient.appendImage(image.handle, c.otherPath, {
+                    ra_shift_seconds: c.raShiftSeconds,
+                    dec_shift_degrees: c.decShiftDegrees,
+                    pix: c.pix,
+                  })
               : await rpcClient.superimposeImage(image.handle, c.otherPath, {
                   weight: c.weight,
                   ra_shift_seconds: c.raShiftSeconds,
@@ -1009,8 +1031,9 @@ export function MainWindow() {
     }
     if (colorCompose.stage === 'pix') {
       setNumericPrompt({
-        title: 'Pixel resolution',
-        label: 'Pixel resolution (pixels):',
+        title: 'Grid coarseness',
+        label: 'Grid coarseness (1 = finest):',
+        hint: 'Subdivision of the native pixel size. 1 keeps each map at its own pixel size (0.06° by default); larger values subdivide the grid finer.',
         defaultValue: colorCompose.pix,
         onSubmit: (value) => {
           setNumericPrompt(null);
@@ -1227,6 +1250,47 @@ export function MainWindow() {
     void getCurrentWindow().close();
   };
 
+  // Map the currently-displayed work to the tutorial section that documents it,
+  // mirroring the view-area render ladder below (aux flux-cal → scan → standalone
+  // image → survey stage). Falls back to Overview when nothing is loaded.
+  const currentHelpSection = (): HelpSectionId => {
+    if (auxView === 'flux-cal') return 'flux-cal';
+    if (hasScan) return 'scan';
+    if (!hasSurvey && (image || rgbImage)) return 'image';
+    if (hasSurvey) {
+      if (viewMode === 'pre-image') return 'pre-image';
+      if (viewMode === 'image') return 'image';
+      return 'survey';
+    }
+    return 'overview';
+  };
+
+  // Open (or focus) the standalone tutorial window, jumping it to the section
+  // for the user's current work. The window is a real OS window so it can be
+  // dragged to another monitor or snapped beside the main window. `parent` ties
+  // its lifetime to the main window; the Rust side also exits the app when the
+  // main window closes (see lib.rs).
+  const openTutorial = async () => {
+    setOpenMenu(null);
+    const section = currentHelpSection();
+    const existing = await WebviewWindow.getByLabel('tutorial');
+    if (existing) {
+      await existing.setFocus();
+      await emit('tutorial:navigate', section);
+      return;
+    }
+    const win = new WebviewWindow('tutorial', {
+      url: `tutorial.html?section=${section}`,
+      title: 'Radio Cartographer — Tutorial',
+      width: 520,
+      height: 760,
+      parent: getCurrentWindow(),
+    });
+    win.once('tauri://error', (e) => {
+      console.error('failed to open tutorial window', e);
+    });
+  };
+
   return (
     <div className="main-window">
       <MenuBarShell ref={menuRef}>
@@ -1249,10 +1313,7 @@ export function MainWindow() {
               </button>
               <button
                 role="menuitem"
-                onClick={() => {
-                  setOpenMenu(null);
-                  setHelpOpen(true);
-                }}
+                onClick={() => void openTutorial()}
               >
                 Tutorial
               </button>
@@ -1341,9 +1402,13 @@ export function MainWindow() {
                 role="menuitem"
                 disabled={!hasImage}
                 onClick={() => void startCompose('append')}
-                title={hasImage ? undefined : 'Available after you build or upload an image'}
+                title={
+                  hasImage
+                    ? 'Select one or more images to append in a single pass'
+                    : 'Available after you build or upload an image'
+                }
               >
-                Append Image…
+                Append Image(s)…
               </button>
               <button
                 role="menuitem"
@@ -1813,7 +1878,6 @@ export function MainWindow() {
           </div>
         );
       })()}
-      {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
 
       <footer style={{ display: 'none' }}>
         {String(hasSurvey)}

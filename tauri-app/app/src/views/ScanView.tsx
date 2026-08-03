@@ -4,6 +4,7 @@ import { useScan } from '../state/scan-context';
 import { useTheme } from '../state/theme-context';
 import { PointScatter, type Point } from '../lib/plots/PointScatter';
 import { dataColors } from '../lib/plots/plot-theme';
+import { WorkspaceBody } from './WorkspaceBody';
 
 function formatRa(seconds: number): string {
   // RA in `.md1` is given in arc-time seconds (matches the survey format).
@@ -511,7 +512,8 @@ export function ScanView() {
       <div className="workspace-frame">
         <div className="workspace-title">{overview.name}</div>
 
-        <div className="workspace-body">
+        <WorkspaceBody
+          plots={
           <div className="workspace-plots">
             <div className="plot-row">
               <div className="axis-label-y">Flux</div>
@@ -589,7 +591,8 @@ export function ScanView() {
               </div>
             </div>
           </div>
-
+          }
+          side={
           <div className="workspace-side">
             <div className="side-buttons">
               {!calibrated && (
@@ -675,7 +678,8 @@ export function ScanView() {
               <div className="cal-row">Source samples: {overview.source_kept} / {overview.source_count}</div>
             </div>
           </div>
-        </div>
+          }
+        />
       </div>
     </div>
   );

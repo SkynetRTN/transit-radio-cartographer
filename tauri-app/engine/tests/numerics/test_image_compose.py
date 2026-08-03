@@ -9,7 +9,9 @@ from radio_cartographer.image import GriddedImage, WCSMetadata
 from radio_cartographer.image_compose import (
     _GRID_CELL_BUDGET,
     _normalize01,
+    _ra_wrap_shifts,
     append_images,
+    append_images_multi,
     bicolor_compose,
     extend_rgb_compose,
     superimpose_images,
@@ -74,6 +76,82 @@ def test_shift_translates_secondary_footprint():
     assert (out.pixels == 5.0).any()
 
 
+# ── N-way append (single-resnap multi-file compose) ──────────────────────────
+
+
+def test_append_multi_requires_at_least_one_other():
+    a = _make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=1.0)
+    with pytest.raises(ValueError, match="at least one"):
+        append_images_multi(a, [])
+
+
+def test_append_multi_shifts_length_must_match():
+    a = _make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=1.0)
+    b = _make(11, 11, 10.0, 20.0, 0.0, 10.0, fill=2.0)
+    with pytest.raises(ValueError, match="shifts length"):
+        append_images_multi(a, [b], shifts=[(0.0, 0.0), (0.0, 0.0)])
+
+
+def test_append_multi_places_every_input():
+    # Four disjoint maps along RA: all four fills must survive on one grid.
+    a = _make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=1.0)
+    b = _make(11, 11, 10.0, 20.0, 0.0, 10.0, fill=2.0)
+    c = _make(11, 11, 20.0, 30.0, 0.0, 10.0, fill=3.0)
+    d = _make(11, 11, 30.0, 40.0, 0.0, 10.0, fill=4.0)
+    out = append_images_multi(a, [b, c, d])
+    finite = out.pixels[np.isfinite(out.pixels)]
+    for fill in (1.0, 2.0, 3.0, 4.0):
+        assert (finite == fill).any(), f"fill {fill} missing from multi-append"
+    assert out.min_ra <= 0.0 and out.max_ra >= 40.0
+
+
+def test_append_multi_overlap_takes_max_and_is_order_independent():
+    # Three overlapping maps at the same footprint with different fills: every
+    # cell should be the max (3.0), regardless of argument order.
+    a = _make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=1.0)
+    b = _make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=3.0)
+    c = _make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=2.0)
+    out1 = append_images_multi(a, [b, c])
+    out2 = append_images_multi(c, [b, a])
+    assert np.nanmax(out1.pixels) == 3.0
+    # Same primary footprint → same grid; results match cell-for-cell.
+    np.testing.assert_allclose(out1.pixels, out2.pixels, equal_nan=True)
+
+
+def test_append_multi_matches_pairwise_when_grid_is_stable():
+    # When the primary already spans the full union (others fall inside it), no
+    # regrid drift occurs and the one-shot multi result equals the pairwise
+    # fold cell-for-cell — a correctness anchor for the max semantics.
+    base = _make(21, 21, 0.0, 20.0, 0.0, 20.0, fill=1.0)
+    base.pixels[5, 5] = 9.0
+    b = _make(11, 11, 5.0, 10.0, 5.0, 10.0, fill=2.0)
+    c = _make(11, 11, 10.0, 15.0, 10.0, 15.0, fill=4.0)
+    multi = append_images_multi(base, [b, c])
+    pair = append_images(append_images(base, b), c)
+    assert multi.pixels.shape == pair.pixels.shape
+    np.testing.assert_allclose(multi.pixels, pair.pixels, equal_nan=True)
+
+
+def test_append_multi_unwraps_ra_seam():
+    # Several maps straddling the 0h/24h seam compose into a compact grid.
+    a = _make(*_NEAR_24H, fill=1.0)
+    b = _make(*_NEAR_0H, fill=2.0)
+    c = _make(11, 11, 84600.0, 86400.0, 0.0, 10.0, fill=3.0)  # ~23.5h–24h
+    out = append_images_multi(a, [b, c])
+    assert out.pixels.shape[1] < 100, "seam-straddling multi-append should stay compact"
+    assert out.max_ra > 86400.0
+    finite = out.pixels[np.isfinite(out.pixels)]
+    for fill in (1.0, 2.0, 3.0):
+        assert (finite == fill).any()
+
+
+def test_append_multi_rejects_grid_explosion():
+    primary = _make(*_FINE_PRIMARY, fill=1.0)
+    secondary = _make(*_MISMATCHED_SECONDARY, fill=2.0)
+    with pytest.raises(ValueError, match="combined sky area"):
+        append_images_multi(primary, [secondary])
+
+
 # ── Grid-budget guard (BUG-009) ──────────────────────────────────────────────
 
 # Reproduces the FITS-vs-.img unit mismatch: a fine-cell primary in degrees
@@ -107,6 +185,79 @@ def test_compose_within_budget_succeeds():
     assert out.pixels.size <= _GRID_CELL_BUDGET
     assert (out.pixels == 1.0).any()
     assert (out.pixels == 2.0).any()
+
+
+# ── RA 0h/24h seam wraparound (legacy survform.frm 12h rule) ─────────────────
+
+# RA is stored in seconds of time: seam at 0 == 86400, 12h threshold at 43200.
+# Two maps straddling the seam (one just before 24h, one just after 0h) must
+# unwrap onto a continuous axis instead of unioning into a ~24h-wide grid that
+# either blows the cell budget ("won't append") or scatters the maps apart.
+_NEAR_24H = (11, 11, 82800.0, 86400.0, 0.0, 10.0)   # RA ~23h–24h
+_NEAR_0H = (11, 11, 0.0, 3600.0, 0.0, 10.0)         # RA ~0h–1h
+
+
+def test_ra_wrap_shifts_straddling_seam_bumps_low_side():
+    # One footprint reaches past 12h → the sub-12h footprint is the wrapped one
+    # and gets +24h (86400s).
+    assert _ra_wrap_shifts(86400.0, 3600.0) == (0.0, 86400.0)
+    assert _ra_wrap_shifts(3600.0, 86400.0) == (86400.0, 0.0)
+
+
+def test_ra_wrap_shifts_both_same_side_is_noop():
+    # Both below 12h (no input past the seam) → no shift.
+    assert _ra_wrap_shifts(3600.0, 7200.0) == (0.0, 0.0)
+    # Both above 12h (a normal high-RA mosaic) → no shift.
+    assert _ra_wrap_shifts(50000.0, 60000.0) == (0.0, 0.0)
+
+
+def test_ra_wrap_shifts_three_inputs():
+    # Generalizes to the tri-color case: only the sub-12h inputs move.
+    assert _ra_wrap_shifts(84000.0, 1800.0, 85000.0) == (0.0, 86400.0, 0.0)
+
+
+def test_append_across_seam_stays_compact_and_keeps_both():
+    # Regression for the user report: appending maps that straddle the 0h/24h
+    # seam previously produced a ~24h-wide grid — rejected by the budget guard
+    # ("won't append"). With the 12h unwrap the union is a compact ~2h span.
+    a = _make(*_NEAR_24H, fill=1.0)
+    b = _make(*_NEAR_0H, fill=2.0)
+    out = append_images(a, b)  # must not raise on the budget guard
+    # Union is ~2h wide (82800..90000), not ~24h — a couple dozen cells across.
+    assert out.pixels.shape[1] < 100, "seam-straddling append should stay compact"
+    assert out.pixels.size <= _GRID_CELL_BUDGET
+    # The low-side map was unwrapped past 24h onto the continuous axis.
+    assert out.max_ra > 86400.0
+    # Both maps actually landed on the grid.
+    finite = out.pixels[np.isfinite(out.pixels)]
+    assert (finite == 1.0).any() and (finite == 2.0).any()
+
+
+def test_append_across_seam_symmetric_in_argument_order():
+    # Whichever map is primary, the unwrap produces the same compact union.
+    a = _make(*_NEAR_24H, fill=1.0)
+    b = _make(*_NEAR_0H, fill=2.0)
+    out_ab = append_images(a, b)
+    out_ba = append_images(b, a)
+    assert out_ab.max_ra - out_ab.min_ra == pytest.approx(out_ba.max_ra - out_ba.min_ra)
+    for out in (out_ab, out_ba):
+        finite = out.pixels[np.isfinite(out.pixels)]
+        assert (finite == 1.0).any() and (finite == 2.0).any()
+
+
+def test_bicolor_across_seam_places_both_channels():
+    a = _make(*_NEAR_24H, fill=1.0)
+    a.pixels[5, 5] = 7.0
+    b = _make(*_NEAR_0H, fill=2.0)
+    b.pixels[5, 5] = 8.0
+    out = bicolor_compose(a, b, primary_channel="r", secondary_channel="g")
+    assert out.pixels_r.shape[1] < 100
+    # Each assigned channel covers its own map's footprint somewhere.
+    assert np.isfinite(out.pixels_r).any()
+    assert np.isfinite(out.pixels_g).any()
+    r_only = np.isfinite(out.pixels_r) & np.isnan(out.pixels_g)
+    g_only = np.isnan(out.pixels_r) & np.isfinite(out.pixels_g)
+    assert r_only.any() and g_only.any()
 
 
 # ── _normalize01 NaN-safety (BUG-013) ────────────────────────────────────────

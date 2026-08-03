@@ -4,6 +4,7 @@ import { useSurvey } from '../state/survey-context';
 import { useTheme } from '../state/theme-context';
 import { PointScatter, type Point } from '../lib/plots/PointScatter';
 import { dataColors } from '../lib/plots/plot-theme';
+import { WorkspaceBody } from './WorkspaceBody';
 
 function formatRa(volts: number): string {
   // RA in the .md2 fixtures is given in arc-time seconds.  Format as HH:MM:SS.
@@ -75,16 +76,25 @@ export function SurveyView() {
   const [pendingBaselinePoint, setPendingBaselinePoint] = useState<
     { dec: number; flux: number } | null
   >(null);
-  // Per-sweep, per-sample "removed" amount from Remove RFI edits.
-  // Lives only until Accept Sweep, at which point it's committed to the
-  // backend workspace (and cleared here so the next view of this sweep
-  // reads the new baseline flux from disk).
+  // Per-sweep, per-sample "removed" amount from Remove RFI edits, measured
+  // against `originalBySweep` (NOT the engine's current flux). Kept across
+  // Accept Sweep so revisiting an accepted sweep still shows the Removed plot
+  // and lets you restore points and re-apply. Only cleared on workspace change.
+  // Not persisted to `.srv` — this is session-scoped (see the "Undo a removal"
+  // note in the Survey help section).
   const [removedBySweep, setRemovedBySweep] = useState<Record<number, RemovedMap>>({});
+  // Per-sweep pristine flux snapshot, captured the first time a sweep is edited
+  // this session — before Accept Sweep overwrites the engine's flux with the
+  // corrected values. Every removed-amount and the committed flux are derived
+  // from this, so it stays valid even once the engine no longer holds the
+  // original. Presence of an entry also means "this sweep was edited this
+  // session", the signal commitPendingEdits uses to decide whether to sync.
+  const [originalBySweep, setOriginalBySweep] = useState<Record<number, number[]>>({});
   // Per-sweep stack of prior `removedBySweep[i]` snapshots. Every Remove RFI
   // removal AND every recover-line draw pushes one entry, so a single Undo
-  // reverts whichever happened last on this sweep. Cleared on workspace change
-  // and on Accept Sweep (the prior states no longer make sense once the engine
-  // owns the flux array).
+  // reverts whichever happened last on this sweep. Snapshots are relative to
+  // `originalBySweep`, so they survive Accept Sweep too; only cleared on
+  // workspace change.
   const [historyBySweep, setHistoryBySweep] = useState<Record<number, RemovedMap[]>>({});
   // First endpoint of the recovery line drawn on the bottom "Removed" plot.
   // Mirrors `pendingBaselinePoint` for the top plot, but in (Dec, removed-amount)
@@ -117,6 +127,7 @@ export function SurveyView() {
   useEffect(() => {
     setRemovedBySweep({});
     setHistoryBySweep({});
+    setOriginalBySweep({});
   }, [workspaceHandle]);
 
   useEffect(() => {
@@ -159,14 +170,22 @@ export function SurveyView() {
   );
   const hasPendingRemoved = Object.keys(removed).length > 0;
 
-  // The top plot shows the *corrected* flux (with current pending removals
-  // applied). Once committed via Accept Sweep, the backend's flux already
-  // reflects the same values, so a re-load shows the same picture.
+  // Base flux the removed map is measured against: the pristine snapshot once
+  // the sweep has been edited this session, otherwise whatever the engine just
+  // handed us (which is the original for an untouched sweep).
+  const baseFlux = useMemo<number[] | null>(
+    () => originalBySweep[sweepIndex] ?? sweep?.flux ?? null,
+    [originalBySweep, sweepIndex, sweep],
+  );
+
+  // The top plot shows the *corrected* flux (base minus current removals).
+  // After Accept Sweep the engine's flux already equals base - removed, so
+  // these recomputed values match a fresh re-load exactly.
   const correctedFlux = useMemo<number[] | null>(() => {
-    if (!sweep) return null;
+    if (!sweep || !baseFlux) return null;
     if (!hasPendingRemoved) return null;
-    return applyRemoved(sweep.flux, removed);
-  }, [sweep, removed, hasPendingRemoved]);
+    return applyRemoved(baseFlux, removed);
+  }, [sweep, baseFlux, removed, hasPendingRemoved]);
 
   const topSeries = useMemo(() => {
     if (!sweep) return [];
@@ -243,6 +262,16 @@ export function SurveyView() {
   // here).
   const commitRemoved = useCallback(
     (next: RemovedMap) => {
+      // Snapshot the pristine flux on the first edit of this sweep, before any
+      // Accept Sweep overwrites the engine copy. Later edits (including ones
+      // made after the sweep was accepted) keep measuring against this.
+      if (sweep) {
+        setOriginalBySweep((prev) =>
+          prev[sweepIndex] !== undefined
+            ? prev
+            : { ...prev, [sweepIndex]: sweep.flux },
+        );
+      }
       const prevMap = removedBySweep[sweepIndex] ?? {};
       setHistoryBySweep((h) => {
         const stack = h[sweepIndex] ?? [];
@@ -250,7 +279,7 @@ export function SurveyView() {
       });
       setRemovedBySweep((prev) => ({ ...prev, [sweepIndex]: next }));
     },
-    [removedBySweep, sweepIndex],
+    [removedBySweep, sweepIndex, sweep],
   );
 
   const handleClick = useCallback(
@@ -271,12 +300,16 @@ export function SurveyView() {
           const lo = Math.min(dec0, dec1);
           const hi = Math.max(dec0, dec1);
           const slope = dec1 === dec0 ? 0 : (flux1 - flux0) / (dec1 - dec0);
+          // Removals are measured against the pristine base so they stay valid
+          // even after Accept Sweep rewrites the engine's flux to the corrected
+          // values (base falls back to the current flux on the first edit).
+          const base = originalBySweep[sweepIndex] ?? sweep.flux;
           const next: RemovedMap = { ...(removedBySweep[sweepIndex] ?? {}) };
           for (let i = 0; i < sweep.dec.length; i++) {
             const d = sweep.dec[i];
             if (d < lo || d > hi) continue;
             const lineFlux = flux0 + slope * (d - dec0);
-            next[i] = sweep.flux[i] - lineFlux;
+            next[i] = base[i] - lineFlux;
           }
           commitRemoved(next);
           setPendingBaselinePoint(null);
@@ -285,7 +318,15 @@ export function SurveyView() {
       }
       setStickyPoint(p);
     },
-    [baselineMode, pendingBaselinePoint, sweepIndex, sweep, removedBySweep, commitRemoved],
+    [
+      baselineMode,
+      pendingBaselinePoint,
+      sweepIndex,
+      sweep,
+      removedBySweep,
+      originalBySweep,
+      commitRemoved,
+    ],
   );
 
   // Recover removed samples by drawing a second, FREE (un-snapped) line across
@@ -371,40 +412,35 @@ export function SurveyView() {
     setRecoverCursor(null);
   }, []);
 
-  // Commit this sweep's pending RFI edits (if any) to the engine workspace.
-  // Returns false if the commit failed (so callers skip accepting) or there is
-  // no sweep loaded. Shared by Accept Sweep and Accept All.
+  // Sync this sweep's edits to the engine workspace. A sweep edited this
+  // session has an `originalBySweep` snapshot; we write back base - removed
+  // (which equals the original again if every point has since been restored).
+  // Sweeps never touched this session have no snapshot and nothing to sync.
+  //
+  // Unlike the old flow, this does NOT discard the removed map / history /
+  // snapshot afterwards — that's what keeps an accepted sweep re-editable, so
+  // you can revisit it, restore points, and Apply Edits. The removed map stays
+  // valid because it's measured against the retained snapshot, not the engine's
+  // (now corrected) flux. Returns false if the commit failed (callers skip
+  // accepting) or there is no sweep loaded. Shared by Accept Sweep/Accept All.
   const commitPendingEdits = useCallback(async (): Promise<boolean> => {
     if (!sweep || workspaceHandle === null) return false;
-    const pending = removedBySweep[sweepIndex];
-    if (pending && Object.keys(pending).length > 0) {
-      const newFlux = applyRemoved(sweep.flux, pending);
-      setCommitting(true);
-      setError(null);
-      try {
-        await rpcClient.setSourceSweepFlux(workspaceHandle, sweepIndex, newFlux);
-        setRemovedBySweep((prev) => {
-          const next = { ...prev };
-          delete next[sweepIndex];
-          return next;
-        });
-        // The pre-commit history snapshots reference a flux array the engine
-        // no longer owns, so they can't roll back anything meaningful.
-        setHistoryBySweep((prev) => {
-          const next = { ...prev };
-          delete next[sweepIndex];
-          return next;
-        });
-        markDirty();
-      } catch (e) {
-        setError((e as Error).message);
-        setCommitting(false);
-        return false;
-      }
+    const base = originalBySweep[sweepIndex];
+    if (base === undefined) return true;
+    const newFlux = applyRemoved(base, removedBySweep[sweepIndex] ?? {});
+    setCommitting(true);
+    setError(null);
+    try {
+      await rpcClient.setSourceSweepFlux(workspaceHandle, sweepIndex, newFlux);
+      markDirty();
+    } catch (e) {
+      setError((e as Error).message);
       setCommitting(false);
+      return false;
     }
+    setCommitting(false);
     return true;
-  }, [sweep, workspaceHandle, removedBySweep, sweepIndex, markDirty]);
+  }, [sweep, workspaceHandle, originalBySweep, removedBySweep, sweepIndex, markDirty]);
 
   const handleAcceptSweep = useCallback(async () => {
     if (!(await commitPendingEdits())) return;
@@ -493,7 +529,8 @@ export function SurveyView() {
           {isAccepted && <span className="sweep-accepted-tag"> · accepted</span>}
         </div>
 
-        <div className="workspace-body">
+        <WorkspaceBody
+          plots={
           <div className="workspace-plots">
             <div className="plot-row">
               <div className="axis-label-y">Flux</div>
@@ -572,7 +609,8 @@ export function SurveyView() {
               </div>
             </div>
           </div>
-
+          }
+          side={
           <div className="workspace-side">
             <div className="side-buttons">
               <button
@@ -695,7 +733,8 @@ export function SurveyView() {
               Keys: ← back · → accept &amp; next
             </div>
           </div>
-        </div>
+          }
+        />
       </div>
     </div>
   );

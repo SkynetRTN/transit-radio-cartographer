@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Radio Cartographer — Tutorial</title>
+    <script>
+      // Pre-paint theme: stamp the saved theme onto <html> before the app
+      // renders so the tutorial window matches the main window with no flash.
+      // Mirrors the storage key + default in src/state/theme-context.tsx and
+      // the identical script in index.html.
+      (function () {
+        try {
+          var t = localStorage.getItem('rc-theme');
+          document.documentElement.setAttribute(
+            'data-theme',
+            t === 'dark' || t === 'retro' ? t : 'light',
+          );
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'light');
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/tutorial-main.tsx"></script>
+  </body>
+</html>

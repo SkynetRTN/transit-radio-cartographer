@@ -22,6 +22,7 @@ vi.mock('../ipc/client', () => ({
       label: 'AND0A - Sweep 1',
       calibrated: false,
     }),
+    setSourceSweepFlux: vi.fn().mockResolvedValue({ overview: {} }),
     getCalibrationView: vi.fn(),
     cutCalibrationSegment: vi.fn(),
     selectCalibrationDeclination: vi.fn(),
@@ -330,6 +331,59 @@ test('Undo button reverts the last Remove RFI removal or recovery', async () => 
     ).toBeInTheDocument(),
   );
   expect(screen.getByText('Undo')).toBeDisabled();
+});
+
+test('removed samples persist after accepting, so an accepted sweep can be revisited and re-edited', async () => {
+  const calibrated: WorkspaceOverview = { ...workspaceOverview, calibrated: true };
+  (rpcClient.setSourceSweepFlux as unknown as ReturnType<typeof vi.fn>).mockClear();
+  await act(async () => {
+    render(
+      <SurveyProvider>
+        <HydrateSurvey
+          meta={{
+            handle: 1,
+            metadata: { sweep_count: 9, path: '/tmp/and0a.md2' },
+            workspace_handle: 2,
+            workspace: calibrated,
+          }}
+        />
+        <SurveyView />
+      </SurveyProvider>,
+    );
+  });
+
+  await waitFor(() => expect(screen.getByText('Remove RFI')).toBeInTheDocument());
+  fireEvent.click(screen.getByText('Remove RFI'));
+
+  // Remove a band on sweep 1 (index 0): points land on the Removed panel.
+  fireEvent.click(screen.getByTestId('survey-plot-click-first'));
+  fireEvent.click(screen.getByTestId('survey-plot-click-second'));
+  await waitFor(() =>
+    expect(screen.queryByText(/Removed samples appear here/)).not.toBeInTheDocument(),
+  );
+
+  // Accept the sweep → commits corrected flux to the engine and advances to
+  // the next unaccepted sweep.
+  await act(async () => {
+    fireEvent.click(screen.getByText('Accept Sweep'));
+  });
+  await waitFor(() =>
+    expect(screen.getByText(/1 \/ 5 sweeps accepted/)).toBeInTheDocument(),
+  );
+  expect(rpcClient.setSourceSweepFlux).toHaveBeenCalledWith(2, 0, expect.any(Array));
+
+  // Go back to the accepted sweep.
+  await act(async () => {
+    fireEvent.click(screen.getByText(/Prev/));
+  });
+
+  // Its removed samples are still on the Removed panel (placeholder absent),
+  // and the accept button now offers Apply Edits rather than being a disabled
+  // Accept Sweep — proving the sweep stayed re-editable.
+  await waitFor(() =>
+    expect(screen.queryByText(/Removed samples appear here/)).not.toBeInTheDocument(),
+  );
+  expect(screen.getByText('Apply Edits')).toBeInTheDocument();
 });
 
 test('clicking a point in Remove RFI mode still updates the RA/Dec/Flux readout', async () => {

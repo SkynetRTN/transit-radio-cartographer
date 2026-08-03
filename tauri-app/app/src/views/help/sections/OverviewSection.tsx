@@ -12,7 +12,7 @@
  * ============================================================================
  */
 
-import type { HelpSectionId } from '../HelpDialog';
+import type { HelpSectionId } from '../types';
 
 interface Props {
   onJump: (section: HelpSectionId) => void;
@@ -21,12 +21,14 @@ interface Props {
 export function OverviewSection({ onJump }: Props) {
   return (
     <section className="help-section">
-      <h2>Welcome to OG Radio Cartographer</h2>
+      <h2>Welcome to Transit Radio Cartographer</h2>
 
       <p>
-        OG Radio Cartographer builds radio maps from Green Bank 20m data: it
+        Transit Radio Cartographer builds radio maps from Green Bank 20m data: it
         calibrates, cleans, and grids individual sweeps into a final image. This
-        built-in tutorial walks through each stage of the workflow.
+        built-in tutorial walks through each stage of the workflow. Note, sometimes 
+        you pull up another window while the tutorial is open, you may need to minimize
+        and then maximize the Radio Cartographer window to see the tutorial again.
       </p>
 
       <h3>The five workflows</h3>
@@ -91,6 +93,10 @@ export function OverviewSection({ onJump }: Props) {
             </td>
           </tr>
           <tr>
+            <td>.img</td>
+            <td>Gridded survey image (binary raster produced from a survey).</td>
+          </tr>
+          <tr>
             <td>.cal</td>
             <td>Flux calibration table (measured-vs-known fit).</td>
           </tr>
@@ -127,11 +133,6 @@ export function OverviewSection({ onJump }: Props) {
         </li>
       </ul>
 
-      <p className="help-todo">
-        [USER TODO] — Add a paragraph here about typical session length, where
-        students usually get stuck, and any expectations about data quality
-        before opening the app.
-      </p>
     </section>
   );
 }

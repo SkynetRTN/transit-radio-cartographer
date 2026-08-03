@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { save as saveDialog } from '@tauri-apps/plugin-dialog';
-import { useSurvey } from '../state/survey-context';
+import { useSurvey, type ImageDisplayMode } from '../state/survey-context';
 import { ImagePlot, type ImagePoint, type BoxOverlay } from '../lib/plots/ImagePlot';
 import { RgbImagePlot, type RgbImagePoint } from '../lib/plots/RgbImagePlot';
 import { useImageSave } from '../lib/useImageSave';
+import { computeFluxStats } from '../lib/fluxStats';
+import { ResizeDivider, useResizable } from '../lib/useResizable';
+import { WorkspaceBody } from './WorkspaceBody';
 import {
   rpcClient,
   type ImageMeta,
@@ -35,6 +38,13 @@ function formatDecDegrees(dec: number): string {
   return `${sign}${pad2(deg)}:${pad2(mins)}:${pad2(secs)}`;
 }
 
+// Format an aggregated flux value for the magnifier stats readout, matching the
+// per-cell readout's 4-decimal style and appending the flux unit when known.
+function formatFlux(value: number, unit: string): string {
+  const text = value.toFixed(4);
+  return unit ? `${text} ${unit}` : text;
+}
+
 function pointFromColRow(
   pixels: ImagePixels,
   meta: ImageMeta | null,
@@ -64,22 +74,75 @@ interface MagnifierData {
   fluxRange: { min: number; max: number };
   // Box drawn on the *main* plot to show what region is being magnified.
   overlay: BoxOverlay | null;
+  // Inclusive cell bounds of the magnified region in the *full* source grid.
+  // These match the white overlay box exactly and drive the flux-aggregation
+  // buttons (sum/average inside, sum outside).
+  bounds: { colMin: number; colMax: number; rowMin: number; rowMax: number };
 }
 
-// Slice the source pixel grid around (col, row) with a half-size in cells, and
-// derive a sub-meta + local flux range so the magnifier rescales the palette
-// to its own min/max (the legacy behavior — even a faint patch shows the full
-// palette stretched into it).
+// Choose the half-window (in cells) so the magnified region is roughly SQUARE
+// ON SCREEN for the current display mode — not a square block of cells. On a
+// sky-aspect image a square cell block draws as a rectangle, which made the
+// magnifier's location box look nothing like the (square) magnifier. Balancing
+// the two cell counts by the on-screen cell aspect keeps the box square and the
+// magnified region honest.
+function magnifierHalfExtents(
+  meta: ImageMeta | null,
+  w: number,
+  h: number,
+  half: number,
+  displayMode: ImageDisplayMode,
+): { colHalf: number; rowHalf: number } {
+  const bounded =
+    meta &&
+    w > 1 &&
+    h > 1 &&
+    Number.isFinite(meta.min_ra) &&
+    Number.isFinite(meta.max_ra) &&
+    Number.isFinite(meta.min_dec) &&
+    Number.isFinite(meta.max_dec) &&
+    meta.max_ra > meta.min_ra &&
+    meta.max_dec > meta.min_dec;
+  // No sky geometry to honor ('stretch' or an unbounded image) — fall back to a
+  // square cell block.
+  if (!bounded || displayMode === 'stretch') return { colHalf: half, rowHalf: half };
+  const raSpan = meta!.max_ra - meta!.min_ra;
+  const decSpan = meta!.max_dec - meta!.min_dec;
+  const decCenter = (meta!.min_dec + meta!.max_dec) / 2;
+  const raPerCell = raSpan / (w - 1);
+  const decPerCell = decSpan / (h - 1);
+  // px-per-RA ÷ px-per-Dec — the same `ratio` ImagePlot.plotAspect uses.
+  const ratio =
+    displayMode === 'raw'
+      ? 1 / 240
+      : displayMode === 'pixel'
+        ? (decSpan * w) / (raSpan * h)
+        : Math.cos((decCenter * Math.PI) / 180) / 240;
+  // On-screen width of one column-cell ÷ height of one row-cell. The box is
+  // square on screen when rowHalf / colHalf == cellAspect; split the change
+  // around a geometric mean so neither dimension's window blows up.
+  const cellAspect = (ratio * raPerCell) / decPerCell;
+  if (!Number.isFinite(cellAspect) || cellAspect <= 0) return { colHalf: half, rowHalf: half };
+  const k = Math.sqrt(cellAspect);
+  return { colHalf: Math.max(1, Math.round(half / k)), rowHalf: Math.max(1, Math.round(half * k)) };
+}
+
+// Slice the source pixel grid around (col, row) with per-axis half-sizes in
+// cells (see magnifierHalfExtents), and derive a sub-meta + local flux range so
+// the magnifier rescales the palette to its own min/max (the legacy behavior —
+// even a faint patch shows the full palette stretched into it).
 function buildMagnifier(
   pixels: ImagePixels,
   meta: ImageMeta | null,
   center: { col: number; row: number },
   half: number,
+  displayMode: ImageDisplayMode,
 ): MagnifierData {
-  const colMin = Math.max(0, center.col - half);
-  const colMax = Math.min(pixels.width - 1, center.col + half);
-  const rowMin = Math.max(0, center.row - half);
-  const rowMax = Math.min(pixels.height - 1, center.row + half);
+  const { colHalf, rowHalf } = magnifierHalfExtents(meta, pixels.width, pixels.height, half, displayMode);
+  const colMin = Math.max(0, center.col - colHalf);
+  const colMax = Math.min(pixels.width - 1, center.col + colHalf);
+  const rowMin = Math.max(0, center.row - rowHalf);
+  const rowMax = Math.min(pixels.height - 1, center.row + rowHalf);
   // Pass `null` through to the magnifier's heatmap z-array — Plotly renders
   // null cells transparent against `plot_bgcolor` (BUG-014). The min/max scan
   // ignores null so a no-data corner doesn't break the local palette stretch.
@@ -139,6 +202,7 @@ function buildMagnifier(
     meta: subMeta,
     fluxRange: { min: localMin, max: localMax },
     overlay,
+    bounds: { colMin, colMax, rowMin, rowMax },
   };
 }
 
@@ -214,9 +278,34 @@ export function ImageView() {
 
   const { saveImageQuick, saveImageAs, saveBitmapAs } = useImageSave();
 
+  // Draggable magnifier height (persisted). Replaces the old fixed 200px so a
+  // cramped loupe can be dragged taller via the divider above it.
+  const magHeight = useResizable('ogrc.magnifierHeight', 200, {
+    min: 120,
+    max: 900,
+    axis: 'y',
+  });
+
   const [hoverPoint, setHoverPoint] = useState<ImagePoint | null>(null);
   const [pinnedPoint, setPinnedPoint] = useState<ImagePoint | null>(null);
   const [magnifierCenter, setMagnifierCenter] = useState<ImagePoint | null>(null);
+  // Which flux-aggregation stats are shown under the magnifier. Toggling a
+  // button in/out of this set reveals/hides its live-updating value.
+  const [shownStats, setShownStats] = useState<Set<'sum' | 'avg' | 'outside'>>(
+    () => new Set(),
+  );
+  const toggleStat = useCallback((key: 'sum' | 'avg' | 'outside') => {
+    setShownStats((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+  const closeMagnifier = useCallback(() => {
+    setMagnifierCenter(null);
+    setShownStats(new Set());
+  }, []);
   // RGB-composite cursor + magnifier (BUG-017). Kept separate from the scalar
   // state above because RGB cells carry no flux.
   const [rgbHover, setRgbHover] = useState<RgbImagePoint | null>(null);
@@ -281,8 +370,16 @@ export function ImageView() {
 
   const magnifier = useMemo(() => {
     if (!magnifierCenter || !imagePixels) return null;
-    return buildMagnifier(imagePixels, image, magnifierCenter, magnifierHalfSize);
-  }, [magnifierCenter, imagePixels, image, magnifierHalfSize]);
+    return buildMagnifier(imagePixels, image, magnifierCenter, magnifierHalfSize, imageDisplay);
+  }, [magnifierCenter, imagePixels, image, magnifierHalfSize, imageDisplay]);
+
+  // Live flux stats for the current magnifier box. Recomputed whenever the box
+  // (or the underlying image) changes, so the shown values track arrow-key
+  // moves and re-right-clicks. Skipped entirely when no stat is toggled on.
+  const fluxStats = useMemo(() => {
+    if (!imagePixels || !magnifier || shownStats.size === 0) return null;
+    return computeFluxStats(imagePixels, magnifier.bounds);
+  }, [imagePixels, magnifier, shownStats]);
 
   // RGB-composite hover + right-click magnifier (BUG-017).
   const handleRgbContextMenu = useCallback((p: RgbImagePoint | null) => {
@@ -365,7 +462,8 @@ export function ImageView() {
     <div className="survey-view workspace image-view">
       <div className="workspace-frame">
         <div className="workspace-title">{title}</div>
-        <div className="workspace-body">
+        <WorkspaceBody
+          plots={
           <div className="workspace-plots">
             {hasScalar ? (
               <ImagePlot
@@ -397,7 +495,8 @@ export function ImageView() {
               />
             )}
           </div>
-
+          }
+          side={
           <div className="workspace-side">
             {hasScalar && (
               <div className="side-hint">
@@ -418,7 +517,7 @@ export function ImageView() {
                 </button>
               )}
               {magnifierCenter && (
-                <button onClick={() => setMagnifierCenter(null)}>
+                <button onClick={closeMagnifier}>
                   Close Magnifier
                 </button>
               )}
@@ -493,39 +592,108 @@ export function ImageView() {
               )}
             </div>
 
-            {magnifier && (
-              <div className="magnifier-panel">
-                <div className="magnifier-label">Magnifier</div>
-                <ImagePlot
-                  image={magnifier.pixels}
-                  meta={magnifier.meta}
-                  title=""
-                  testId="magnifier-plot"
-                  palette={imagePalette}
-                  fluxRange={magnifier.fluxRange}
-                  onHover={setHoverPoint}
-                  onClick={handleClick}
-                  showColorBar={false}
-                  fixedHeight={200}
-                  displayMode={imageDisplay}
-                />
+            {/* Flux-aggregation buttons live directly below the RA/Dec/Flux
+                readout (not up in the top button group) so they stay visible
+                when the panel is scrolled down to the magnifier. */}
+            {hasScalar && magnifierCenter && (
+              <div className="side-buttons">
+                <button
+                  className={shownStats.has('sum') ? 'active' : undefined}
+                  onClick={() => toggleStat('sum')}
+                >
+                  Sum Flux (Box)
+                </button>
+                <button
+                  className={shownStats.has('avg') ? 'active' : undefined}
+                  onClick={() => toggleStat('avg')}
+                >
+                  Average Flux (Box)
+                </button>
+                <button
+                  className={shownStats.has('outside') ? 'active' : undefined}
+                  onClick={() => toggleStat('outside')}
+                >
+                  Sum Flux (Outside Box)
+                </button>
+                {fluxStats && shownStats.size > 0 && (
+                  <div className="magnifier-stats">
+                    {shownStats.has('sum') && (
+                      <div>
+                        Box sum: {formatFlux(fluxStats.boxSum, fluxUnit)}
+                        <span className="magnifier-stats-note">
+                          {' '}({fluxStats.boxCount} cells)
+                        </span>
+                      </div>
+                    )}
+                    {shownStats.has('avg') && (
+                      <div>
+                        Box average:{' '}
+                        {fluxStats.boxMean === null
+                          ? '—'
+                          : formatFlux(fluxStats.boxMean, fluxUnit)}
+                      </div>
+                    )}
+                    {shownStats.has('outside') && (
+                      <div>
+                        Outside sum: {formatFlux(fluxStats.outsideSum, fluxUnit)}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
-            {rgbMagnifier && (
-              <div className="magnifier-panel">
-                <div className="magnifier-label">Magnifier</div>
-                <RgbImagePlot
-                  image={rgbMagnifier.pixels}
-                  meta={rgbMagnifier.meta}
-                  title=""
-                  testId="rgb-magnifier-plot"
-                  fixedHeight={200}
+            {magnifier && (
+              <>
+                <ResizeDivider
+                  orientation="horizontal"
+                  onPointerDown={(e) => magHeight.startDrag(e)}
+                  title="Drag to resize the magnifier"
                 />
-              </div>
+                <div className="magnifier-panel">
+                  <div className="magnifier-label">Magnifier</div>
+                  <ImagePlot
+                    image={magnifier.pixels}
+                    meta={magnifier.meta}
+                    title=""
+                    testId="magnifier-plot"
+                    palette={imagePalette}
+                    fluxRange={magnifier.fluxRange}
+                    onHover={setHoverPoint}
+                    onClick={handleClick}
+                    showColorBar={false}
+                    fixedHeight={magHeight.size ?? 200}
+                    square
+                    hideAxes
+                    displayMode={imageDisplay}
+                  />
+                </div>
+              </>
+            )}
+
+            {rgbMagnifier && (
+              <>
+                <ResizeDivider
+                  orientation="horizontal"
+                  onPointerDown={(e) => magHeight.startDrag(e)}
+                  title="Drag to resize the magnifier"
+                />
+                <div className="magnifier-panel">
+                  <div className="magnifier-label">Magnifier</div>
+                  <RgbImagePlot
+                    image={rgbMagnifier.pixels}
+                    meta={rgbMagnifier.meta}
+                    title=""
+                    testId="rgb-magnifier-plot"
+                    fixedHeight={magHeight.size ?? 200}
+                    square
+                  />
+                </div>
+              </>
             )}
           </div>
-        </div>
+          }
+        />
       </div>
     </div>
   );

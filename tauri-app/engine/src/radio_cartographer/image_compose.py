@@ -13,6 +13,7 @@ both images stay zero.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Sequence
 
 import numpy as np
 from numpy.typing import NDArray
@@ -38,6 +39,31 @@ def _check_grid_budget(width: int, height: int) -> None:
         )
 
 
+def _ra_wrap_shifts(*max_ras: float) -> tuple[float, ...]:
+    """Legacy 12-hour RA wraparound (vb/survform.frm:7111 and siblings).
+
+    RA is stored in seconds of time and is cyclic: 0h == 24h == 86400s. Two
+    maps straddling the 0h/24h seam (e.g. one at ~23h, one at ~1h) would union
+    into a ~24h-wide bounding box with a huge empty middle — blowing the cell
+    budget (BUG-009: the compose is rejected outright, "won't append") or
+    scattering the maps to opposite edges of a mostly-blank image.
+
+    The legacy rule: if *any* input's max RA reaches past the 12h mark
+    (43200s), any input whose max RA sits *below* 12h is assumed to have
+    wrapped from the far side of the seam, so it is shifted up by 24h (86400s)
+    onto a common continuous axis before the union is taken. Returns one
+    additive RA shift (0.0 or 86400.0) per input, in the order given.
+
+    The unwrapped storage values may exceed 86400; the frontend mods RA back
+    into [0, 86400) for tick labels and readouts (ImagePlot.tsx
+    formatRaSeconds), matching make_image's FEAT-009 unwrap, so they never
+    surface to the user.
+    """
+    if any(m > 43200.0 for m in max_ras):
+        return tuple(86400.0 if m < 43200.0 else 0.0 for m in max_ras)
+    return tuple(0.0 for _ in max_ras)
+
+
 def append_images(
     primary: GriddedImage,
     secondary: GriddedImage,
@@ -47,6 +73,106 @@ def append_images(
     dec_shift_degrees: float = 0.0,
 ) -> GriddedImage:
     return _compose(primary, secondary, pix, ra_shift_seconds, dec_shift_degrees, "append")
+
+
+def append_images_multi(
+    primary: GriddedImage,
+    others: Sequence[GriddedImage],
+    *,
+    pix: int | None = None,
+    shifts: Sequence[tuple[float, float]] | None = None,
+) -> GriddedImage:
+    """Append N images onto a single union grid, resampling each source once.
+
+    Result-equivalent to folding `append_images` left-to-right (overlap cell =
+    max across all covering inputs, order-independent), but every source is
+    snapped to the output grid exactly once instead of the running accumulator
+    being re-snapped on each pairwise step. That avoids the nearest-neighbor
+    regrid error a long pairwise chain accumulates — the motivation for
+    appending many files in one shot rather than one at a time.
+
+    `primary` defines the output cell size (same convention as the pairwise
+    path); `others` are the additional images. `shifts` optionally gives a
+    per-`other` (ra_shift_seconds, dec_shift_degrees) translation, in the same
+    order as `others`; `primary` is never shifted. Cells outside every input's
+    footprint are NaN (BUG-014 "no data" contract).
+    """
+    if not others:
+        raise ValueError("append_images_multi requires at least one other image")
+    if shifts is not None and len(shifts) != len(others):
+        raise ValueError(
+            f"shifts length ({len(shifts)}) must match others length ({len(others)})"
+        )
+
+    images = [primary, *others]
+    # Per-image user shift; primary is fixed at the origin.
+    if shifts:
+        user_ra = [0.0] + [float(s[0]) for s in shifts]
+        user_dec = [0.0] + [float(s[1]) for s in shifts]
+    else:
+        user_ra = [0.0] * len(images)
+        user_dec = [0.0] * len(images)
+
+    # Effective (post-user-shift) max RA per image drives the 0h/24h seam
+    # unwrap; the resulting wrap shift folds into each image's total RA shift.
+    eff_max_ra = [img.max_ra + user_ra[i] for i, img in enumerate(images)]
+    wraps = _ra_wrap_shifts(*eff_max_ra)
+    ra_shift = [user_ra[i] + wraps[i] for i in range(len(images))]
+    dec_shift = list(user_dec)
+
+    # Union bounding box over every image's shifted footprint.
+    min_ra = min(img.min_ra + ra_shift[i] for i, img in enumerate(images))
+    max_ra = max(img.max_ra + ra_shift[i] for i, img in enumerate(images))
+    min_dec = min(img.min_dec + dec_shift[i] for i, img in enumerate(images))
+    max_dec = max(img.max_dec + dec_shift[i] for i, img in enumerate(images))
+
+    # Output cell size inherited from the primary (native, or `pix`-subdivided).
+    p_height, p_width = primary.pixels.shape
+    cell_ra = (primary.max_ra - primary.min_ra) / max(p_width - 1, 1)
+    cell_dec = (primary.max_dec - primary.min_dec) / max(p_height - 1, 1)
+    if pix is not None and pix > 0:
+        cell_ra /= pix
+        cell_dec /= pix
+    cell_ra = abs(cell_ra) or 1.0
+    cell_dec = abs(cell_dec) or 1.0
+    width = max(int(np.ceil((max_ra - min_ra) / cell_ra)) + 1, 1)
+    height = max(int(np.ceil((max_dec - min_dec) / cell_dec)) + 1, 1)
+    _check_grid_budget(width, height)
+
+    # Fold each source in with NaN-aware max (`fmax` treats uncovered NaN cells
+    # as "missing", so the union naturally takes the max over covering inputs
+    # and leaves fully-uncovered cells NaN). Order-independent by construction.
+    pixels = np.full((height, width), np.nan, dtype=np.float64)
+    for i, img in enumerate(images):
+        resampled = _resample_onto(
+            img, min_ra, max_ra, min_dec, max_dec, width, height, ra_shift[i], dec_shift[i]
+        )
+        mask = _coverage_mask(
+            img, min_ra, max_ra, min_dec, max_dec, width, height, ra_shift[i], dec_shift[i]
+        )
+        layer = np.where(mask, resampled, np.nan)
+        pixels = np.fmax(pixels, layer)
+
+    cdelt1 = -(max_ra - min_ra) / max(width - 1, 1)
+    cdelt2 = (max_dec - min_dec) / max(height - 1, 1)
+    wcs = WCSMetadata(
+        ctype1="RA---TAN",
+        ctype2="DEC--TAN",
+        crval1=(min_ra + max_ra) / 2.0,
+        crval2=(min_dec + max_dec) / 2.0,
+        crpix1=(width + 1) / 2.0,
+        crpix2=(height + 1) / 2.0,
+        cdelt1=cdelt1,
+        cdelt2=cdelt2,
+    )
+    return GriddedImage(
+        pixels=pixels,
+        wcs=wcs,
+        min_ra=min_ra,
+        max_ra=max_ra,
+        min_dec=min_dec,
+        max_dec=max_dec,
+    )
 
 
 def superimpose_images(
@@ -83,8 +209,19 @@ def _compose(
     sec_min_dec = secondary.min_dec + dec_shift_degrees
     sec_max_dec = secondary.max_dec + dec_shift_degrees
 
-    min_ra = min(primary.min_ra, sec_min_ra)
-    max_ra = max(primary.max_ra, sec_max_ra)
+    # Unwrap across the 0h/24h RA seam (see `_ra_wrap_shifts`). The per-image
+    # wrap shift folds into the resample/coverage shift so pixels land in the
+    # unwrapped positions the union bounding box is computed in.
+    p_wrap, s_wrap = _ra_wrap_shifts(primary.max_ra, sec_max_ra)
+    p_ra_shift = p_wrap
+    s_ra_shift = ra_shift_seconds + s_wrap
+    p_min_ra = primary.min_ra + p_wrap
+    p_max_ra = primary.max_ra + p_wrap
+    sec_min_ra += s_wrap
+    sec_max_ra += s_wrap
+
+    min_ra = min(p_min_ra, sec_min_ra)
+    max_ra = max(p_max_ra, sec_max_ra)
     min_dec = min(primary.min_dec, sec_min_dec)
     max_dec = max(primary.max_dec, sec_max_dec)
 
@@ -113,13 +250,13 @@ def _compose(
     height = max(int(np.ceil((max_dec - min_dec) / cell_dec)) + 1, 1)
     _check_grid_budget(width, height)
 
-    p_resampled = _resample_onto(primary, min_ra, max_ra, min_dec, max_dec, width, height, 0.0, 0.0)
+    p_resampled = _resample_onto(primary, min_ra, max_ra, min_dec, max_dec, width, height, p_ra_shift, 0.0)
     s_resampled = _resample_onto(
-        secondary, min_ra, max_ra, min_dec, max_dec, width, height, ra_shift_seconds, dec_shift_degrees
+        secondary, min_ra, max_ra, min_dec, max_dec, width, height, s_ra_shift, dec_shift_degrees
     )
-    p_mask = _coverage_mask(primary, min_ra, max_ra, min_dec, max_dec, width, height, 0.0, 0.0)
+    p_mask = _coverage_mask(primary, min_ra, max_ra, min_dec, max_dec, width, height, p_ra_shift, 0.0)
     s_mask = _coverage_mask(
-        secondary, min_ra, max_ra, min_dec, max_dec, width, height, ra_shift_seconds, dec_shift_degrees
+        secondary, min_ra, max_ra, min_dec, max_dec, width, height, s_ra_shift, dec_shift_degrees
     )
 
     # BUG-014: cells outside both inputs' footprints are "no data" — encode as
@@ -285,8 +422,20 @@ def tricolor_compose(
     ter_max_ra = tertiary.max_ra + tertiary_ra_shift_seconds
     ter_min_dec = tertiary.min_dec + tertiary_dec_shift_degrees
     ter_max_dec = tertiary.max_dec + tertiary_dec_shift_degrees
-    min_ra = min(primary.min_ra, sec_min_ra, ter_min_ra)
-    max_ra = max(primary.max_ra, sec_max_ra, ter_max_ra)
+
+    # Unwrap all three inputs across the 0h/24h RA seam (see `_ra_wrap_shifts`).
+    p_wrap, s_wrap, t_wrap = _ra_wrap_shifts(primary.max_ra, sec_max_ra, ter_max_ra)
+    p_ra_shift = p_wrap
+    s_ra_shift = ra_shift_seconds + s_wrap
+    t_ra_shift = tertiary_ra_shift_seconds + t_wrap
+    p_min_ra = primary.min_ra + p_wrap
+    p_max_ra = primary.max_ra + p_wrap
+    sec_min_ra += s_wrap
+    sec_max_ra += s_wrap
+    ter_min_ra += t_wrap
+    ter_max_ra += t_wrap
+    min_ra = min(p_min_ra, sec_min_ra, ter_min_ra)
+    max_ra = max(p_max_ra, sec_max_ra, ter_max_ra)
     min_dec = min(primary.min_dec, sec_min_dec, ter_min_dec)
     max_dec = max(primary.max_dec, sec_max_dec, ter_max_dec)
 
@@ -304,23 +453,23 @@ def tricolor_compose(
     height = max(int(np.ceil((max_dec - min_dec) / cell_dec)) + 1, 1)
     _check_grid_budget(width, height)
 
-    p_resampled = _resample_onto(primary, min_ra, max_ra, min_dec, max_dec, width, height, 0.0, 0.0)
+    p_resampled = _resample_onto(primary, min_ra, max_ra, min_dec, max_dec, width, height, p_ra_shift, 0.0)
     s_resampled = _resample_onto(
         secondary, min_ra, max_ra, min_dec, max_dec, width, height,
-        ra_shift_seconds, dec_shift_degrees,
+        s_ra_shift, dec_shift_degrees,
     )
     t_resampled = _resample_onto(
         tertiary, min_ra, max_ra, min_dec, max_dec, width, height,
-        tertiary_ra_shift_seconds, tertiary_dec_shift_degrees,
+        t_ra_shift, tertiary_dec_shift_degrees,
     )
-    p_mask = _coverage_mask(primary, min_ra, max_ra, min_dec, max_dec, width, height, 0.0, 0.0)
+    p_mask = _coverage_mask(primary, min_ra, max_ra, min_dec, max_dec, width, height, p_ra_shift, 0.0)
     s_mask = _coverage_mask(
         secondary, min_ra, max_ra, min_dec, max_dec, width, height,
-        ra_shift_seconds, dec_shift_degrees,
+        s_ra_shift, dec_shift_degrees,
     )
     t_mask = _coverage_mask(
         tertiary, min_ra, max_ra, min_dec, max_dec, width, height,
-        tertiary_ra_shift_seconds, tertiary_dec_shift_degrees,
+        t_ra_shift, tertiary_dec_shift_degrees,
     )
     channels = {
         "r": _normalize01(np.where(p_mask, p_resampled, np.nan)),
@@ -479,8 +628,18 @@ def _two_image_grid(
     sec_max_ra = secondary.max_ra + ra_shift_seconds
     sec_min_dec = secondary.min_dec + dec_shift_degrees
     sec_max_dec = secondary.max_dec + dec_shift_degrees
-    min_ra = min(primary.min_ra, sec_min_ra)
-    max_ra = max(primary.max_ra, sec_max_ra)
+
+    # Unwrap across the 0h/24h RA seam (see `_ra_wrap_shifts`). `_two_image_masks`
+    # recomputes the same wrap from the same inputs so the mask geometry matches.
+    p_wrap, s_wrap = _ra_wrap_shifts(primary.max_ra, sec_max_ra)
+    p_ra_shift = p_wrap
+    s_ra_shift = ra_shift_seconds + s_wrap
+    p_min_ra = primary.min_ra + p_wrap
+    p_max_ra = primary.max_ra + p_wrap
+    sec_min_ra += s_wrap
+    sec_max_ra += s_wrap
+    min_ra = min(p_min_ra, sec_min_ra)
+    max_ra = max(p_max_ra, sec_max_ra)
     min_dec = min(primary.min_dec, sec_min_dec)
     max_dec = max(primary.max_dec, sec_max_dec)
 
@@ -498,7 +657,7 @@ def _two_image_grid(
     height = max(int(np.ceil((max_dec - min_dec) / cell_dec)) + 1, 1)
     _check_grid_budget(width, height)
 
-    p_resampled = _resample_onto(primary, min_ra, max_ra, min_dec, max_dec, width, height, 0.0, 0.0)
+    p_resampled = _resample_onto(primary, min_ra, max_ra, min_dec, max_dec, width, height, p_ra_shift, 0.0)
     s_resampled = _resample_onto(
         secondary,
         min_ra,
@@ -507,7 +666,7 @@ def _two_image_grid(
         max_dec,
         width,
         height,
-        ra_shift_seconds,
+        s_ra_shift,
         dec_shift_degrees,
     )
     bbox = {
@@ -537,10 +696,15 @@ def _two_image_masks(
     max_dec = float(bbox["max_dec"])
     width = int(bbox["width"])
     height = int(bbox["height"])
-    p_mask = _coverage_mask(primary, min_ra, max_ra, min_dec, max_dec, width, height, 0.0, 0.0)
+    # Reproduce `_two_image_grid`'s seam unwrap from the same inputs so masks
+    # align with the resampled data.
+    p_wrap, s_wrap = _ra_wrap_shifts(primary.max_ra, secondary.max_ra + ra_shift_seconds)
+    p_ra_shift = p_wrap
+    s_ra_shift = ra_shift_seconds + s_wrap
+    p_mask = _coverage_mask(primary, min_ra, max_ra, min_dec, max_dec, width, height, p_ra_shift, 0.0)
     s_mask = _coverage_mask(
         secondary, min_ra, max_ra, min_dec, max_dec, width, height,
-        ra_shift_seconds, dec_shift_degrees,
+        s_ra_shift, dec_shift_degrees,
     )
     return p_mask, s_mask
 

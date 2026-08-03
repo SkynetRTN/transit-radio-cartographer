@@ -10,15 +10,50 @@
  * ============================================================================
  */
 
+import addSourceShot from '../images/fluxcal-add-source.png?url';
+import fitShot from '../images/fluxcal-fit.png?url';
+
 export function FluxCalibrationSection() {
   return (
     <section className="help-section">
       <h2>Flux Calibration Workflow</h2>
 
       <p>
-        Flux Calibration converts raw machine output (GCU) into Janskies (Jy)
+        Flux Calibration converts calibrated machine output (GCU) into Janskies (Jy)
         by fitting a slope through one or more known calibrators. The output
         is a <code>.cal</code> file that the rest of the app can use.
+      </p>
+
+      <h3>Applying an existing calibration to your workspace</h3>
+      <p>
+        If you already have a <code>.cal</code> file that fits your data (same
+        telescope, epoch, and frequency band), you don't need to build a new
+        one — just load it and the app converts whatever is currently in your
+        workspace from GCU into Janskies for you.
+      </p>
+      <ol>
+        <li>
+          Make sure the workspace you want to convert is already{' '}
+          <strong>calibrated</strong> (in GCU). Loading a <code>.cal</code>{' '}
+          converts GCU to Janskies, it does not perform gain calibration.
+        </li>
+        <li>
+          <strong>Click</strong>{' '}
+          <code>Flux Calibration → Select Calibration…</code> and pick your{' '}
+          <code>.cal</code> file.
+        </li>
+        <li>
+          The app reads the fitted slope (Jy/GCU) from the file and{' '}
+          <strong>automatically applies it</strong> to whatever is open — the
+          survey, the current scan, and any generated image — so their values
+          are now in Janskies. Already-flux-calibrated workspaces are skipped,
+          so re-loading won't double-convert.
+        </li>
+      </ol>
+      <p>
+        This is the common path once a good calibration exists: build
+        the <code>.cal</code> once (steps below), then just load it for every
+        other data set.
       </p>
 
       <h3>1. What you need first</h3>
@@ -44,7 +79,7 @@ export function FluxCalibrationSection() {
       <h3>3. Name your calibration</h3>
       <p>
         At the top of the view there's a caption field — <strong>type</strong> a
-        descriptive name like <code>"March 2026 — 1.4 GHz"</code>. This is
+        descriptive name like <code>"cyga_2026"</code>. This is
         stored in the <code>.cal</code> file so you can tell calibrations apart
         later.
       </p>
@@ -62,12 +97,19 @@ export function FluxCalibrationSection() {
         </li>
         <li>
           A prompt appears: <strong>Type</strong> the known flux of that source
-          in Janskies, then <code>OK</code>.
+          in Janskies, then <code>OK</code>. Taurus A (Crab), Virgo A, and Cygnus
+          A are our best calibrators, but any source with a known flux is valid. 
+          Those three sources will automatically populate the prompt with their 
+          known fluxes. The 40 foot recieve operates at 1350 MHz to 1430 MHz.
         </li>
       </ol>
-      <p className="help-figure-placeholder">
-        [Screenshot: fluxcal-add-source.png — known-flux prompt]
-      </p>
+      <figure className="help-figure">
+        <img src={addSourceShot} alt="Known-flux prompt when adding a calibration source" />
+        <figcaption>
+          Adding a source: after picking a <code>.scn</code> file, enter the
+          source's known flux in Janskies.
+        </figcaption>
+      </figure>
 
       <h4>4b. From the currently open scan</h4>
       <p>
@@ -90,7 +132,9 @@ export function FluxCalibrationSection() {
         <li>
           The scatter plot shows <strong>Measured (GCU)</strong> on the X-axis
           vs. <strong>Known (Jy)</strong> on the Y-axis. A magenta line is the
-          best-fit slope through (0,0).
+          best-fit slope through (0,0). You do not need multiple calibrators to 
+          fit a slope, but more points give a better estimate of the slope and 
+          its error.
         </li>
         <li>
           Read the slope (Jy/GCU) and RMS error from the panel above the
@@ -98,30 +142,21 @@ export function FluxCalibrationSection() {
           your calibrators is bad — drop it and refit.
         </li>
       </ol>
-      <p className="help-figure-placeholder">
-        [Screenshot: fluxcal-fit.png — scatter + magenta fit line]
-      </p>
-      <p className="help-todo">
-        [USER TODO] — Add: how many calibrators is "enough", how to recognize
-        a bad calibrator from the scatter, which standard sources are reliable
-        at which frequencies.
-      </p>
+      <figure className="help-figure">
+        <img src={fitShot} alt="Flux calibration scatter plot with magenta best-fit line" />
+        <figcaption>
+          The fit: Measured (GCU) vs. Known (Jy), with the magenta best-fit
+          slope through the origin. Read the slope and RMS error above the
+          buttons.
+        </figcaption>
+      </figure>
 
       <h3>6. Save the .cal</h3>
       <p>
         <strong>Click</strong> <code>File → Save As…</code> to write the
-        calibration to disk. The filename is by convention something like{' '}
-        <code>cal18a.cal</code> (epoch + frequency band code).
-      </p>
-      <p className="help-figure-placeholder">
-        [Screenshot: fluxcal-save.png — Save As dialog with .cal extension]
+        calibration to disk. 
       </p>
 
-      <p className="help-todo">
-        [USER TODO] — Add a "common student mistakes" callout: forgetting to
-        run Determine Peak, mixing calibrators across frequencies, throwing
-        out good points to make the fit look better.
-      </p>
     </section>
   );
 }

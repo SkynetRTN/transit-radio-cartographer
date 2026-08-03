@@ -7,6 +7,9 @@ export interface NumericPrompt {
   label: string;
   defaultValue: number;
   onSubmit: (value: number) => void;
+  // Optional explanatory line rendered under the input — used to clarify what
+  // the number actually means when the label alone would be ambiguous.
+  hint?: string;
 }
 
 interface Props {
@@ -51,7 +54,7 @@ export function NumericInputDialog({ prompt, onCancel }: Props) {
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={onKeyDown}
           error={!!error}
-          helperText={error ?? undefined}
+          helperText={error ?? prompt.hint ?? undefined}
           autoFocus
           fullWidth
           size="small"
@@ -71,7 +74,11 @@ export function NumericInputDialog({ prompt, onCancel }: Props) {
               onKeyDown={onKeyDown}
             />
           </div>
-          {error && <div className="modal-error">{error}</div>}
+          {error ? (
+            <div className="modal-error">{error}</div>
+          ) : (
+            prompt.hint && <div className="modal-hint">{prompt.hint}</div>
+          )}
         </>
       )}
     </AppDialog>

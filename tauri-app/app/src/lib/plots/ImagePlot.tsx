@@ -38,6 +38,14 @@ interface Props {
   pinnedMarker?: { ra: number; dec: number } | null;
   showColorBar?: boolean;
   fixedHeight?: number;
+  // Force a 1:1 letterbox regardless of the sky aspect. Used by the magnifier
+  // so the loupe is always a square instead of collapsing to the (often very
+  // wide or very tall) shape of the source image.
+  square?: boolean;
+  // Hide the RA/Dec axis titles, ticks, tick labels, and gridlines. Used by the
+  // magnifier so the loupe is a clean zoomed patch — hover still fires so the
+  // RA/Dec/Flux readout keeps updating.
+  hideAxes?: boolean;
   // FEAT-011: selects how the bounded-mode plot lays out its aspect ratio.
   // - 'sky' (default): cos(dec_center)/240 — true sky shape with cos(dec)
   //   correction at the image center (FEAT-008 v3 formula).
@@ -121,36 +129,41 @@ function formatRaSeconds(ra: number): string {
   return `${pad2(hrs)}:${pad2(mins)}:${pad2(secs)}`;
 }
 
-// Dec is stored as signed decimal degrees. Mirrors vb/survform.frm:5622-5650.
-function formatDecDegrees(dec: number): string {
-  const sign = dec < 0 ? '-' : '';
-  const abs = Math.abs(dec);
-  const deg = Math.floor(abs);
-  const mins = Math.floor((abs - deg) * 60);
-  const secs = Math.floor((abs - deg - mins / 60) * 3600);
-  return `${sign}${pad2(deg)}:${pad2(mins)}:${pad2(secs)}`;
+// Forced grid color: a light gray that reads on both light and dark themes, so
+// the sky grid is never a dark/heavy line regardless of theme.
+const GRID_COLOR = '#e6e6e6';
+
+// One degree of RA in stored units (seconds of time): 360° = 24h = 86400s, so
+// 1° = 240s. The sky grid steps every 10°, i.e. every 2400s of RA.
+const SEC_PER_DEG_RA = 240;
+const GRID_STEP_DEG = 10;
+
+// Dec axis label in plain decimal degrees (e.g. "40°"), not sexagesimal.
+function formatDecDeg(dec: number): string {
+  const rounded = Math.round(dec * 10) / 10;
+  return Number.isInteger(rounded) ? `${rounded}°` : `${rounded.toFixed(1)}°`;
 }
 
-// Roughly evenly-spaced ticks across [lo, hi] with `count` entries. Used to
-// stamp HH:MM:SS / DD:MM:SS labels on the axes — Plotly's `tickformat`
-// doesn't understand sexagesimal, so we feed it the labels directly.
-function sexagesimalTicks(
+// Ticks (and therefore gridlines) on a fixed `interval`, aligned to multiples of
+// it, so the grid lands on whole-degree boundaries. Plotly's `tickformat` can't
+// do sexagesimal, so we feed labels directly. Falls back to the endpoints when
+// the span is smaller than one interval so the axis is never blank.
+function fixedIntervalTicks(
   lo: number,
   hi: number,
-  count: number,
+  interval: number,
   format: (v: number) => string,
 ): { tickvals: number[]; ticktext: string[] } {
-  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo || count < 2) {
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo || interval <= 0) {
     return { tickvals: [lo], ticktext: [format(lo)] };
   }
   const tickvals: number[] = [];
-  const ticktext: string[] = [];
-  for (let i = 0; i < count; i++) {
-    const v = lo + ((hi - lo) * i) / (count - 1);
-    tickvals.push(v);
-    ticktext.push(format(v));
+  const start = Math.ceil(lo / interval) * interval;
+  for (let v = start; v <= hi + 1e-9; v += interval) tickvals.push(v);
+  if (tickvals.length < 2) {
+    return { tickvals: [lo, hi], ticktext: [format(lo), format(hi)] };
   }
-  return { tickvals, ticktext };
+  return { tickvals, ticktext: tickvals.map(format) };
 }
 
 function hasBoundsOf(meta: ImageMeta | null | undefined): boolean {
@@ -267,6 +280,8 @@ export function ImagePlot({
   pinnedMarker,
   showColorBar = true,
   fixedHeight,
+  square = false,
+  hideAxes = false,
   displayMode = 'sky',
 }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -360,11 +375,13 @@ export function ImagePlot({
     // pixel-sized shape never affects autorange and simply clips when the pinned
     // cell is off-screen — so the RA/Dec/Flux readout stays but no ring is drawn.
 
+    // Grid on a fixed 10° sky spacing: RA every 2400s (=10°, kept in HH:MM:SS),
+    // Dec every 10° (labeled in plain decimal degrees).
     const raTicks = hasBounds
-      ? sexagesimalTicks(meta!.min_ra, meta!.max_ra, 5, formatRaSeconds)
+      ? fixedIntervalTicks(meta!.min_ra, meta!.max_ra, GRID_STEP_DEG * SEC_PER_DEG_RA, formatRaSeconds)
       : null;
     const decTicks = hasBounds
-      ? sexagesimalTicks(meta!.min_dec, meta!.max_dec, 5, formatDecDegrees)
+      ? fixedIntervalTicks(meta!.min_dec, meta!.max_dec, GRID_STEP_DEG, formatDecDeg)
       : null;
 
     // Legacy convention (vb/survform.frm: Picture4 paint loop): MaxRa on the
@@ -382,26 +399,48 @@ export function ImagePlot({
     // the wrapper in the return below). FEAT-011's display modes now feed that
     // container aspect rather than a Plotly axis constraint.
     const chrome = plotChrome(theme);
-    const xaxis: Partial<Plotly.LayoutAxis> = {
-      title: { text: 'Right Ascension' },
-      gridcolor: chrome.gridColor,
-      linecolor: chrome.axisColor,
-      tickcolor: chrome.axisColor,
-      ...(hasBounds ? { autorange: 'reversed' as const } : {}),
-      ...(raTicks
-        ? { tickmode: 'array', tickvals: raTicks.tickvals, ticktext: raTicks.ticktext }
-        : {}),
+    // When axes are hidden (magnifier), drop titles/ticks/labels/grid but keep
+    // the reversed x-orientation so RA still increases leftward and hover coords
+    // stay correct.
+    const hiddenAxis: Partial<Plotly.LayoutAxis> = {
+      showticklabels: false,
+      ticks: '',
+      showgrid: false,
+      zeroline: false,
+      showline: false,
+      title: { text: '' },
     };
-    const yaxis: Partial<Plotly.LayoutAxis> = {
-      title: { text: 'Declination' },
-      gridcolor: chrome.gridColor,
-      linecolor: chrome.axisColor,
-      tickcolor: chrome.axisColor,
-      ...(hasBounds ? {} : { autorange: 'reversed' as const }),
-      ...(decTicks
-        ? { tickmode: 'array', tickvals: decTicks.tickvals, ticktext: decTicks.ticktext }
-        : {}),
-    };
+    const xaxis: Partial<Plotly.LayoutAxis> = hideAxes
+      ? { ...hiddenAxis, ...(hasBounds ? { autorange: 'reversed' as const } : {}) }
+      : {
+          title: { text: 'Right Ascension' },
+          // Forced light-gray grid on 10° boundaries; no dark zeroline or frame.
+          showgrid: true,
+          gridcolor: GRID_COLOR,
+          gridwidth: 1,
+          zeroline: false,
+          linecolor: GRID_COLOR,
+          tickcolor: GRID_COLOR,
+          ...(hasBounds ? { autorange: 'reversed' as const } : {}),
+          ...(raTicks
+            ? { tickmode: 'array', tickvals: raTicks.tickvals, ticktext: raTicks.ticktext }
+            : {}),
+        };
+    const yaxis: Partial<Plotly.LayoutAxis> = hideAxes
+      ? { ...hiddenAxis, ...(hasBounds ? {} : { autorange: 'reversed' as const }) }
+      : {
+          title: { text: 'Declination' },
+          showgrid: true,
+          gridcolor: GRID_COLOR,
+          gridwidth: 1,
+          zeroline: false,
+          linecolor: GRID_COLOR,
+          tickcolor: GRID_COLOR,
+          ...(hasBounds ? {} : { autorange: 'reversed' as const }),
+          ...(decTicks
+            ? { tickmode: 'array', tickvals: decTicks.tickvals, ticktext: decTicks.ticktext }
+            : {}),
+        };
 
     // Seed overlays from refs so this effect does NOT list pinnedMarker /
     // boxOverlay as deps — those changes are pushed via a shapes-only relayout
@@ -421,7 +460,9 @@ export function ImagePlot({
     const layout: Partial<Plotly.Layout> = {
       title: { text: title },
       uirevision,
-      margin: { l: 70, r: 20, t: title ? 40 : 12, b: 50 },
+      margin: hideAxes
+        ? { l: 6, r: 6, t: title ? 40 : 6, b: 6 }
+        : { l: 70, r: 20, t: title ? 40 : 12, b: 50 },
       paper_bgcolor: chrome.paperBg,
       // BUG-014: no-coverage cells arrive as `null` (engine NaN sentinel,
       // JSON-encoded as null). Plotly's heatmap renders them transparent,
@@ -537,7 +578,7 @@ export function ImagePlot({
     // `boxOverlay` / `pinnedMarker` are also omitted: they only drive overlay
     // shapes, which are updated via the shapes-only relayout effect below so an
     // active zoom is never disturbed (BUG-025).
-  }, [image, meta, title, palette, fluxRange, showColorBar, onHover, onClick, theme]);
+  }, [image, meta, title, palette, fluxRange, showColorBar, hideAxes, onHover, onClick, theme]);
 
   // Push pin / magnifier-box changes as a shapes-only relayout. Unlike
   // Plotly.react, relayout of `shapes` never re-applies the axis layout, so it
@@ -565,7 +606,8 @@ export function ImagePlot({
 
   // Fit the largest box with the sky aspect inside the measured wrapper. When
   // there's no aspect to preserve ('stretch' / pixel span unusable), fill it.
-  const aspect = plotAspect(meta, image.width, image.height, displayMode);
+  // `square` forces 1:1 so the magnifier is a square regardless of sky shape.
+  const aspect = square ? 1 : plotAspect(meta, image.width, image.height, displayMode);
   let innerW: number | string = '100%';
   let innerH: number | string = '100%';
   if (aspect && box && box.w > 0 && box.h > 0) {

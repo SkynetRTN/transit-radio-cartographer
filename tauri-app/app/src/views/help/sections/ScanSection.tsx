@@ -11,6 +11,12 @@
  * ============================================================================
  */
 
+import calibrateBracketsShot from '../images/scan-calibrate-brackets.png?url';
+import cutSegmentShot from '../images/scan-cut-segment.png?url';
+import selectDecShot from '../images/scan-select-dec.png?url';
+import baselineShot from '../images/scan-baseline.png?url';
+import determinePeakShot from '../images/scan-determine-fit.png?url';
+
 export function ScanSection() {
   return (
     <section className="help-section">
@@ -32,9 +38,6 @@ export function ScanSection() {
           (already calibrated).
         </li>
       </ol>
-      <p className="help-figure-placeholder">
-        [Screenshot: scan-load.png — File → Open dialog with a .md1 selected]
-      </p>
 
       <h3>2. Inspect what loaded</h3>
       <p>
@@ -51,12 +54,16 @@ export function ScanSection() {
       </p>
       <p>Inside the calibration view you'll see four plots:</p>
       <ul>
-        <li>Initial-bracket Flux (top left) and Terminal-bracket Flux (top right)</li>
-        <li>Initial-bracket Dec (bottom left) and Terminal-bracket Dec (bottom right)</li>
+        <li>Pre-bracket Flux (top left) and Post-bracket Flux (top right)</li>
+        <li>Pre-bracket Dec (bottom left) and Post-bracket Dec (bottom right)</li>
       </ul>
-      <p className="help-figure-placeholder">
-        [Screenshot: scan-calibrate-brackets.png — the four-pane calibration UI]
-      </p>
+      <figure className="help-figure">
+        <img src={calibrateBracketsShot} alt="Four-pane bracket calibration UI" />
+        <figcaption>
+          The bracket-cleaning UI: Pre- and Post-bracket Flux plots on
+          top, their declination plots below.
+        </figcaption>
+      </figure>
       <p>The tools here are:</p>
       <ul>
         <li>
@@ -71,7 +78,7 @@ export function ScanSection() {
           plot to keep only cal samples within that band.
         </li>
         <li>
-          <strong>Initial / Terminal checkboxes</strong> — Toggle a whole
+          <strong>Pre / Post checkboxes</strong> — Toggle a whole
           bracket off if it's corrupted beyond repair.
         </li>
         <li>
@@ -82,23 +89,12 @@ export function ScanSection() {
           you to the main scan view.
         </li>
       </ul>
-      <p className="help-todo">
-        [USER TODO] — Add: how to recognize a corrupted bracket, how much
-        cleanup is "enough", typical RFI patterns at GBT-20m frequencies.
-      </p>
 
       <h3>4. Clean the source samples</h3>
       <p>
         Back in the main scan view, four sticky tools become available. Each
         button toggles a mode and stays armed until you click it again or
         switch tools.
-      </p>
-      <p>
-        <strong>Keep vs. remove:</strong> <code>Cut Segment</code>{' '}
-        <em>removes</em> the samples you drag over, while{' '}
-        <code>Select Declination</code> <em>keeps</em> the samples you drag over
-        (removing everything outside). They do opposite things — the same pair
-        appears in the calibration view.
       </p>
 
       <h4>4a. Cut Segment</h4>
@@ -107,9 +103,13 @@ export function ScanSection() {
         <strong>drag a horizontal range</strong> on the Flux plot. Source
         samples in that RA range are removed.
       </p>
-      <p className="help-figure-placeholder">
-        [Screenshot: scan-cut-segment.png — drag-rectangle across a glitch]
-      </p>
+      <figure className="help-figure">
+        <img src={cutSegmentShot} alt="Horizontal drag selecting an RA range on the Flux plot" />
+        <figcaption>
+          Cut Segment: drag a horizontal range on the Flux plot to remove
+          source samples in that RA span.
+        </figcaption>
+      </figure>
 
       <h4>4b. Select Declination</h4>
       <p>
@@ -117,9 +117,13 @@ export function ScanSection() {
         <strong>drag a vertical range</strong> on the Declination plot. Only
         source samples whose declination falls inside that band are kept.
       </p>
-      <p className="help-figure-placeholder">
-        [Screenshot: scan-select-dec.png — vertical drag on the Dec plot]
-      </p>
+      <figure className="help-figure">
+        <img src={selectDecShot} alt="Vertical drag selecting a Dec band on the Declination plot" />
+        <figcaption>
+          Select Declination: drag a vertical range on the Declination plot to
+          keep only source samples within that band.
+        </figcaption>
+      </figure>
 
       <h4>4c. Baseline Source</h4>
       <p>
@@ -129,28 +133,29 @@ export function ScanSection() {
         line between the two clicks is subtracted from the source, removing a
         background flux.
       </p>
-      <p className="help-figure-placeholder">
-        [Screenshot: scan-baseline.png — two endpoints with a fitted line]
-      </p>
+      <figure className="help-figure">
+        <img src={baselineShot} alt="Two endpoints with a fitted baseline line on the Flux plot" />
+        <figcaption>
+          Baseline Source: click two points on the Flux plot; the line between
+          them is subtracted to remove background flux.
+        </figcaption>
+      </figure>
 
       <h4>4d. Determine Peak</h4>
       <p>
         <strong>Click</strong> <code>Determine Peak</code>, then{' '}
         <strong>drag a horizontal range</strong> across the peak on the Flux
-        plot. A fit is overlaid in blue, and the peak flux appears in the side
-        panel. The fit defaults to a Gaussian; to change it — Gaussian, Squared
-        Cosine, a <strong>2nd / 3rd / 4th-degree polynomial</strong>, or Max
-        Value — open <code>Scan → “Change Determine Peak Fit…”</code> from the
-        menu bar <em>before</em> dragging. (That menu item is where the
-        polynomial degree-of-freedom choice lives.)
+        plot. A Gaussian fit is overlaid in blue, and the peak flux appears
+        in the side panel. Adjusting <code>Peak Fit Degree</code> underneath the scan menu allows for a 2nd, 3rd or 4th 
+        degree polynomial fit instead.
       </p>
-      <p className="help-figure-placeholder">
-        [Screenshot: scan-determine-peak.png — blue fit curve over a source]
-      </p>
-      <p className="help-todo">
-        [USER TODO] — Add: when to use Gaussian vs. polynomial, how wide to
-        make the peak range, what a "bad fit" looks like.
-      </p>
+      <figure className="help-figure">
+        <img src={determinePeakShot} alt="Blue Gaussian fit curve over a source peak on the Flux plot" />
+        <figcaption>
+          Determine Peak: drag across the peak on the Flux plot to overlay a
+          fit (blue) and read the peak flux in the side panel.
+        </figcaption>
+      </figure>
 
       <h3>5. Hover and pin</h3>
       <p>
@@ -162,15 +167,10 @@ export function ScanSection() {
       <h3>6. Save your work</h3>
       <p>
         <strong>Click</strong> <code>File → Save As…</code> to write a{' '}
-        <code>.scn</code> file. The peak flux is stored in the file header, so
-        Flux Calibration can pick it up later without re-opening the scan.
+        <code>.scn</code> file. If you found a peak flux, it will be stored in the file header, so
+        Flux Calibration can pick it up later without re-opening the scan. 
       </p>
 
-      <p className="help-todo">
-        [USER TODO] — Add a "common mistakes" callout: cuts that look harmless
-        but bias the peak fit, students forgetting to baseline before peak
-        fitting, etc.
-      </p>
     </section>
   );
 }

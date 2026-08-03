@@ -60,6 +60,40 @@ def test_appended_image_meta_emits_strict_json_even_with_uncovered_gap():
     assert math.isfinite(meta["max_flux"]), f"max_flux must be finite, got {meta['max_flux']}"
 
 
+def test_append_image_multi_via_rpc():
+    # N-way append through the RPC: one primary handle + a list of on-disk
+    # paths composes onto a single grid in one call (no per-file re-snapping).
+    img_src = Path("C:\\Users\\leesnow\\skynet2\\ogrc\\fixtures\\outputs\\cassio_a.img")
+    assert img_src.exists()
+    server = RpcServer()
+    primary_h = _open_image_handle(server, img_src)
+    resp = call(
+        server,
+        "append_image_multi",
+        {"handle": primary_h, "other_paths": [str(img_src), str(img_src)]},
+    )
+    assert "error" not in resp, resp
+    meta = resp["result"]
+    # Strict-JSON round-trip, same guard as the single-append meta test.
+    s = json.dumps(meta, allow_nan=False)
+    assert "NaN" not in s and "Infinity" not in s
+    # Result is a fresh, resolvable scalar-image handle.
+    assert meta["handle"] != primary_h
+    pix = call(server, "get_image_pixels", {"handle": meta["handle"]})
+    assert "error" not in pix, pix
+
+
+def test_append_image_multi_requires_nonempty_paths():
+    img_src = Path("C:\\Users\\leesnow\\skynet2\\ogrc\\fixtures\\outputs\\cassio_a.img")
+    server = RpcServer()
+    primary_h = _open_image_handle(server, img_src)
+    resp = call(server, "append_image_multi", {"handle": primary_h, "other_paths": []})
+    assert "error" in resp
+    # Base handle survives the rejected call.
+    follow_up = call(server, "get_image_pixels", {"handle": primary_h})
+    assert "error" not in follow_up, follow_up
+
+
 def test_appended_image_save_roundtrip_with_uncovered_gap(tmp_path):
     # BUG-014 save path: an appended scalar image carries NaN in the no-coverage
     # gap. Saving to .img must not poison the file with non-finite header
