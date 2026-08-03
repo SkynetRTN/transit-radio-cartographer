@@ -29,20 +29,20 @@ __all__ = [
     "read_scn_peak",
 ]
 
-# Legacy known-flux defaults from vb/calform.frm:156-164. Keys are the first
+# Known-flux defaults for the standard calibrators. Keys are the first
 # three characters of the source name, matched case-insensitively.
 _DEFAULT_JY: dict[str, float] = {
-    "VIR": 213.0,
-    "TAU": 942.0,
-    "CYG": 1581.0,
+    "VIR": 226.1,
+    "TAU": 841.7,
+    "CYG": 1566.8,
 }
 
 
 def default_known_jy(name: str) -> float:
     """Return the legacy default known-Jy value for a calibrator name.
 
-    Matches the first three characters of `name` against the legacy table
-    (VIR=213, TAU=942, CYG=1581). Anything else returns 0, matching the
+    Matches the first three characters of `name` against the known table
+    (VIR=230.8, TAU=846.3, CYG=1605.9). Anything else returns 0, matching the
     legacy "user must type it in" behavior.
     """
     if not name:

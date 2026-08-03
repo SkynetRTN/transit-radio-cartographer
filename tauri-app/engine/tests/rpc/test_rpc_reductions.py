@@ -78,14 +78,16 @@ def test_make_image_returns_image_handle() -> None:
     server = RpcServer()
     h0 = _open_survey(server)
 
-    resp = call(server, "make_image", {"handle": h0, "pix": 1})
+    resp = call(server, "make_image", {"handle": h0})
     assert "error" not in resp, resp
     img_handle = int(resp["result"]["handle"])
     assert img_handle != h0
-    assert resp["result"]["width"] == 399
-    assert resp["result"]["height"] == 319
-    # The image lookup should produce a GriddedImage in the registry.
-    assert isinstance(server._handles.get(img_handle), GriddedImage)
+    # Grid is sized from a fixed angular pixel size, so the descriptor dims
+    # just have to be non-degenerate and match the stored GriddedImage.
+    image = server._handles.get(img_handle)
+    assert isinstance(image, GriddedImage)
+    assert resp["result"]["width"] == image.pixels.shape[1] > 1
+    assert resp["result"]["height"] == image.pixels.shape[0] > 1
     # Survey handle still resolves to a Survey.
     assert isinstance(server._handles.get(h0), Survey)
 

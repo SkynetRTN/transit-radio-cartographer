@@ -19,6 +19,13 @@ grid: row-major Int16, shape (cnt_rows, num_cols) where
 
 See `vb/survform.frm:3463-3540` (writer) and `vb/survform.frm:4632-4749`
 (reader) for the legacy code.
+
+**v2 extension** (files WE write, flagged by a leading Int16 `_V2_SENTINEL`
+followed by an Int16 version): images are now gridded at a fixed angular pixel
+size rather than the legacy `Pix` coarseness, so their shape no longer follows
+the `(4770/(15*Pix))+1` formula. v2 therefore stores explicit `rows`/`cols`
+Int16-prefixed strings immediately after `Str$(Pix)`; the grid then follows at
+that shape. Legacy files lack the sentinel and keep deriving shape from `Pix`.
 """
 
 from __future__ import annotations
@@ -30,6 +37,16 @@ import numpy as np
 
 from ..models import Image, Palette, PaletteStop
 from .pal import _compact
+
+# Format version marker for images WE write. Legacy `.img` files begin with a
+# positive Int16 length prefix (the `Name` string), so a negative first Int16
+# unambiguously flags our v2 layout. v2 stores explicit grid rows/cols in the
+# header (right after `Pix`) because the grid is no longer sized by the legacy
+# `(4770/(15*Pix))+1` formula — images now use a fixed angular pixel size, so
+# the shape must be recorded rather than derived. Legacy files (no marker) keep
+# deriving shape from `Pix`, and round-trip byte-exact via `raw_bytes`.
+_V2_SENTINEL = -1
+_V2_VERSION = 2
 
 
 def read_img(path: str | Path) -> Image:
@@ -58,6 +75,17 @@ def _parse_img(raw: bytes) -> Image:
         cursor += length
         return payload
 
+    # Detect our v2 layout by the negative sentinel in the first Int16. Legacy
+    # files start with a positive `Name` length prefix, so this never collides.
+    is_v2 = False
+    if len(raw) >= 2 and struct.unpack_from("<h", raw, 0)[0] == _V2_SENTINEL:
+        cursor = 2
+        version = struct.unpack_from("<h", raw, cursor)[0]
+        cursor += 2
+        if version != _V2_VERSION:
+            raise ValueError(f".img: unsupported format version {version}")
+        is_v2 = True
+
     name = read_prefixed_string()
     min_ra = float(read_prefixed_string())
     max_ra = float(read_prefixed_string())
@@ -72,6 +100,13 @@ def _parse_img(raw: bytes) -> Image:
     min_flux_p = float(read_prefixed_string())
     max_flux_p = float(read_prefixed_string())
     pix = int(read_prefixed_string())
+    # v2 carries explicit grid dims here (see `_V2_SENTINEL`); legacy derives
+    # them from `pix` below.
+    explicit_rows: int | None = None
+    explicit_cols: int | None = None
+    if is_v2:
+        explicit_rows = int(read_prefixed_string())
+        explicit_cols = int(read_prefixed_string())
     pal_num = int(read_prefixed_string())
 
     if pix <= 0:
@@ -86,8 +121,11 @@ def _parse_img(raw: bytes) -> Image:
         stops.append(PaletteStop(anchor=anchor, r=r, g=g, b=b))
     palette = Palette(stops=tuple(stops), raw_bytes=None)
 
-    rows = (4770 // (15 * pix)) + 1
-    cols = (5970 // (15 * pix)) + 1
+    if explicit_rows is not None and explicit_cols is not None:
+        rows, cols = explicit_rows, explicit_cols
+    else:
+        rows = (4770 // (15 * pix)) + 1
+        cols = (5970 // (15 * pix)) + 1
     pixel_count = rows * cols
     expected_bytes = pixel_count * 2
     remaining = len(raw) - cursor
@@ -151,6 +189,10 @@ def _serialize_img(image: Image) -> bytes:
         out.extend(struct.pack("<h", len(encoded)))
         out.extend(encoded)
 
+    # v2 marker (see `_V2_SENTINEL`): freshly-serialized images carry explicit
+    # grid dims because their shape no longer follows the legacy `Pix` formula.
+    out.extend(struct.pack("<h", _V2_SENTINEL))
+    out.extend(struct.pack("<h", _V2_VERSION))
     write_prefixed_string(image.name)
     for field in (
         image.min_ra,
@@ -168,6 +210,9 @@ def _serialize_img(image: Image) -> bytes:
     ):
         write_prefixed_string(vb_str(_compact(float(field))))
     write_prefixed_string(vb_str(image.pix))
+    rows, cols = image.pixels.shape
+    write_prefixed_string(vb_str(int(rows)))
+    write_prefixed_string(vb_str(int(cols)))
     write_prefixed_string(vb_str(image.palette.count))
     for stop in image.palette.stops:
         for value in (stop.anchor, stop.r, stop.g, stop.b):

@@ -64,6 +64,20 @@ export interface SourceSweep {
   calibrated: boolean;
 }
 
+// A single sweep's (dec, ra) polyline, used by the Pre Image hover readout to
+// map a hovered cell back to the sweep it came from. `index` is 0-based (the
+// UI shows `index + 1` to match the survey view's 1-based sweep numbering).
+export interface SweepPath {
+  index: number;
+  ra: number[];
+  dec: number[];
+}
+
+export interface SweepPaths {
+  sweeps: SweepPath[];
+  source_count: number;
+}
+
 export interface BracketSweepData {
   ra: number[];
   dec: number[];
@@ -237,6 +251,15 @@ export interface ImageMeta {
   flux_slope?: number | null;
 }
 
+// Longest-side ceiling for fetched image grids. The engine block-downsamples
+// only when an image exceeds this; below it the grid arrives at native
+// resolution so client-side zoom reveals full detail (e.g. the primary map's
+// own resolution inside a mosaic). 2048 covers realistic 0.06°/pixel mosaics
+// (a few hundred to ~1500 px/side) with no downsampling at all, while keeping
+// the worst-case JSON payload well under any memory concern. (Was 400 —
+// sized to a long-obsolete screen — which visibly softened combined images.)
+export const DISPLAY_PIXEL_CAP = 2048;
+
 export interface ImagePixels {
   // Per-cell flux (engine native units). `null` is the JSON-safe "no data"
   // sentinel — see RgbImagePixels for the rationale. Scalar renderers should
@@ -329,6 +352,12 @@ export class RpcClient {
       max_points: maxPoints,
     });
   }
+  getSweepPaths(handle: number, maxPoints = 64) {
+    return this.request<SweepPaths>('get_sweep_paths', {
+      handle,
+      max_points: maxPoints,
+    });
+  }
   setSourceSweepFlux(handle: number, index: number, flux: number[]) {
     return this.request<{ overview: WorkspaceOverview }>('set_source_sweep_flux', {
       handle,
@@ -404,7 +433,9 @@ export class RpcClient {
     }
     return params;
   }
-  makeImage(handle: number, pix = 1, workspaceHandle?: number | null) {
+  // `pix` is the on-sky pixel size in DEGREES (default 1/20 of the 40 ft
+  // beam = 0.06°), not the old integer coarseness factor.
+  makeImage(handle: number, pix = 0.06, workspaceHandle?: number | null) {
     // When `workspaceHandle` is provided, the engine builds the pre-image
     // from the workspace's source sweeps only (cal brackets excluded) and
     // uses calibrated flux if `apply_gain_calibration` has run. The survey
@@ -415,7 +446,7 @@ export class RpcClient {
     }
     return this.request<ImageMeta>('make_image', params);
   }
-  getImagePixels(handle: number, maxDim = 400) {
+  getImagePixels(handle: number, maxDim = DISPLAY_PIXEL_CAP) {
     return this.request<ImagePixels>('get_image_pixels', { handle, max_dim: maxDim });
   }
   openImage(path: string) {
@@ -453,17 +484,49 @@ export class RpcClient {
     if (options?.flux_max !== undefined) params.flux_max = options.flux_max;
     return this.request<{ path: string; bytes_written: number }>('save_bitmap', params);
   }
+  // Write a client-rendered PNG (bi/tri-color composite) to disk. `data` is the
+  // canvas data URL / base64 PNG; the engine decodes and writes the bytes. Used
+  // for RGB export, which has no scalar image and so can't go through saveImage.
+  saveRgbPng(path: string, data: string) {
+    return this.request<{ path: string; bytes_written: number }>('save_rgb_png', {
+      path,
+      data,
+    });
+  }
+  // `force_calibrated` marks the composite flux-calibrated (Jy) regardless of
+  // whether the inputs carry the on-disk unit suffix — set when the user
+  // attests all inputs are flux-calibrated (legacy .img files never wrote the
+  // suffix, so on-disk inference alone would under-report them).
   appendImage(
     handle: number,
     otherPath: string,
-    options?: { ra_shift_seconds?: number; dec_shift_degrees?: number; pix?: number },
+    options?: {
+      ra_shift_seconds?: number;
+      dec_shift_degrees?: number;
+      pix?: number;
+      force_calibrated?: boolean;
+    },
   ) {
     const params: Record<string, unknown> = { handle, other_path: otherPath };
     if (options?.ra_shift_seconds !== undefined) params.ra_shift_seconds = options.ra_shift_seconds;
     if (options?.dec_shift_degrees !== undefined)
       params.dec_shift_degrees = options.dec_shift_degrees;
     if (options?.pix !== undefined) params.pix = options.pix;
+    if (options?.force_calibrated !== undefined) params.force_calibrated = options.force_calibrated;
     return this.request<ImageMeta>('append_image', params);
+  }
+  // N-way append: compose the primary handle with several on-disk images onto
+  // one union grid, so each source is resampled exactly once (avoids the
+  // per-step re-snapping quality loss of appending files one at a time).
+  appendImageMulti(
+    handle: number,
+    otherPaths: string[],
+    options?: { pix?: number; force_calibrated?: boolean },
+  ) {
+    const params: Record<string, unknown> = { handle, other_paths: otherPaths };
+    if (options?.pix !== undefined) params.pix = options.pix;
+    if (options?.force_calibrated !== undefined) params.force_calibrated = options.force_calibrated;
+    return this.request<ImageMeta>('append_image_multi', params);
   }
   superimposeImage(
     handle: number,
@@ -473,6 +536,7 @@ export class RpcClient {
       ra_shift_seconds?: number;
       dec_shift_degrees?: number;
       pix?: number;
+      force_calibrated?: boolean;
     },
   ) {
     const params: Record<string, unknown> = { handle, other_path: otherPath };
@@ -481,7 +545,21 @@ export class RpcClient {
     if (options?.dec_shift_degrees !== undefined)
       params.dec_shift_degrees = options.dec_shift_degrees;
     if (options?.pix !== undefined) params.pix = options.pix;
+    if (options?.force_calibrated !== undefined) params.force_calibrated = options.force_calibrated;
     return this.request<ImageMeta>('superimpose_image', params);
+  }
+  // N-way superimpose: blend the primary handle with several on-disk images onto
+  // one union grid, every image weighted equally. Unequal weights are only
+  // meaningful pairwise (superimpose one at a time), so there's no weight here.
+  superimposeImageMulti(
+    handle: number,
+    otherPaths: string[],
+    options?: { pix?: number; force_calibrated?: boolean },
+  ) {
+    const params: Record<string, unknown> = { handle, other_paths: otherPaths };
+    if (options?.pix !== undefined) params.pix = options.pix;
+    if (options?.force_calibrated !== undefined) params.force_calibrated = options.force_calibrated;
+    return this.request<ImageMeta>('superimpose_image_multi', params);
   }
   bicolorImage(
     handle: number,
@@ -540,7 +618,7 @@ export class RpcClient {
       params.dec_shift_degrees = options.dec_shift_degrees;
     return this.request<RgbImageMeta>('extend_rgb_image', params);
   }
-  getRgbImagePixels(handle: number, maxDim = 400) {
+  getRgbImagePixels(handle: number, maxDim = DISPLAY_PIXEL_CAP) {
     return this.request<RgbImagePixels>('get_rgb_image_pixels', { handle, max_dim: maxDim });
   }
   loadPalette(path: string) {

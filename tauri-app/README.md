@@ -1,15 +1,16 @@
 # tauri-app — Radio Cartographer modern port
 
 uv workspace + Tauri 2 + React + TypeScript + Vite, with a Python 3.13 engine
-that will be wrapped as a sidecar binary. The full plan is in
+bundled as a sidecar binary. The full plan is in
 [`../agents/tauri_plan.md`](../agents/tauri_plan.md).
 
-**Current state:** Phase 0a (workspace bootstrap) and Phase 1 (codecs) are
-done. The engine has read/write modules for every legacy file format with
-byte-identical round-trip on every fixture (94 tests passing). The Rust shell
-and React front-end are still placeholders — the UI lands in Phase 5. See
-[`../agents/tauri_plan_phase_1.md`](../agents/tauri_plan_phase_1.md) for the
-Phase 1 progress report.
+**Current state:** a working, packaged desktop app (current version 0.1.4). The
+engine has byte-compatible codecs for every legacy format, the full numerics
+(scan/survey reduction, calibration, image gridding + composition), and a
+JSON-RPC server; the React UI drives the whole legacy workflow plus FITS export
+and RGB composition; and `just package` produces installable bundles. Active
+work is usability polish — see
+[`../docs/tester-feedback-triage.md`](../docs/tester-feedback-triage.md).
 
 ## Prerequisites
 
@@ -71,9 +72,10 @@ First launch compiles Tauri's Rust deps from scratch (~30–60 s on a warm
 toolchain, longer cold). Subsequent launches are incremental. Quit the desktop
 window or press Ctrl-C in the terminal to stop both processes.
 
-The Python sidecar isn't wired in yet (Phase 3), so for now `just dev` only
-shows the React shell. Once the sidecar lands, Tauri will spawn it as part of
-`tauri dev` automatically.
+The Rust shell spawns and supervises the Python engine as part of `tauri dev`,
+so the running window is wired to the live sidecar. In development the engine
+runs from source via `uv`; `just package` bundles the PyInstaller binary
+instead.
 
 ## Layout
 
@@ -83,50 +85,55 @@ tauri-app/
 ├── uv.lock                committed; reproducible Python deps
 ├── .python-version        3.13
 ├── justfile               canonical task list
-├── engine/                Python sidecar (codecs, numerics, JSON-RPC)
-│   ├── pyproject.toml     runtime deps (numpy; scipy/astropy land in Phase 2+)
+├── engine/                Python engine (codecs, numerics, JSON-RPC)
+│   ├── pyproject.toml     runtime deps (numpy, astropy)
+│   ├── sidecar.spec       PyInstaller spec for the standalone binary
+│   ├── PROTOCOL.md        JSON-RPC method reference
 │   ├── src/radio_cartographer/
 │   │   ├── models.py      typed dataclasses returned by every codec
-│   │   └── io/            one module per legacy format + _vb_format helper
-│   └── tests/
-│       └── io/            one test file per format + fixture-manifest check
+│   │   ├── io/            one module per legacy format + _vb_format helper
+│   │   ├── rpc.py         JSON-RPC server (stdio) with binary side-channel
+│   │   ├── scan.py, survey.py, calibration.py, flux_calibration.py
+│   │   ├── image.py, image_compose.py, palette.py, workspace.py   numerics
+│   │   └── io/fits.py     FITS reader/writer (astropy)
+│   └── tests/             pytest suites (codecs, numerics, rpc, fixtures)
 └── app/                   Tauri shell + React front-end
     ├── package.json
     ├── vite.config.ts
-    ├── src/               React + TS (placeholder shell — see App.tsx)
-    └── src-tauri/         Rust shell (Cargo.toml pinned to ~Tauri 2.11)
+    ├── src/               React + TS UI (views/, dialogs, help, chrome)
+    └── src-tauri/         Rust shell — spawns the engine sidecar (~Tauri 2.11)
 ```
 
 Legacy-EXE oracle bytes live in [`../fixtures/`](../fixtures/) at the repo
-root (44 files captured in Phase 0b; hash-pinned via
-[`../fixtures/MANIFEST.sha256`](../fixtures/MANIFEST.sha256)).
+root, hash-pinned via
+[`../fixtures/MANIFEST.sha256`](../fixtures/MANIFEST.sha256).
 
 ## What works today
 
-Phase 0a + Phase 1 exit criteria are all green:
+The full pipeline is functional and packaged:
 
-- `uv sync` resolves the workspace and creates `.venv/`.
-- `just test` runs pytest — **94 tests passing**, including byte-identical
-  round-trip for every fixture across `.md1`, `.md2`, `.scn`, `.srv`, `.cal`,
-  `.pal`, and `.img`. The `.bmp` codec round-trips opaque bytes; a real
-  fixture capture is deferred to Phase 6.
-- `just lint`, `just typecheck` run clean (ruff + mypy strict).
-- `cd app && npm install && npm run build` produces a Vite bundle.
-- `cargo check --release` from `app/src-tauri/` compiles the Tauri shell.
-- CI matrix (Linux / macOS / Windows) runs all of the above on every push.
+- **Codecs** — byte-compatible read/write for every legacy format (`.md1`,
+  `.md2`, `.scn`, `.srv`, `.cal`, `.pal`, `.img`, `.bmp`), plus FITS.
+- **Numerics** — scan and survey reduction (smooth, baseline, align, cuts, RFI
+  removal), telescope and flux calibration, image gridding, and image
+  composition (append / superimpose / bi-/tri-color RGB, including N-way).
+- **RPC engine** — a JSON-RPC 2.0 server over stdio with a binary side-channel,
+  documented in [`engine/PROTOCOL.md`](engine/PROTOCOL.md), packaged into a
+  standalone binary via `just sidecar`.
+- **UI** — the complete legacy workflow: scan/survey reduction, calibration,
+  the pre-image steps, the scalar image viewer, RGB composition, a palette
+  editor, in-context help, and native-style dialogs.
+- **FITS export** — `Save Image As FITS…` with a minimal WCS header.
+- **Packaging** — `just package` produces installable bundles
+  (`.exe` setup / `.dmg` / `.AppImage`); current version 0.1.4.
+- **Tests & CI** — `just test` runs the engine (pytest) and front-end (vitest)
+  suites; the Linux / macOS / Windows matrix runs them plus the Rust build on
+  every push.
 
-What does *not* work yet — by design, deferred to later phases:
+Remaining work is usability polish rather than missing capability — see
+[`../docs/tester-feedback-triage.md`](../docs/tester-feedback-triage.md).
 
-- **Numerics** (Phase 2) — survey/scan/calibration/image/palette reductions.
-  Codecs read fixture files into typed dataclasses; nothing operates on them
-  yet.
-- **RPC + sidecar binary** (Phase 3) — `just sidecar` is a stub.
-- **FITS export** (Phase 4).
-- **The actual UI** (Phase 5) — `just dev` launches a placeholder React shell
-  with no menus, no plots, and no engine wired in.
-- **Packaging** (Phase 6) — `just package` needs the sidecar.
-
-## Engine codec layer (Phase 1)
+## Engine codec layer
 
 The eight legacy formats each have a `read(path)` / `write(model, path)`
 pair under [`engine/src/radio_cartographer/io/`](engine/src/radio_cartographer/io/),
@@ -142,11 +149,12 @@ returning the typed dataclasses in
 | `scn.py` | `Scan` | 8-line header + 4×Total body. Channel flag preserved. |
 | `srv.py` | `Survey` | Header + sweep 0 (240 records) + per-sweep blocks. |
 | `img.py` | `Image` | Binary `Put #` format: Int16-prefixed strings + Int16 pixel grid. |
-| `bmp.py` | `Bitmap` | Opaque bytes for now; real fixture capture in Phase 6. |
+| `bmp.py` | `Bitmap` | 24-bit BI_RGB bitmap export of the rendered image. |
+| `fits.py` | `Image` | Single-HDU FITS with a minimal WCS header (astropy). |
 
 Models carry an optional `raw_bytes` field — when a model came from disk,
 `write` emits those bytes verbatim, guaranteeing byte-identity. Models built
-programmatically (Phase 2+) fall through to the per-codec serializer, which
+programmatically fall through to the per-codec serializer, which
 consults [`io/_vb_format.py`](engine/src/radio_cartographer/io/_vb_format.py)
 for VB's `Print #1` / `Str$` / `Format$` rules. The Channel-B filename guard
 (stem ending in `b`) lives in

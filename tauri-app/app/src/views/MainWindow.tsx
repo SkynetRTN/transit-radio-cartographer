@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { listen } from '@tauri-apps/api/event';
+import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { listen, emit } from '@tauri-apps/api/event';
 import { SurveyView } from './SurveyView';
 import { ScanView } from './ScanView';
 import { CalibrateScanView } from './CalibrateScanView';
@@ -17,7 +18,8 @@ import { TextInputDialog, type TextPrompt } from './dialogs/TextInputDialog';
 import { YesNoCancelDialog } from './dialogs/YesNoCancelDialog';
 import { ColorPickDialog } from './dialogs/ColorPickDialog';
 import { ConfirmDialog } from './dialogs/ConfirmDialog';
-import { HelpDialog } from './help/HelpDialog';
+import type { HelpSectionId } from './help/types';
+import { useImageSave } from '../lib/useImageSave';
 import { MenuBarShell, MenuTrigger } from './chrome/MenuBar';
 import { StatusBar } from './chrome/StatusBar';
 import { useSurvey } from '../state/survey-context';
@@ -45,7 +47,6 @@ export function MainWindow() {
   // Tracks whether the Help > Theme side submenu is open. Reset whenever the
   // parent Help menu closes (see effect below), mirroring Image Display.
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
-  const [helpOpen, setHelpOpen] = useState(false);
   const menuRef = useRef<HTMLElement | null>(null);
   const {
     survey,
@@ -66,7 +67,6 @@ export function MainWindow() {
     setImageName,
     imageName,
     imageSavePath,
-    saveImage,
     setSurveyName,
     magnifierHalfSize,
     setMagnifierHalfSize,
@@ -91,6 +91,7 @@ export function MainWindow() {
     resetForEngineRestart: resetScanForEngineRestart,
   } = useScan();
   const fluxCal = useFluxCal();
+  const { saveImageQuick, saveImageAs, saveBitmapAs } = useImageSave();
   const { theme, setTheme } = useTheme();
   const hasSurvey = survey !== null;
   // Image-menu items act on a built image, so they enable as soon as one
@@ -128,19 +129,28 @@ export function MainWindow() {
   interface ComposeStep {
     mode: ComposeMode;
     otherPath: string;
+    // All picked files for an N-way append (length 1 for single-file append and
+    // for superimpose). When length > 1 the commit routes to append_image_multi
+    // so every source is resampled once; the per-file shift step is skipped.
+    otherPaths: string[];
     sameCalibration: boolean;
+    // User attested (via the flux-cal-check gate) that all inputs are flux
+    // calibrated even though their calibration sources differ — forces the
+    // composite's Jy label since legacy .img files carry no unit suffix to
+    // infer from.
+    forceCalibrated: boolean;
     weight: number; // 0..1, only used for superimpose
     raShiftSeconds: number;
     decShiftDegrees: number;
-    pix: number;
     stage:
       | 'same-cal'
+      | 'flux-cal-check'
       | 'equal-weight'
       | 'weight-pct'
+      | 'multi-weight-info'
       | 'shift-q'
       | 'shift-ra'
       | 'shift-dec'
-      | 'pix'
       | 'commit';
   }
   const [compose, setCompose] = useState<ComposeStep | null>(null);
@@ -171,7 +181,6 @@ export function MainWindow() {
     // so it uses the secondary shift fields.
     tertiaryRaShiftSeconds: number;
     tertiaryDecShiftDegrees: number;
-    pix: number;
     stage:
       | 'pick-primary-color'
       | 'pick-secondary-color'
@@ -182,7 +191,6 @@ export function MainWindow() {
       | 'tertiary-shift-q'
       | 'tertiary-shift-ra'
       | 'tertiary-shift-dec'
-      | 'pix'
       | 'commit';
   }
   const [colorCompose, setColorCompose] = useState<ColorStep | null>(null);
@@ -201,6 +209,13 @@ export function MainWindow() {
     message: string;
     onYes: () => void;
     onNo: () => void;
+  } | null>(null);
+  // Single-button informational step in a dialog cascade (e.g. telling the user
+  // that a multi-image superimpose weights every image equally). OK proceeds.
+  const [ackPrompt, setAckPrompt] = useState<{
+    title: string;
+    message: string;
+    onOk: () => void;
   } | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   // Confirm before discarding a currently-loaded survey/scan/image when the
@@ -546,72 +561,35 @@ export function MainWindow() {
     }
   }, [adoptImage, setImageName]);
 
+  // The three Image-menu save actions delegate to the shared useImageSave hook
+  // (the same path the in-view Save buttons use). Menu-specific concerns —
+  // closing the menu and surfacing errors as a warning banner — stay here.
   const handleSaveImage = useCallback(async () => {
     setOpenMenu(null);
-    if (!image) return;
-    if (imageSavePath) {
-      await saveImage(imageSavePath);
-      return;
-    }
-    let target: string | null = null;
     try {
-      const selected = await saveDialog({
-        title: 'Save Image As',
-        defaultPath: `${imageName || 'image'}.img`,
-        filters: [
-          { name: 'Image (.img)', extensions: ['img'] },
-          { name: 'FITS (.fits)', extensions: ['fits'] },
-        ],
-      });
-      target = typeof selected === 'string' ? selected : null;
-    } catch (err) {
-      console.error('save dialog failed', err);
-      return;
+      await saveImageQuick();
+    } catch (e) {
+      setWarning((e as Error).message);
     }
-    if (!target) return;
-    await saveImage(target);
-  }, [image, imageSavePath, imageName, saveImage]);
+  }, [saveImageQuick]);
 
   const handleSaveImageAs = useCallback(async () => {
     setOpenMenu(null);
-    if (!image) return;
-    let target: string | null = null;
     try {
-      const selected = await saveDialog({
-        title: 'Save Image As',
-        defaultPath: imageSavePath ?? `${imageName || 'image'}.img`,
-        filters: [
-          { name: 'Image (.img)', extensions: ['img'] },
-          { name: 'FITS (.fits)', extensions: ['fits'] },
-        ],
-      });
-      target = typeof selected === 'string' ? selected : null;
-    } catch (err) {
-      console.error('save dialog failed', err);
-      return;
+      await saveImageAs();
+    } catch (e) {
+      setWarning((e as Error).message);
     }
-    if (!target) return;
-    await saveImage(target);
-  }, [image, imageSavePath, imageName, saveImage]);
+  }, [saveImageAs]);
 
   const handleSaveBitmapAs = useCallback(async () => {
     setOpenMenu(null);
-    if (!image) return;
-    let target: string | null = null;
     try {
-      const selected = await saveDialog({
-        title: 'Save Bitmap As',
-        defaultPath: `${imageName || 'image'}.bmp`,
-        filters: [{ name: 'Bitmap (.bmp)', extensions: ['bmp'] }],
-      });
-      target = typeof selected === 'string' ? selected : null;
-    } catch (err) {
-      console.error('save dialog failed', err);
-      return;
+      await saveBitmapAs();
+    } catch (e) {
+      setWarning((e as Error).message);
     }
-    if (!target) return;
-    await saveImage(target);
-  }, [image, imageName, saveImage]);
+  }, [saveBitmapAs]);
 
   const startCompose = useCallback(
     async (mode: ComposeMode) => {
@@ -639,28 +617,40 @@ export function MainWindow() {
             { name: 'Image (.img, .fits)', extensions: ['img', 'fits', 'fit'] },
             { name: 'All files', extensions: ['*'] },
           ];
-      let path: string | null = null;
+      // Both append and superimpose accept several files at once, composed in a
+      // single pass. Multi-append takes the max on overlap; multi-superimpose
+      // blends every image with equal weight (unequal weights are only
+      // meaningful pairwise — see the 'multi-weight-info' stage below).
+      let paths: string[] = [];
       try {
         const selected = await openDialog({
-          multiple: false,
+          multiple: true,
           directory: false,
-          title: mode === 'append' ? 'Select Image to Append' : 'Select Image to Superimpose',
+          title:
+            mode === 'append'
+              ? 'Select Image(s) to Append'
+              : 'Select Image(s) to Superimpose',
           filters,
         });
-        path = typeof selected === 'string' ? selected : null;
+        paths = Array.isArray(selected)
+          ? selected
+          : typeof selected === 'string'
+            ? [selected]
+            : [];
       } catch (err) {
         console.error('file dialog failed', err);
         return;
       }
-      if (!path) return;
+      if (paths.length === 0) return;
       setCompose({
         mode,
-        otherPath: path,
+        otherPath: paths[0],
+        otherPaths: paths,
         sameCalibration: true,
+        forceCalibrated: false,
         weight: 0.5,
         raShiftSeconds: 0,
         decShiftDegrees: 0,
-        pix: 1,
         stage: 'same-cal',
       });
     },
@@ -671,6 +661,7 @@ export function MainWindow() {
     setCompose(null);
     setYesNoPrompt(null);
     setNumericPrompt(null);
+    setAckPrompt(null);
   }, []);
 
   // Walk through the dialog cascade based on the current `compose.stage`.
@@ -681,19 +672,70 @@ export function MainWindow() {
     const next = (patch: Partial<ComposeStep>) => setCompose((c) => (c ? { ...c, ...patch } : c));
 
     if (compose.stage === 'same-cal') {
+      // Multi-file compose (append or superimpose) skips the per-file shift step
+      // — there's no sensible single shift across N files. Multi-append commits
+      // straight away; multi-superimpose first shows the equal-weighting notice,
+      // then commits.
+      const isMulti = compose.otherPaths.length > 1;
+      let afterCal: ComposeStep['stage'];
+      if (compose.mode === 'superimpose') {
+        afterCal = isMulti ? 'multi-weight-info' : 'equal-weight';
+      } else {
+        afterCal = isMulti ? 'commit' : 'shift-q';
+      }
       setYesNoPrompt({
         title: 'Calibration check',
-        message: 'Do the two images use the same calibration?',
+        message: isMulti
+          ? 'Do all the images use the same calibration?'
+          : 'Do the two images use the same calibration?',
         onYes: () => {
           setYesNoPrompt(null);
-          next({ sameCalibration: true, stage: compose.mode === 'superimpose' ? 'equal-weight' : 'shift-q' });
+          next({ sameCalibration: true, stage: afterCal });
+        },
+        onNo: () => {
+          // Different calibration sources are only safe to combine if every
+          // image is already on a common flux (Jy) scale — ask, and block if
+          // not. (See the 'flux-cal-check' stage.)
+          setYesNoPrompt(null);
+          next({ sameCalibration: false, stage: 'flux-cal-check' });
+        },
+      });
+      return;
+    }
+
+    if (compose.stage === 'flux-cal-check') {
+      // Reached only when the images don't share a calibration source. They can
+      // still be combined iff they're all flux-calibrated (same Jy scale);
+      // otherwise the max/average would mix incompatible units, so we stop and
+      // send the user back to flux-calibrate first.
+      const isMulti = compose.otherPaths.length > 1;
+      let afterCal: ComposeStep['stage'];
+      if (compose.mode === 'superimpose') {
+        afterCal = isMulti ? 'multi-weight-info' : 'equal-weight';
+      } else {
+        afterCal = isMulti ? 'commit' : 'shift-q';
+      }
+      setYesNoPrompt({
+        title: 'Flux calibration check',
+        message: isMulti
+          ? 'Are all the images flux calibrated?'
+          : 'Are both images flux calibrated?',
+        onYes: () => {
+          // They share a common flux (Jy) scale even though their calibration
+          // sources differ — force the composite's calibrated state since
+          // legacy .img inputs carry no unit suffix to infer it from.
+          setYesNoPrompt(null);
+          next({ forceCalibrated: true, stage: afterCal });
         },
         onNo: () => {
           setYesNoPrompt(null);
-          setWarning(
-            'Images with different calibrations may produce nonsensical composites — proceeding anyway.',
-          );
-          next({ sameCalibration: false, stage: compose.mode === 'superimpose' ? 'equal-weight' : 'shift-q' });
+          setAckPrompt({
+            title: 'Flux calibration required',
+            message: 'Please flux calibrate before combining files.',
+            // Return to the image the user had open (cancelCompose leaves the
+            // underlying image view untouched — the dialogs are just overlays).
+            onOk: cancelCompose,
+          });
         },
       });
       return;
@@ -735,6 +777,22 @@ export function MainWindow() {
       return;
     }
 
+    if (compose.stage === 'multi-weight-info') {
+      // Superimposing 3+ images at once: weights are fixed equal (per-image
+      // weights only make sense when folding one image in at a time). Notify
+      // the user, then skip the weight/shift prompts and commit.
+      setAckPrompt({
+        title: 'Equal weighting',
+        message:
+          'When superimposing multiple images at once, they will all be weighted evenly. If you would like to adjust weights of individual images please superimpose one by one.',
+        onOk: () => {
+          setAckPrompt(null);
+          next({ stage: 'commit' });
+        },
+      });
+      return;
+    }
+
     if (compose.stage === 'shift-q') {
       setYesNoPrompt({
         title: 'Shift second image?',
@@ -745,7 +803,7 @@ export function MainWindow() {
         },
         onNo: () => {
           setYesNoPrompt(null);
-          next({ raShiftSeconds: 0, decShiftDegrees: 0, stage: 'pix' });
+          next({ raShiftSeconds: 0, decShiftDegrees: 0, stage: 'commit' });
         },
       });
       return;
@@ -772,20 +830,7 @@ export function MainWindow() {
         defaultValue: 0,
         onSubmit: (value) => {
           setNumericPrompt(null);
-          next({ decShiftDegrees: value, stage: 'pix' });
-        },
-      });
-      return;
-    }
-
-    if (compose.stage === 'pix') {
-      setNumericPrompt({
-        title: 'Pixel resolution',
-        label: 'Pixel resolution (pixels):',
-        defaultValue: compose.pix,
-        onSubmit: (value) => {
-          setNumericPrompt(null);
-          next({ pix: Math.max(1, Math.trunc(value)), stage: 'commit' });
+          next({ decShiftDegrees: value, stage: 'commit' });
         },
       });
       return;
@@ -799,17 +844,25 @@ export function MainWindow() {
         try {
           const meta =
             c.mode === 'append'
-              ? await rpcClient.appendImage(image.handle, c.otherPath, {
-                  ra_shift_seconds: c.raShiftSeconds,
-                  dec_shift_degrees: c.decShiftDegrees,
-                  pix: c.pix,
-                })
-              : await rpcClient.superimposeImage(image.handle, c.otherPath, {
-                  weight: c.weight,
-                  ra_shift_seconds: c.raShiftSeconds,
-                  dec_shift_degrees: c.decShiftDegrees,
-                  pix: c.pix,
-                });
+              ? c.otherPaths.length > 1
+                ? await rpcClient.appendImageMulti(image.handle, c.otherPaths, {
+                    force_calibrated: c.forceCalibrated,
+                  })
+                : await rpcClient.appendImage(image.handle, c.otherPath, {
+                    ra_shift_seconds: c.raShiftSeconds,
+                    dec_shift_degrees: c.decShiftDegrees,
+                    force_calibrated: c.forceCalibrated,
+                  })
+              : c.otherPaths.length > 1
+                ? await rpcClient.superimposeImageMulti(image.handle, c.otherPaths, {
+                    force_calibrated: c.forceCalibrated,
+                  })
+                : await rpcClient.superimposeImage(image.handle, c.otherPath, {
+                    weight: c.weight,
+                    ra_shift_seconds: c.raShiftSeconds,
+                    dec_shift_degrees: c.decShiftDegrees,
+                    force_calibrated: c.forceCalibrated,
+                  });
           await adoptImage(meta, null);
         } catch (e) {
           setWarning((e as Error).message);
@@ -884,7 +937,6 @@ export function MainWindow() {
         decShiftDegrees: 0,
         tertiaryRaShiftSeconds: 0,
         tertiaryDecShiftDegrees: 0,
-        pix: 1,
         // tricolor-from-rgb auto-fills the unused channel — no color picks.
         // All other modes ask the user to pick colors explicitly.
         stage: mode === 'tricolor-from-rgb' ? 'same-cal' : 'pick-primary-color',
@@ -957,10 +1009,10 @@ export function MainWindow() {
     }
     // Tricolor-from-scalar takes three fresh inputs and needs an independent
     // shift cascade for the tertiary image; the other two modes only ever
-    // shift a single new image, so they jump straight to 'pix' after the
-    // secondary shift.
+    // shift a single new image, so they commit straight after the secondary
+    // shift.
     const afterSecondaryShift =
-      colorCompose.mode === 'tricolor-from-scalar' ? 'tertiary-shift-q' : 'pix';
+      colorCompose.mode === 'tricolor-from-scalar' ? 'tertiary-shift-q' : 'commit';
     if (colorCompose.stage === 'shift-q') {
       setYesNoPrompt({
         title: 'Shift second image?',
@@ -1013,7 +1065,7 @@ export function MainWindow() {
           next({
             tertiaryRaShiftSeconds: 0,
             tertiaryDecShiftDegrees: 0,
-            stage: 'pix',
+            stage: 'commit',
           });
         },
       });
@@ -1038,19 +1090,7 @@ export function MainWindow() {
         defaultValue: 0,
         onSubmit: (value) => {
           setNumericPrompt(null);
-          next({ tertiaryDecShiftDegrees: value, stage: 'pix' });
-        },
-      });
-      return;
-    }
-    if (colorCompose.stage === 'pix') {
-      setNumericPrompt({
-        title: 'Pixel resolution',
-        label: 'Pixel resolution (pixels):',
-        defaultValue: colorCompose.pix,
-        onSubmit: (value) => {
-          setNumericPrompt(null);
-          next({ pix: Math.max(1, Math.trunc(value)), stage: 'commit' });
+          next({ tertiaryDecShiftDegrees: value, stage: 'commit' });
         },
       });
       return;
@@ -1078,7 +1118,6 @@ export function MainWindow() {
               {
                 ra_shift_seconds: c.raShiftSeconds,
                 dec_shift_degrees: c.decShiftDegrees,
-                pix: c.pix,
               },
             );
           } else if (c.mode === 'tricolor-from-scalar') {
@@ -1152,7 +1191,6 @@ export function MainWindow() {
                 dec_shift_degrees: c.decShiftDegrees,
                 tertiary_ra_shift_seconds: c.tertiaryRaShiftSeconds,
                 tertiary_dec_shift_degrees: c.tertiaryDecShiftDegrees,
-                pix: c.pix,
               },
             );
             meta = intermediate;
@@ -1263,6 +1301,47 @@ export function MainWindow() {
     void getCurrentWindow().close();
   };
 
+  // Map the currently-displayed work to the tutorial section that documents it,
+  // mirroring the view-area render ladder below (aux flux-cal → scan → standalone
+  // image → survey stage). Falls back to Overview when nothing is loaded.
+  const currentHelpSection = (): HelpSectionId => {
+    if (auxView === 'flux-cal') return 'flux-cal';
+    if (hasScan) return 'scan';
+    if (!hasSurvey && (image || rgbImage)) return 'image';
+    if (hasSurvey) {
+      if (viewMode === 'pre-image') return 'pre-image';
+      if (viewMode === 'image') return 'image';
+      return 'survey';
+    }
+    return 'overview';
+  };
+
+  // Open (or focus) the standalone tutorial window, jumping it to the section
+  // for the user's current work. The window is a real OS window so it can be
+  // dragged to another monitor or snapped beside the main window. `parent` ties
+  // its lifetime to the main window; the Rust side also exits the app when the
+  // main window closes (see lib.rs).
+  const openTutorial = async () => {
+    setOpenMenu(null);
+    const section = currentHelpSection();
+    const existing = await WebviewWindow.getByLabel('tutorial');
+    if (existing) {
+      await existing.setFocus();
+      await emit('tutorial:navigate', section);
+      return;
+    }
+    const win = new WebviewWindow('tutorial', {
+      url: `tutorial.html?section=${section}`,
+      title: 'Radio Cartographer — Tutorial',
+      width: 520,
+      height: 760,
+      parent: getCurrentWindow(),
+    });
+    win.once('tauri://error', (e) => {
+      console.error('failed to open tutorial window', e);
+    });
+  };
+
   return (
     <div className="main-window">
       <MenuBarShell ref={menuRef}>
@@ -1285,10 +1364,7 @@ export function MainWindow() {
               </button>
               <button
                 role="menuitem"
-                onClick={() => {
-                  setOpenMenu(null);
-                  setHelpOpen(true);
-                }}
+                onClick={() => void openTutorial()}
               >
                 Tutorial
               </button>
@@ -1377,9 +1453,13 @@ export function MainWindow() {
                 role="menuitem"
                 disabled={!hasImage}
                 onClick={() => void startCompose('append')}
-                title={hasImage ? undefined : 'Available after you build or upload an image'}
+                title={
+                  hasImage
+                    ? 'Select one or more images to append in a single pass'
+                    : 'Available after you build or upload an image'
+                }
               >
-                Append Image…
+                Append Image(s)…
               </button>
               <button
                 role="menuitem"
@@ -1778,6 +1858,14 @@ export function MainWindow() {
           }}
         />
       )}
+      {ackPrompt && (
+        <ConfirmDialog
+          title={ackPrompt.title}
+          message={ackPrompt.message}
+          onConfirm={ackPrompt.onOk}
+          onCancel={cancelCompose}
+        />
+      )}
       {numericPrompt && (
         <NumericInputDialog
           prompt={numericPrompt}
@@ -1849,7 +1937,6 @@ export function MainWindow() {
           </div>
         );
       })()}
-      {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
 
       <footer style={{ display: 'none' }}>
         {String(hasSurvey)}

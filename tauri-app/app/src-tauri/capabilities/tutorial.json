@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "tutorial",
+  "description": "Capability for the standalone tutorial window. Read-only help content: it may close itself and receive/emit navigation events, but has no dialog or engine-RPC access.",
+  "windows": ["tutorial"],
+  "permissions": ["core:default", "core:window:allow-close"]
+}

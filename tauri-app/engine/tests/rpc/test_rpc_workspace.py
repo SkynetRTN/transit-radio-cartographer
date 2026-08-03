@@ -48,6 +48,43 @@ def test_get_source_sweep_returns_uncalibrated_volts() -> None:
     assert len(r["flux"]) == r["sample_count"]
 
 
+def test_get_sweep_paths_returns_one_polyline_per_source_sweep() -> None:
+    server = RpcServer()
+    ws_handle, overview = _open(server)
+    resp = call(server, "get_sweep_paths", {"handle": ws_handle, "max_points": 32})
+    assert "error" not in resp, resp
+    r = resp["result"]
+    assert r["source_count"] == 61
+    assert len(r["sweeps"]) == 61
+    # Indices are 0-based and contiguous — the frontend adds 1 for display.
+    assert [s["index"] for s in r["sweeps"]] == list(range(61))
+    for s in r["sweeps"]:
+        assert len(s["ra"]) == len(s["dec"])
+        assert 0 < len(s["ra"]) <= 32
+    # Sweeps step through RA as the earth rotates, so consecutive source sweeps
+    # sit at increasing (or at least distinct) mean RA — the property the hover
+    # readout relies on to map a cell's RA back to a sweep.
+    means = [float(np.mean(s["ra"])) for s in r["sweeps"]]
+    assert means[0] != means[-1]
+
+
+def test_get_sweep_paths_tracks_align_dec_shift() -> None:
+    server = RpcServer()
+    ws_handle, _ = _open(server)
+    before = call(server, "get_sweep_paths", {"handle": ws_handle, "max_points": 0})
+    dec_before = [np.array(s["dec"]) for s in before["result"]["sweeps"]]
+    # Align Sweeps rewrites the source dec; the paths must follow so the readout
+    # stays aligned with the regenerated pre-image.
+    aligned = call(server, "align", {"handle": ws_handle, "factor": 0.5, "workspace_handle": ws_handle})
+    assert "error" not in aligned, aligned
+    after = call(server, "get_sweep_paths", {"handle": ws_handle, "max_points": 0})
+    dec_after = [np.array(s["dec"]) for s in after["result"]["sweeps"]]
+    # Sample counts are preserved, but at least one sweep's dec shifted — the
+    # align output flowed through into the paths rather than being ignored.
+    assert [d.shape for d in dec_before] == [d.shape for d in dec_after]
+    assert any(not np.array_equal(b, a) for b, a in zip(dec_before, dec_after))
+
+
 def test_get_calibration_view_shape() -> None:
     server = RpcServer()
     ws_handle, _ = _open(server)

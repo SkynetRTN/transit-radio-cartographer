@@ -1,11 +1,55 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
 
 from .models import Survey
+
+# ── Grid scale ───────────────────────────────────────────────────────────────
+# Images are gridded at a FIXED angular pixel size (degrees on-sky), so a pixel
+# means the same thing on every map and appends never resample one map onto
+# another's coarser grid. The default is 1/20 of the 40 ft beam.
+BEAM_FWHM_DEG = 1.2  # 40 ft telescope beam (most inputs come from the 40 ft)
+PIXELS_PER_BEAM = 20
+DEFAULT_PIXEL_DEG = BEAM_FWHM_DEG / PIXELS_PER_BEAM  # 0.06° = 3.6′ per pixel
+
+# RA is stored in seconds of time; 15°/hour → 240 seconds of time per degree.
+# A fixed seconds-per-pixel would shrink on-sky as cos(dec) grows, so we divide
+# by cos(dec) to keep pixels ~square in true angle. `_MIN_COS_DEC` guards the
+# division from blowing up near the poles (irrelevant for 40 ft data, but safe).
+_SEC_PER_DEG_RA = 240.0
+_MIN_COS_DEC = 0.05
+
+
+def cell_sizes(
+    min_dec: float, max_dec: float, pixel_deg: float = DEFAULT_PIXEL_DEG
+) -> tuple[float, float]:
+    """(RA cell in seconds-of-time, Dec cell in degrees) for `pixel_deg` on-sky.
+
+    The RA cell is widened by 1/cos(dec_center) so a column spans the same true
+    angle as a row despite RA's stored unit being time, not angle.
+    """
+    dec_center = (min_dec + max_dec) / 2.0
+    cosd = max(math.cos(math.radians(dec_center)), _MIN_COS_DEC)
+    cell_ra_sec = pixel_deg * _SEC_PER_DEG_RA / cosd
+    return cell_ra_sec, pixel_deg
+
+
+def grid_dims(
+    min_ra: float,
+    max_ra: float,
+    min_dec: float,
+    max_dec: float,
+    pixel_deg: float = DEFAULT_PIXEL_DEG,
+) -> tuple[int, int]:
+    """(width, height) in cells covering the extent at a fixed `pixel_deg`."""
+    cell_ra, cell_dec = cell_sizes(min_dec, max_dec, pixel_deg)
+    width = max(int(math.ceil(abs(max_ra - min_ra) / cell_ra)) + 1, 1)
+    height = max(int(math.ceil(abs(max_dec - min_dec) / cell_dec)) + 1, 1)
+    return width, height
 
 
 @dataclass(frozen=True)
@@ -106,24 +150,9 @@ class RgbGriddedImage:
     max_dec: float
 
 
-def _legacy_grid_shape(pix: int) -> tuple[int, int]:
-    """Width/height in cells for a given pixel resolution.
-
-    Mirrors vb/survform.frm:1606-1607 where `XMax% = 4770` and `YMax% = 5970`
-    are stepped by `15 * Pix%` to produce the cell grid. The `.img` reader
-    derives shape from the on-disk `Pix` header field the same way, so this
-    is the canonical formula codecs and rendering both use.
-    """
-    if pix <= 0:
-        raise ValueError(f"pix must be positive, got {pix}")
-    width = (5970 // (15 * pix)) + 1
-    height = (4770 // (15 * pix)) + 1
-    return width, height
-
-
 def make_image(
     survey: Survey,
-    pix: int = 1,
+    pixel_deg: float = DEFAULT_PIXEL_DEG,
     width: int | None = None,
     height: int | None = None,
 ) -> GriddedImage:
@@ -144,18 +173,15 @@ def make_image(
     3. Average where multiple strip-fills cover the same cell.
 
     Cells outside any swept region remain 0 and render at the palette's
-    anchor=0 stop (black). `pix` controls grid coarseness via the legacy
-    formula `_legacy_grid_shape`; width/height overrides exist for tests and
-    the future FITS exporter.
+    anchor=0 stop (black). The grid is sized so each cell spans a fixed
+    `pixel_deg` on-sky (default 1/20 of the beam) via `grid_dims`; explicit
+    width/height overrides exist for tests and the FITS exporter.
     """
-    if width is None or height is None:
-        legacy_w, legacy_h = _legacy_grid_shape(pix)
-        width = legacy_w if width is None else width
-        height = legacy_h if height is None else height
-
     sweeps = [s for s in survey.sweeps if s.ra.size > 0]
     if not sweeps:
-        pixels = np.zeros((height, width), dtype=np.float64)
+        pixels = np.zeros((height or 1, width or 1), dtype=np.float64)
+        width = pixels.shape[1]
+        height = pixels.shape[0]
         wcs = WCSMetadata(
             ctype1="RA---TAN",
             ctype2="DEC--TAN",
@@ -203,6 +229,12 @@ def make_image(
     min_dec, max_dec = float(np.min(dec_all)), float(np.max(dec_all))
     ra_range = max(max_ra - min_ra, np.finfo(float).eps)
     dec_range = max(max_dec - min_dec, np.finfo(float).eps)
+
+    # Size the grid so each cell spans a fixed `pixel_deg` on-sky, unless the
+    # caller pinned width/height explicitly (tests / FITS export).
+    auto_w, auto_h = grid_dims(min_ra, max_ra, min_dec, max_dec, pixel_deg)
+    width = auto_w if width is None else width
+    height = auto_h if height is None else height
 
     pixels = np.zeros((height, width), dtype=np.float64)
     counts = np.zeros((height, width), dtype=np.int64)

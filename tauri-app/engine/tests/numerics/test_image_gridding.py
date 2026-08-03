@@ -1,58 +1,48 @@
 import numpy as np
-from radio_cartographer.image import make_image
-from radio_cartographer.io.img import read_img
+import pytest
+from radio_cartographer.image import DEFAULT_PIXEL_DEG, cell_sizes, grid_dims, make_image
 from radio_cartographer.io.md2 import read_md2
 from radio_cartographer.io.srv import read_srv
 from radio_cartographer.models import Survey, Sweep
 from tests._tolerances import IMAGE_ATOL
 
 
-def _legacy_shape(pix: int) -> tuple[int, int]:
-    # vb/survform.frm:4632-4749 — the .img reader derives the grid shape this
-    # way from the `Pix` header field, so `make_image` must match it for the
-    # gridded output to round-trip through `io/img.py`.
-    return ((4770 // (15 * pix)) + 1, (5970 // (15 * pix)) + 1)
-
-
-def test_makeimage_default_parameters_match_legacy(intermediates_dir, outputs_dir) -> None:
+def test_makeimage_uses_fixed_angular_pixel(intermediates_dir) -> None:
     survey = read_srv(intermediates_dir / "and0a.srv")
-    grid = make_image(survey, pix=1)
+    grid = make_image(survey)
 
-    expected_shape = _legacy_shape(pix=1)
-    assert grid.pixels.shape == expected_shape == (319, 399)
+    # Grid is sized so each cell spans a fixed on-sky pixel size (1/20 of the
+    # 40 ft beam = 0.06°), not the legacy fixed 399x319 canvas. Shape follows
+    # `grid_dims` for the survey's own extent.
+    exp_w, exp_h = grid_dims(grid.min_ra, grid.max_ra, grid.min_dec, grid.max_dec)
+    assert grid.pixels.shape == (exp_h, exp_w)
 
-    # Cross-check against a real legacy .img — every checked-in .img was
-    # captured from `KARALEAH2002.exe` at `Pix = 1`, so the pixel grid shape
-    # is the canonical fixture-side oracle for the formula above.
-    legacy = read_img(outputs_dir / "virgo_a.img")
-    assert legacy.pix == 1
-    assert grid.pixels.shape == legacy.pixels.shape
+    # Dec cell (cdelt2) is the pixel size in degrees; RA cell (cdelt1, seconds
+    # of time) is that size scaled by 1/cos(dec) — both to ~rounding.
+    cell_ra, cell_dec = cell_sizes(grid.min_dec, grid.max_dec)
+    assert abs(grid.wcs.cdelt2) == pytest.approx(cell_dec, rel=0.05)
+    assert abs(grid.wcs.cdelt1) == pytest.approx(cell_ra, rel=0.05)
 
     assert np.all(np.isfinite(grid.pixels))
-    # Andromeda is a real source — the grid must carry non-trivial flux,
-    # not a degenerate empty image. Tightens "shape only" past a smoke check.
+    # Andromeda is a real source — the grid must carry non-trivial flux.
     assert float(np.max(grid.pixels)) > 0.0
     assert int(np.count_nonzero(grid.pixels)) > 100
 
 
-def test_makeimage_honors_pix_for_grid_shape(intermediates_dir) -> None:
+def test_makeimage_pixel_size_controls_shape(intermediates_dir) -> None:
     survey = read_srv(intermediates_dir / "and0a.srv")
 
-    # vb/survform.frm:1509 — when the user first opens "Make Image" the
-    # default Pix prompt is "2", which produces a coarser, blocky grid.
-    grid_pix2 = make_image(survey, pix=2)
-    assert grid_pix2.pixels.shape == _legacy_shape(pix=2)
-
-    # vb/survform.frm:1513 — non-integer or non-positive pix is refused.
-    # Larger pix → fewer cells.
-    grid_pix4 = make_image(survey, pix=4)
-    assert grid_pix4.pixels.shape == _legacy_shape(pix=4)
-    assert grid_pix4.pixels.size < grid_pix2.pixels.size
+    fine = make_image(survey, pixel_deg=DEFAULT_PIXEL_DEG)
+    # A larger pixel_deg is a coarser grid with fewer cells; halving the pixel
+    # size roughly quadruples the cell count (2x per axis).
+    coarse = make_image(survey, pixel_deg=DEFAULT_PIXEL_DEG * 2)
+    assert coarse.pixels.size < fine.pixels.size
+    assert fine.pixels.size / coarse.pixels.size == pytest.approx(4.0, rel=0.25)
 
 
 def test_makeimage_pixel_scale_inverts_correctly(intermediates_dir) -> None:
     survey = read_srv(intermediates_dir / "and0a.srv")
-    grid = make_image(survey, pix=1)
+    grid = make_image(survey)
     w = grid.wcs
 
     assert w.ctype1 == "RA---TAN"
@@ -125,7 +115,7 @@ def test_makeimage_unwraps_ra_across_midnight() -> None:
         sweep_ras.append(ras)
         sweep_decs.append(decs)
     survey = _make_synthetic_survey(sweep_ras, sweep_decs)
-    grid = make_image(survey, pix=1)
+    grid = make_image(survey)
 
     # Naive min/max would have given ~0 and ~86400 (a 24h span). After
     # unwrap, early-side samples shift into [86400, 90000], so the
@@ -149,7 +139,7 @@ def test_makeimage_does_not_unwrap_contiguous_survey() -> None:
         sweep_ras.append(ras)
         sweep_decs.append(decs)
     survey = _make_synthetic_survey(sweep_ras, sweep_decs)
-    grid = make_image(survey, pix=1)
+    grid = make_image(survey)
 
     assert 9000.0 <= grid.min_ra <= 11000.0
     assert 17000.0 <= grid.max_ra <= 19000.0
@@ -163,7 +153,7 @@ def test_makeimage_unwraps_real_cassiopeia_survey(inputs_dir) -> None:
     # land in the same neighbourhood — emphatically not the full 24h grid
     # that naive min/max produces.
     survey = read_md2(inputs_dir / "cassioa.md2")
-    grid = make_image(survey, pix=1)
+    grid = make_image(survey)
     span = grid.max_ra - grid.min_ra
     assert span < 25000.0, (
         f"cassio make_image span={span}s — wrap not detected; "
@@ -180,7 +170,7 @@ def test_makeimage_fills_between_adjacent_sweeps(intermediates_dir) -> None:
     # mostly-black sweep map rather than the filled mosaic in
     # docs/legacy_ui_reference/screenshots/preimagecygnus.png.
     survey = read_srv(intermediates_dir / "and0a.srv")
-    grid = make_image(survey, pix=2)
+    grid = make_image(survey)
     nonzero = int(np.count_nonzero(grid.pixels))
     total = int(grid.pixels.size)
     # At pix=2 the grid is ~160x200 cells; the swept region should cover at
