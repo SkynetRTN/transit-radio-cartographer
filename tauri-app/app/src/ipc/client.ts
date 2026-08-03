@@ -493,24 +493,39 @@ export class RpcClient {
       data,
     });
   }
+  // `force_calibrated` marks the composite flux-calibrated (Jy) regardless of
+  // whether the inputs carry the on-disk unit suffix — set when the user
+  // attests all inputs are flux-calibrated (legacy .img files never wrote the
+  // suffix, so on-disk inference alone would under-report them).
   appendImage(
     handle: number,
     otherPath: string,
-    options?: { ra_shift_seconds?: number; dec_shift_degrees?: number; pix?: number },
+    options?: {
+      ra_shift_seconds?: number;
+      dec_shift_degrees?: number;
+      pix?: number;
+      force_calibrated?: boolean;
+    },
   ) {
     const params: Record<string, unknown> = { handle, other_path: otherPath };
     if (options?.ra_shift_seconds !== undefined) params.ra_shift_seconds = options.ra_shift_seconds;
     if (options?.dec_shift_degrees !== undefined)
       params.dec_shift_degrees = options.dec_shift_degrees;
     if (options?.pix !== undefined) params.pix = options.pix;
+    if (options?.force_calibrated !== undefined) params.force_calibrated = options.force_calibrated;
     return this.request<ImageMeta>('append_image', params);
   }
   // N-way append: compose the primary handle with several on-disk images onto
   // one union grid, so each source is resampled exactly once (avoids the
   // per-step re-snapping quality loss of appending files one at a time).
-  appendImageMulti(handle: number, otherPaths: string[], options?: { pix?: number }) {
+  appendImageMulti(
+    handle: number,
+    otherPaths: string[],
+    options?: { pix?: number; force_calibrated?: boolean },
+  ) {
     const params: Record<string, unknown> = { handle, other_paths: otherPaths };
     if (options?.pix !== undefined) params.pix = options.pix;
+    if (options?.force_calibrated !== undefined) params.force_calibrated = options.force_calibrated;
     return this.request<ImageMeta>('append_image_multi', params);
   }
   superimposeImage(
@@ -521,6 +536,7 @@ export class RpcClient {
       ra_shift_seconds?: number;
       dec_shift_degrees?: number;
       pix?: number;
+      force_calibrated?: boolean;
     },
   ) {
     const params: Record<string, unknown> = { handle, other_path: otherPath };
@@ -529,7 +545,21 @@ export class RpcClient {
     if (options?.dec_shift_degrees !== undefined)
       params.dec_shift_degrees = options.dec_shift_degrees;
     if (options?.pix !== undefined) params.pix = options.pix;
+    if (options?.force_calibrated !== undefined) params.force_calibrated = options.force_calibrated;
     return this.request<ImageMeta>('superimpose_image', params);
+  }
+  // N-way superimpose: blend the primary handle with several on-disk images onto
+  // one union grid, every image weighted equally. Unequal weights are only
+  // meaningful pairwise (superimpose one at a time), so there's no weight here.
+  superimposeImageMulti(
+    handle: number,
+    otherPaths: string[],
+    options?: { pix?: number; force_calibrated?: boolean },
+  ) {
+    const params: Record<string, unknown> = { handle, other_paths: otherPaths };
+    if (options?.pix !== undefined) params.pix = options.pix;
+    if (options?.force_calibrated !== undefined) params.force_calibrated = options.force_calibrated;
+    return this.request<ImageMeta>('superimpose_image_multi', params);
   }
   bicolorImage(
     handle: number,

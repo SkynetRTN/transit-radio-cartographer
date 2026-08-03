@@ -94,6 +94,37 @@ def test_append_image_multi_requires_nonempty_paths():
     assert "error" not in follow_up, follow_up
 
 
+def test_superimpose_image_multi_via_rpc():
+    # N-way superimpose through the RPC: one primary handle + a list of on-disk
+    # paths blends onto a single grid in one call, every image weighted equally.
+    img_src = Path("C:\\Users\\leesnow\\skynet2\\ogrc\\fixtures\\outputs\\cassio_a.img")
+    assert img_src.exists()
+    server = RpcServer()
+    primary_h = _open_image_handle(server, img_src)
+    resp = call(
+        server,
+        "superimpose_image_multi",
+        {"handle": primary_h, "other_paths": [str(img_src), str(img_src)]},
+    )
+    assert "error" not in resp, resp
+    meta = resp["result"]
+    s = json.dumps(meta, allow_nan=False)
+    assert "NaN" not in s and "Infinity" not in s
+    assert meta["handle"] != primary_h
+    pix = call(server, "get_image_pixels", {"handle": meta["handle"]})
+    assert "error" not in pix, pix
+
+
+def test_superimpose_image_multi_requires_nonempty_paths():
+    img_src = Path("C:\\Users\\leesnow\\skynet2\\ogrc\\fixtures\\outputs\\cassio_a.img")
+    server = RpcServer()
+    primary_h = _open_image_handle(server, img_src)
+    resp = call(server, "superimpose_image_multi", {"handle": primary_h, "other_paths": []})
+    assert "error" in resp
+    follow_up = call(server, "get_image_pixels", {"handle": primary_h})
+    assert "error" not in follow_up, follow_up
+
+
 def test_appended_image_save_roundtrip_with_uncovered_gap(tmp_path):
     # BUG-014 save path: an appended scalar image carries NaN in the no-coverage
     # gap. Saving to .img must not poison the file with non-finite header
@@ -212,6 +243,88 @@ def _open_image_handle(server: RpcServer, path: Path) -> int:
     resp = call(server, "open_image", {"path": str(path)})
     assert "error" not in resp, resp
     return resp["result"]["handle"]
+
+
+def test_calibrated_composite_persists_flux_state_through_save_reopen(tmp_path):
+    # The end-to-end guarantee: flux-calibrate an image, append another onto it,
+    # save the composite, then reopen it in a FRESH server (no .cal loaded). The
+    # composite must still report flux_calibrated — the calibrated fact rides the
+    # `.img` unit suffix across the round-trip.
+    img_src = Path("C:\\Users\\leesnow\\skynet2\\ogrc\\fixtures\\outputs\\cassio_a.img")
+    assert img_src.exists()
+    server = RpcServer()
+    primary_h = _open_image_handle(server, img_src)
+
+    # Flux-calibrate the primary (marks it Jy / flux_calibrated).
+    cal = call(server, "flux_cal_apply_to_image", {"handle": primary_h, "slope": 2.0})
+    assert "error" not in cal, cal
+    assert cal["result"]["flux_calibrated"] is True
+
+    # Append a (also-calibrated) copy — compose must carry the calibration.
+    app = call(server, "append_image", {"handle": primary_h, "other_path": str(img_src)})
+    assert "error" not in app, app
+    # cassio_a.img carries no unit suffix, so the appended copy is uncalibrated
+    # and the mixed composite must NOT be flux-calibrated.
+    assert app["result"]["flux_calibrated"] is False
+
+    # Now the all-calibrated path: append the calibrated primary onto itself by
+    # first saving the calibrated primary, reopening it (Jy suffix present), then
+    # appending that calibrated file onto the calibrated in-memory primary.
+    cal_path = tmp_path / "calibrated.img"
+    saved = call(server, "save_image", {"handle": primary_h, "path": str(cal_path)})
+    assert "error" not in saved, saved
+
+    app2 = call(server, "append_image", {"handle": primary_h, "other_path": str(cal_path)})
+    assert "error" not in app2, app2
+    assert app2["result"]["flux_calibrated"] is True
+    composite_h = app2["result"]["handle"]
+
+    # Save the calibrated composite and reopen in a brand-new server.
+    out_path = tmp_path / "composite.img"
+    saved2 = call(server, "save_image", {"handle": composite_h, "path": str(out_path)})
+    assert "error" not in saved2, saved2
+
+    fresh = RpcServer()
+    reopened = call(fresh, "open_image", {"path": str(out_path)})
+    assert "error" not in reopened, reopened
+    assert reopened["result"]["flux_calibrated"] is True, "calibration must survive save→reopen"
+    assert reopened["result"]["unit"] == "Jy"
+
+
+def test_force_calibrated_overrides_uncalibrated_inputs_through_reopen(tmp_path):
+    # Legacy .img files carry no unit suffix, so appending two of them yields an
+    # uncalibrated composite by default. When the user attests they're all flux
+    # calibrated (`force_calibrated: true`), the composite must be marked Jy and
+    # keep that through save → reopen in a fresh server.
+    img_src = Path("C:\\Users\\leesnow\\skynet2\\ogrc\\fixtures\\outputs\\cassio_a.img")
+    assert img_src.exists()
+    server = RpcServer()
+    primary_h = _open_image_handle(server, img_src)
+
+    # Default (no attestation): uncalibrated legacy inputs → uncalibrated result.
+    plain = call(server, "append_image", {"handle": primary_h, "other_path": str(img_src)})
+    assert "error" not in plain, plain
+    assert plain["result"]["flux_calibrated"] is False
+
+    # With attestation: forced calibrated.
+    forced = call(
+        server,
+        "append_image",
+        {"handle": primary_h, "other_path": str(img_src), "force_calibrated": True},
+    )
+    assert "error" not in forced, forced
+    assert forced["result"]["flux_calibrated"] is True
+    assert forced["result"]["unit"] == "Jy"
+
+    # Persists through save → reopen in a brand-new server.
+    out_path = tmp_path / "forced.img"
+    saved = call(server, "save_image", {"handle": forced["result"]["handle"], "path": str(out_path)})
+    assert "error" not in saved, saved
+    fresh = RpcServer()
+    reopened = call(fresh, "open_image", {"path": str(out_path)})
+    assert "error" not in reopened, reopened
+    assert reopened["result"]["flux_calibrated"] is True
+    assert reopened["result"]["unit"] == "Jy"
 
 
 def test_open_image_rejects_unknown_extension(tmp_path):

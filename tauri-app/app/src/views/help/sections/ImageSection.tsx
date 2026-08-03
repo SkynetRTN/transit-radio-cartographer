@@ -202,12 +202,17 @@ export function ImageSection() {
       <h3>5. Compose multiple images</h3>
       <ul>
         <li>
-          <code>Image → Append Image…</code> — Stitch two scalar maps side by
-          side.
+          <code>Image → Append Image…</code> — Stitch scalar maps side by
+          side; you can pick several at once. Where footprints overlap, each
+          cell takes the <strong>maximum</strong> flux of the covering maps.
         </li>
         <li>
-          <code>Image → Superimpose Image…</code> — Overlay two scalar maps in
-          the same field.
+          <code>Image → Superimpose Image…</code> — Overlay scalar maps in the
+          same field; you can pick several at once. Where footprints overlap,
+          each cell takes the <strong>average</strong> of the covering maps.
+          Two maps can be blended with a custom weight; three or more are
+          always weighted <strong>evenly</strong> — to adjust individual
+          weights, superimpose one map at a time.
         </li>
         <li>
           <code>Image → Make Bi-Color Image…</code> — Assigns two scalar maps

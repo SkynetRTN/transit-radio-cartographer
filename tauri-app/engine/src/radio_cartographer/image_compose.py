@@ -32,7 +32,7 @@ def _check_grid_budget(width: int, height: int) -> None:
     if width * height > _GRID_CELL_BUDGET:
         raise ValueError(
             f"Cannot compose images: combined sky area is far larger than the "
-            f"primary's resolution. This usually means the two images use "
+            f"finest input's pixel size. This usually means the images use "
             f"different coordinate systems (e.g. a .fits file in degrees with "
             f"an .img file in seconds of time). Computed grid would be "
             f"{height}x{width} pixels."
@@ -64,6 +64,56 @@ def _ra_wrap_shifts(*max_ras: float) -> tuple[float, ...]:
     return tuple(0.0 for _ in max_ras)
 
 
+def _combined_flux_state(images: Sequence[GriddedImage]) -> tuple[str | None, bool]:
+    """Flux unit + calibration flag a scalar composite should carry.
+
+    A composite is flux-calibrated only if *every* input is — a max/mean that
+    mixes a Jy map with an uncalibrated (GCU) one is in no consistent unit, so
+    we won't assert a scale we don't have. When all inputs agree we keep that
+    label so the "this is flux-calibrated" fact survives save → reopen: the
+    `.img` unit suffix is the only calibration marker on disk (a fresh instance
+    with no `.cal` loaded infers calibration purely from `unit == "Jy"`). When
+    the inputs disagree we drop the unit entirely.
+
+    `flux_slope` is always None on the way out (the caller sets it): a composite
+    blends several sources, so it can't be reverted by dividing through a single
+    slope, and `revert_flux_calibration_image` no-ops when the slope is None.
+    """
+    all_calibrated = bool(images) and all(img.flux_calibrated for img in images)
+    if all_calibrated:
+        return "Jy", True
+    units = {img.unit for img in images}
+    unit = images[0].unit if len(units) == 1 else None
+    return unit, False
+
+
+def _cell_of(span: float, dim: int) -> float:
+    """One image's native cell along an axis: span / (dim - 1). Zero-span /
+    single-cell inputs return `inf` so they're skipped by a min()."""
+    c = abs(span) / max(dim - 1, 1)
+    return c if c > 0 else float("inf")
+
+
+def _finest_cell(images: Sequence[GriddedImage]) -> tuple[float, float]:
+    """Finest (smallest) native RA/Dec cell across all `images`.
+
+    Each image was gridded at its own on-sky pixel size — 0.06° by default, but
+    the pre-image screen lets the user pick per image, so a mosaic can mix
+    sizes. Sizing the composite to the *finest* input (not the primary's) means
+    no image is ever downsampled below the resolution it was built at, and the
+    result is independent of which file happens to be open (the combine order).
+    A finer input simply lifts the whole grid to its resolution; coarser inputs
+    are upsampled to fit. Degenerate inputs contribute `inf` and are ignored; an
+    all-degenerate set falls back to 1.0.
+    """
+    cell_ra = min(_cell_of(img.max_ra - img.min_ra, img.pixels.shape[1]) for img in images)
+    cell_dec = min(_cell_of(img.max_dec - img.min_dec, img.pixels.shape[0]) for img in images)
+    return (
+        cell_ra if cell_ra != float("inf") else 1.0,
+        cell_dec if cell_dec != float("inf") else 1.0,
+    )
+
+
 def append_images(
     primary: GriddedImage,
     secondary: GriddedImage,
@@ -91,8 +141,9 @@ def append_images_multi(
     regrid error a long pairwise chain accumulates — the motivation for
     appending many files in one shot rather than one at a time.
 
-    `primary` defines the output cell size (same convention as the pairwise
-    path); `others` are the additional images. `shifts` optionally gives a
+    The output cell is the finest native cell across all inputs (same convention
+    as the pairwise path), so the result is independent of which image is
+    primary; `others` are the additional images. `shifts` optionally gives a
     per-`other` (ra_shift_seconds, dec_shift_degrees) translation, in the same
     order as `others`; `primary` is never shifted. Cells outside every input's
     footprint are NaN (BUG-014 "no data" contract).
@@ -126,10 +177,9 @@ def append_images_multi(
     min_dec = min(img.min_dec + dec_shift[i] for i, img in enumerate(images))
     max_dec = max(img.max_dec + dec_shift[i] for i, img in enumerate(images))
 
-    # Output cell size inherited from the primary (native, or `pix`-subdivided).
-    p_height, p_width = primary.pixels.shape
-    cell_ra = (primary.max_ra - primary.min_ra) / max(p_width - 1, 1)
-    cell_dec = (primary.max_dec - primary.min_dec) / max(p_height - 1, 1)
+    # Output cell = finest native cell across all inputs (open-order independent;
+    # no input downsampled below its own pixel size). `pix` subdivides further.
+    cell_ra, cell_dec = _finest_cell(images)
     if pix is not None and pix > 0:
         cell_ra /= pix
         cell_dec /= pix
@@ -165,6 +215,7 @@ def append_images_multi(
         cdelt1=cdelt1,
         cdelt2=cdelt2,
     )
+    unit, flux_calibrated = _combined_flux_state(images)
     return GriddedImage(
         pixels=pixels,
         wcs=wcs,
@@ -172,6 +223,9 @@ def append_images_multi(
         max_ra=max_ra,
         min_dec=min_dec,
         max_dec=max_dec,
+        unit=unit,
+        flux_calibrated=flux_calibrated,
+        flux_slope=None,
     )
 
 
@@ -188,6 +242,113 @@ def superimpose_images(
         raise ValueError(f"weight must be in [0, 1], got {weight}")
     return _compose(
         primary, secondary, pix, ra_shift_seconds, dec_shift_degrees, "superimpose", weight=weight
+    )
+
+
+def superimpose_images_multi(
+    primary: GriddedImage,
+    others: Sequence[GriddedImage],
+    *,
+    pix: int | None = None,
+    shifts: Sequence[tuple[float, float]] | None = None,
+) -> GriddedImage:
+    """Superimpose N images onto a single union grid, weighting them equally.
+
+    Every overlapping cell becomes the *mean* of the covering inputs' values
+    (order-independent) — the N-way generalization of `superimpose_images` at
+    `weight=0.5`. Unequal weights are only meaningful when folding images in one
+    at a time (superimpose → save → superimpose the next), so the multi path
+    fixes equal weights by construction; callers wanting a lopsided blend must
+    compose pairwise. Like `append_images_multi`, every source is snapped to the
+    output grid exactly once instead of re-snapping a running accumulator, so a
+    long chain doesn't accumulate nearest-neighbor regrid error.
+
+    The output cell is the finest native cell across all inputs (open-order
+    independent); `others` are the additional images.
+    `shifts` optionally gives a per-`other` (ra_shift_seconds, dec_shift_degrees)
+    translation, in the same order as `others`; `primary` is never shifted.
+    Cells outside every input's footprint are NaN (BUG-014 "no data" contract).
+    """
+    if not others:
+        raise ValueError("superimpose_images_multi requires at least one other image")
+    if shifts is not None and len(shifts) != len(others):
+        raise ValueError(
+            f"shifts length ({len(shifts)}) must match others length ({len(others)})"
+        )
+
+    images = [primary, *others]
+    # Per-image user shift; primary is fixed at the origin.
+    if shifts:
+        user_ra = [0.0] + [float(s[0]) for s in shifts]
+        user_dec = [0.0] + [float(s[1]) for s in shifts]
+    else:
+        user_ra = [0.0] * len(images)
+        user_dec = [0.0] * len(images)
+
+    # Effective (post-user-shift) max RA per image drives the 0h/24h seam
+    # unwrap; the resulting wrap shift folds into each image's total RA shift.
+    eff_max_ra = [img.max_ra + user_ra[i] for i, img in enumerate(images)]
+    wraps = _ra_wrap_shifts(*eff_max_ra)
+    ra_shift = [user_ra[i] + wraps[i] for i in range(len(images))]
+    dec_shift = list(user_dec)
+
+    # Union bounding box over every image's shifted footprint.
+    min_ra = min(img.min_ra + ra_shift[i] for i, img in enumerate(images))
+    max_ra = max(img.max_ra + ra_shift[i] for i, img in enumerate(images))
+    min_dec = min(img.min_dec + dec_shift[i] for i, img in enumerate(images))
+    max_dec = max(img.max_dec + dec_shift[i] for i, img in enumerate(images))
+
+    # Output cell = finest native cell across all inputs (open-order independent;
+    # no input downsampled below its own pixel size). `pix` subdivides further.
+    cell_ra, cell_dec = _finest_cell(images)
+    if pix is not None and pix > 0:
+        cell_ra /= pix
+        cell_dec /= pix
+    cell_ra = abs(cell_ra) or 1.0
+    cell_dec = abs(cell_dec) or 1.0
+    width = max(int(np.ceil((max_ra - min_ra) / cell_ra)) + 1, 1)
+    height = max(int(np.ceil((max_dec - min_dec) / cell_dec)) + 1, 1)
+    _check_grid_budget(width, height)
+
+    # Accumulate a per-cell sum and coverage count, then divide for the equal-
+    # weight mean. Cells with zero coverage stay NaN (no input touched them).
+    pixels_sum = np.zeros((height, width), dtype=np.float64)
+    counts = np.zeros((height, width), dtype=np.float64)
+    for i, img in enumerate(images):
+        resampled = _resample_onto(
+            img, min_ra, max_ra, min_dec, max_dec, width, height, ra_shift[i], dec_shift[i]
+        )
+        mask = _coverage_mask(
+            img, min_ra, max_ra, min_dec, max_dec, width, height, ra_shift[i], dec_shift[i]
+        )
+        pixels_sum[mask] += resampled[mask]
+        counts[mask] += 1.0
+    with np.errstate(invalid="ignore"):
+        pixels = np.where(counts > 0, pixels_sum / counts, np.nan)
+
+    cdelt1 = -(max_ra - min_ra) / max(width - 1, 1)
+    cdelt2 = (max_dec - min_dec) / max(height - 1, 1)
+    wcs = WCSMetadata(
+        ctype1="RA---TAN",
+        ctype2="DEC--TAN",
+        crval1=(min_ra + max_ra) / 2.0,
+        crval2=(min_dec + max_dec) / 2.0,
+        crpix1=(width + 1) / 2.0,
+        crpix2=(height + 1) / 2.0,
+        cdelt1=cdelt1,
+        cdelt2=cdelt2,
+    )
+    unit, flux_calibrated = _combined_flux_state(images)
+    return GriddedImage(
+        pixels=pixels,
+        wcs=wcs,
+        min_ra=min_ra,
+        max_ra=max_ra,
+        min_dec=min_dec,
+        max_dec=max_dec,
+        unit=unit,
+        flux_calibrated=flux_calibrated,
+        flux_slope=None,
     )
 
 
@@ -225,24 +386,13 @@ def _compose(
     min_dec = min(primary.min_dec, sec_min_dec)
     max_dec = max(primary.max_dec, sec_max_dec)
 
-    # Pick the output grid scale. If `pix` is None, inherit the primary's per-cell
-    # step so the composite reads at the same resolution as the source.
+    # Output cell = finer of the two inputs, so neither is downsampled below its
+    # own pixel size and the result doesn't depend on which is primary. `pix`
+    # (if given) subdivides that further — pix=2 → twice as dense.
+    cell_ra, cell_dec = _finest_cell([primary, secondary])
     if pix is not None and pix > 0:
-        # Legacy convention from `_legacy_grid_shape`: width = (5970/(15*pix))+1.
-        # But that's tuned for the survey's swept region size, not arbitrary
-        # composite extents. For composites we instead use the primary's
-        # per-cell step (cdelt) so the output is roughly `pix` times denser
-        # than the legacy default — practical without coupling to vb's magic
-        # numbers. `pix` is therefore reinterpreted here as "subdivision
-        # factor relative to primary's native cells"; pix=1 keeps primary's
-        # native resolution.
-        p_height, p_width = primary.pixels.shape
-        cell_ra = (primary.max_ra - primary.min_ra) / max(p_width - 1, 1) / pix
-        cell_dec = (primary.max_dec - primary.min_dec) / max(p_height - 1, 1) / pix
-    else:
-        p_height, p_width = primary.pixels.shape
-        cell_ra = (primary.max_ra - primary.min_ra) / max(p_width - 1, 1)
-        cell_dec = (primary.max_dec - primary.min_dec) / max(p_height - 1, 1)
+        cell_ra /= pix
+        cell_dec /= pix
 
     cell_ra = abs(cell_ra) or 1.0
     cell_dec = abs(cell_dec) or 1.0
@@ -286,6 +436,7 @@ def _compose(
         cdelt1=cdelt1,
         cdelt2=cdelt2,
     )
+    unit, flux_calibrated = _combined_flux_state([primary, secondary])
     return GriddedImage(
         pixels=pixels,
         wcs=wcs,
@@ -293,6 +444,9 @@ def _compose(
         max_ra=max_ra,
         min_dec=min_dec,
         max_dec=max_dec,
+        unit=unit,
+        flux_calibrated=flux_calibrated,
+        flux_slope=None,
     )
 
 
@@ -408,7 +562,7 @@ def tricolor_compose(
     """R = primary, G = secondary, B = tertiary — each normalized independently.
 
     The output grid is the union of all three sources' footprints (with shifts
-    applied to secondary and tertiary), at the primary's native cell size — so
+    applied to secondary and tertiary), at the finest input's cell size — so
     a tertiary off the side of the primary+secondary union is still rendered.
     Per-channel coverage is tracked: cells outside an input's footprint are
     NaN in that channel, letting the UI render no-coverage cells distinctly.
@@ -439,14 +593,12 @@ def tricolor_compose(
     min_dec = min(primary.min_dec, sec_min_dec, ter_min_dec)
     max_dec = max(primary.max_dec, sec_max_dec, ter_max_dec)
 
-    # Output cell size inherited from primary (same convention as bi-color).
-    p_height, p_width = primary.pixels.shape
+    # Output cell = finest of the three inputs (open-order independent; no input
+    # downsampled below its own pixel size). `pix` subdivides further.
+    cell_ra, cell_dec = _finest_cell([primary, secondary, tertiary])
     if pix is not None and pix > 0:
-        cell_ra = (primary.max_ra - primary.min_ra) / max(p_width - 1, 1) / pix
-        cell_dec = (primary.max_dec - primary.min_dec) / max(p_height - 1, 1) / pix
-    else:
-        cell_ra = (primary.max_ra - primary.min_ra) / max(p_width - 1, 1)
-        cell_dec = (primary.max_dec - primary.min_dec) / max(p_height - 1, 1)
+        cell_ra /= pix
+        cell_dec /= pix
     cell_ra = abs(cell_ra) or 1.0
     cell_dec = abs(cell_dec) or 1.0
     width = max(int(np.ceil((max_ra - min_ra) / cell_ra)) + 1, 1)
@@ -534,13 +686,20 @@ def extend_rgb_compose(
     new_min_dec = min(float(rgb.min_dec), other_min_dec)
     new_max_dec = max(float(rgb.max_dec), other_max_dec)
 
-    # Reuse the existing rgb's cell density so the bi-color's data isn't
-    # interpolated; the grid just grows on whichever side the new image
-    # extends past.
-    cell_ra = (float(rgb.max_ra) - float(rgb.min_ra)) / max(old_width - 1, 1)
-    cell_dec = (float(rgb.max_dec) - float(rgb.min_dec)) / max(old_height - 1, 1)
-    cell_ra = abs(cell_ra) or 1.0
-    cell_dec = abs(cell_dec) or 1.0
+    # Output cell = finer of the existing RGB grid and the new image, so a finer
+    # third image lifts the whole composite to its resolution rather than being
+    # downsampled. When the cell (and thus the shape) changes, the existing
+    # channels are re-gridded below; the grid also grows to cover the new image.
+    cell_ra = min(
+        _cell_of(float(rgb.max_ra) - float(rgb.min_ra), old_width),
+        _cell_of(other.max_ra - other.min_ra, other.pixels.shape[1]),
+    )
+    cell_dec = min(
+        _cell_of(float(rgb.max_dec) - float(rgb.min_dec), old_height),
+        _cell_of(other.max_dec - other.min_dec, other.pixels.shape[0]),
+    )
+    cell_ra = (cell_ra if cell_ra != float("inf") else 1.0) or 1.0
+    cell_dec = (cell_dec if cell_dec != float("inf") else 1.0) or 1.0
     new_width = max(int(np.ceil((new_max_ra - new_min_ra) / cell_ra)) + 1, 1)
     new_height = max(int(np.ceil((new_max_dec - new_min_dec) / cell_dec)) + 1, 1)
     _check_grid_budget(new_width, new_height)
@@ -643,14 +802,12 @@ def _two_image_grid(
     min_dec = min(primary.min_dec, sec_min_dec)
     max_dec = max(primary.max_dec, sec_max_dec)
 
+    # Output cell = finer of the two inputs (open-order independent; neither
+    # downsampled below its own pixel size). `pix` subdivides further.
+    cell_ra, cell_dec = _finest_cell([primary, secondary])
     if pix is not None and pix > 0:
-        p_height, p_width = primary.pixels.shape
-        cell_ra = (primary.max_ra - primary.min_ra) / max(p_width - 1, 1) / pix
-        cell_dec = (primary.max_dec - primary.min_dec) / max(p_height - 1, 1) / pix
-    else:
-        p_height, p_width = primary.pixels.shape
-        cell_ra = (primary.max_ra - primary.min_ra) / max(p_width - 1, 1)
-        cell_dec = (primary.max_dec - primary.min_dec) / max(p_height - 1, 1)
+        cell_ra /= pix
+        cell_dec /= pix
     cell_ra = abs(cell_ra) or 1.0
     cell_dec = abs(cell_dec) or 1.0
     width = max(int(np.ceil((max_ra - min_ra) / cell_ra)) + 1, 1)

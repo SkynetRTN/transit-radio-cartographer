@@ -32,6 +32,7 @@ from .image_compose import (
     bicolor_compose,
     extend_rgb_compose,
     superimpose_images,
+    superimpose_images_multi,
     tricolor_compose,
 )
 from .io.bmp import write_bmp_from_rgb
@@ -382,6 +383,21 @@ def _open_image_path(path: str) -> GriddedImage:
     )
 
 
+def _force_calibrated_if_requested(image: GriddedImage, params: dict[str, Any]) -> GriddedImage:
+    """Force a composite to Jy / flux-calibrated when the user attested it.
+
+    `_combined_flux_state` marks a composite calibrated only when every input
+    carries the `.img` "Jy" unit suffix. But legacy `.img` files never wrote
+    that suffix, so a genuinely-calibrated legacy map reads back as
+    uncalibrated. The compose UI therefore asks the user "are all the images
+    flux calibrated?"; when they answer yes it sends `force_calibrated: true`,
+    and their attestation overrides the on-disk inference here.
+    """
+    if not bool(params.get("force_calibrated", False)):
+        return image
+    return replace_dataclass(image, unit="Jy", flux_calibrated=True, flux_slope=None)
+
+
 _REDUCTION_PARAMS: dict[str, tuple[str, str, float]] = {
     # rpc_key -> (front-end param name, apply_to_survey kwarg, default)
     "smooth": ("width", "window", 5.0),
@@ -472,6 +488,8 @@ class RpcServer:
                 result = self._append_image_multi(params)
             elif method == "superimpose_image":
                 result = self._superimpose_image(params)
+            elif method == "superimpose_image_multi":
+                result = self._superimpose_image_multi(params)
             elif method == "bicolor_image":
                 result = self._bicolor_image(params)
             elif method == "tricolor_image":
@@ -996,6 +1014,7 @@ class RpcServer:
             )
         except ValueError as exc:
             raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        composed = _force_calibrated_if_requested(composed, params)
         new_handle = self._handles.create(composed)
         return self._image_meta(composed, new_handle)
 
@@ -1014,6 +1033,7 @@ class RpcServer:
             composed = append_images_multi(primary, others, pix=pix_int)
         except ValueError as exc:
             raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        composed = _force_calibrated_if_requested(composed, params)
         new_handle = self._handles.create(composed)
         return self._image_meta(composed, new_handle)
 
@@ -1162,6 +1182,26 @@ class RpcServer:
             )
         except ValueError as exc:
             raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        composed = _force_calibrated_if_requested(composed, params)
+        new_handle = self._handles.create(composed)
+        return self._image_meta(composed, new_handle)
+
+    def _superimpose_image_multi(self, params: dict[str, Any]) -> dict[str, Any]:
+        # N-way superimpose: one primary (in-memory handle) + a list of on-disk
+        # images, blended onto a single union grid with every image weighted
+        # equally (no per-image weight — that's only meaningful pairwise).
+        primary = self._resolve_image(int(params.get("handle", -1)))
+        other_paths = params.get("other_paths")
+        if not isinstance(other_paths, list) or not other_paths:
+            raise RpcError(ERR_INVALID_PARAMS, "other_paths (non-empty list) is required")
+        others = [_open_image_path(str(p)) for p in other_paths]
+        pix = params.get("pix")
+        pix_int = int(pix) if pix is not None else None
+        try:
+            composed = superimpose_images_multi(primary, others, pix=pix_int)
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        composed = _force_calibrated_if_requested(composed, params)
         new_handle = self._handles.create(composed)
         return self._image_meta(composed, new_handle)
 

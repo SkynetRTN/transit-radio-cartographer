@@ -134,18 +134,23 @@ export function MainWindow() {
     // so every source is resampled once; the per-file shift step is skipped.
     otherPaths: string[];
     sameCalibration: boolean;
+    // User attested (via the flux-cal-check gate) that all inputs are flux
+    // calibrated even though their calibration sources differ — forces the
+    // composite's Jy label since legacy .img files carry no unit suffix to
+    // infer from.
+    forceCalibrated: boolean;
     weight: number; // 0..1, only used for superimpose
     raShiftSeconds: number;
     decShiftDegrees: number;
-    pix: number;
     stage:
       | 'same-cal'
+      | 'flux-cal-check'
       | 'equal-weight'
       | 'weight-pct'
+      | 'multi-weight-info'
       | 'shift-q'
       | 'shift-ra'
       | 'shift-dec'
-      | 'pix'
       | 'commit';
   }
   const [compose, setCompose] = useState<ComposeStep | null>(null);
@@ -176,7 +181,6 @@ export function MainWindow() {
     // so it uses the secondary shift fields.
     tertiaryRaShiftSeconds: number;
     tertiaryDecShiftDegrees: number;
-    pix: number;
     stage:
       | 'pick-primary-color'
       | 'pick-secondary-color'
@@ -187,7 +191,6 @@ export function MainWindow() {
       | 'tertiary-shift-q'
       | 'tertiary-shift-ra'
       | 'tertiary-shift-dec'
-      | 'pix'
       | 'commit';
   }
   const [colorCompose, setColorCompose] = useState<ColorStep | null>(null);
@@ -206,6 +209,13 @@ export function MainWindow() {
     message: string;
     onYes: () => void;
     onNo: () => void;
+  } | null>(null);
+  // Single-button informational step in a dialog cascade (e.g. telling the user
+  // that a multi-image superimpose weights every image equally). OK proceeds.
+  const [ackPrompt, setAckPrompt] = useState<{
+    title: string;
+    message: string;
+    onOk: () => void;
   } | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   // Confirm before discarding a currently-loaded survey/scan/image when the
@@ -607,15 +617,19 @@ export function MainWindow() {
             { name: 'Image (.img, .fits)', extensions: ['img', 'fits', 'fit'] },
             { name: 'All files', extensions: ['*'] },
           ];
-      // Append accepts several files at once (composed in one pass); superimpose
-      // is inherently pairwise (weighted), so it stays single-select.
+      // Both append and superimpose accept several files at once, composed in a
+      // single pass. Multi-append takes the max on overlap; multi-superimpose
+      // blends every image with equal weight (unequal weights are only
+      // meaningful pairwise — see the 'multi-weight-info' stage below).
       let paths: string[] = [];
       try {
         const selected = await openDialog({
-          multiple: mode === 'append',
+          multiple: true,
           directory: false,
           title:
-            mode === 'append' ? 'Select Image(s) to Append' : 'Select Image to Superimpose',
+            mode === 'append'
+              ? 'Select Image(s) to Append'
+              : 'Select Image(s) to Superimpose',
           filters,
         });
         paths = Array.isArray(selected)
@@ -633,10 +647,10 @@ export function MainWindow() {
         otherPath: paths[0],
         otherPaths: paths,
         sameCalibration: true,
+        forceCalibrated: false,
         weight: 0.5,
         raShiftSeconds: 0,
         decShiftDegrees: 0,
-        pix: 1,
         stage: 'same-cal',
       });
     },
@@ -647,6 +661,7 @@ export function MainWindow() {
     setCompose(null);
     setYesNoPrompt(null);
     setNumericPrompt(null);
+    setAckPrompt(null);
   }, []);
 
   // Walk through the dialog cascade based on the current `compose.stage`.
@@ -657,14 +672,20 @@ export function MainWindow() {
     const next = (patch: Partial<ComposeStep>) => setCompose((c) => (c ? { ...c, ...patch } : c));
 
     if (compose.stage === 'same-cal') {
-      // Multi-file append skips the per-file shift step (there's no sensible
-      // single shift across N files), so it jumps straight to the pixel prompt.
-      const isMultiAppend = compose.mode === 'append' && compose.otherPaths.length > 1;
-      const afterCal: ComposeStep['stage'] =
-        compose.mode === 'superimpose' ? 'equal-weight' : isMultiAppend ? 'pix' : 'shift-q';
+      // Multi-file compose (append or superimpose) skips the per-file shift step
+      // — there's no sensible single shift across N files. Multi-append commits
+      // straight away; multi-superimpose first shows the equal-weighting notice,
+      // then commits.
+      const isMulti = compose.otherPaths.length > 1;
+      let afterCal: ComposeStep['stage'];
+      if (compose.mode === 'superimpose') {
+        afterCal = isMulti ? 'multi-weight-info' : 'equal-weight';
+      } else {
+        afterCal = isMulti ? 'commit' : 'shift-q';
+      }
       setYesNoPrompt({
         title: 'Calibration check',
-        message: isMultiAppend
+        message: isMulti
           ? 'Do all the images use the same calibration?'
           : 'Do the two images use the same calibration?',
         onYes: () => {
@@ -672,11 +693,49 @@ export function MainWindow() {
           next({ sameCalibration: true, stage: afterCal });
         },
         onNo: () => {
+          // Different calibration sources are only safe to combine if every
+          // image is already on a common flux (Jy) scale — ask, and block if
+          // not. (See the 'flux-cal-check' stage.)
           setYesNoPrompt(null);
-          setWarning(
-            'Images with different calibrations may produce nonsensical composites — proceeding anyway.',
-          );
-          next({ sameCalibration: false, stage: afterCal });
+          next({ sameCalibration: false, stage: 'flux-cal-check' });
+        },
+      });
+      return;
+    }
+
+    if (compose.stage === 'flux-cal-check') {
+      // Reached only when the images don't share a calibration source. They can
+      // still be combined iff they're all flux-calibrated (same Jy scale);
+      // otherwise the max/average would mix incompatible units, so we stop and
+      // send the user back to flux-calibrate first.
+      const isMulti = compose.otherPaths.length > 1;
+      let afterCal: ComposeStep['stage'];
+      if (compose.mode === 'superimpose') {
+        afterCal = isMulti ? 'multi-weight-info' : 'equal-weight';
+      } else {
+        afterCal = isMulti ? 'commit' : 'shift-q';
+      }
+      setYesNoPrompt({
+        title: 'Flux calibration check',
+        message: isMulti
+          ? 'Are all the images flux calibrated?'
+          : 'Are both images flux calibrated?',
+        onYes: () => {
+          // They share a common flux (Jy) scale even though their calibration
+          // sources differ — force the composite's calibrated state since
+          // legacy .img inputs carry no unit suffix to infer it from.
+          setYesNoPrompt(null);
+          next({ forceCalibrated: true, stage: afterCal });
+        },
+        onNo: () => {
+          setYesNoPrompt(null);
+          setAckPrompt({
+            title: 'Flux calibration required',
+            message: 'Please flux calibrate before combining files.',
+            // Return to the image the user had open (cancelCompose leaves the
+            // underlying image view untouched — the dialogs are just overlays).
+            onOk: cancelCompose,
+          });
         },
       });
       return;
@@ -718,6 +777,22 @@ export function MainWindow() {
       return;
     }
 
+    if (compose.stage === 'multi-weight-info') {
+      // Superimposing 3+ images at once: weights are fixed equal (per-image
+      // weights only make sense when folding one image in at a time). Notify
+      // the user, then skip the weight/shift prompts and commit.
+      setAckPrompt({
+        title: 'Equal weighting',
+        message:
+          'When superimposing multiple images at once, they will all be weighted evenly. If you would like to adjust weights of individual images please superimpose one by one.',
+        onOk: () => {
+          setAckPrompt(null);
+          next({ stage: 'commit' });
+        },
+      });
+      return;
+    }
+
     if (compose.stage === 'shift-q') {
       setYesNoPrompt({
         title: 'Shift second image?',
@@ -728,7 +803,7 @@ export function MainWindow() {
         },
         onNo: () => {
           setYesNoPrompt(null);
-          next({ raShiftSeconds: 0, decShiftDegrees: 0, stage: 'pix' });
+          next({ raShiftSeconds: 0, decShiftDegrees: 0, stage: 'commit' });
         },
       });
       return;
@@ -755,21 +830,7 @@ export function MainWindow() {
         defaultValue: 0,
         onSubmit: (value) => {
           setNumericPrompt(null);
-          next({ decShiftDegrees: value, stage: 'pix' });
-        },
-      });
-      return;
-    }
-
-    if (compose.stage === 'pix') {
-      setNumericPrompt({
-        title: 'Grid coarseness',
-        label: 'Grid coarseness (1 = finest):',
-        hint: 'Subdivision of the native pixel size. 1 keeps each map at its own pixel size (0.06° by default); larger values subdivide the grid finer.',
-        defaultValue: compose.pix,
-        onSubmit: (value) => {
-          setNumericPrompt(null);
-          next({ pix: Math.max(1, Math.trunc(value)), stage: 'commit' });
+          next({ decShiftDegrees: value, stage: 'commit' });
         },
       });
       return;
@@ -784,18 +845,24 @@ export function MainWindow() {
           const meta =
             c.mode === 'append'
               ? c.otherPaths.length > 1
-                ? await rpcClient.appendImageMulti(image.handle, c.otherPaths, { pix: c.pix })
+                ? await rpcClient.appendImageMulti(image.handle, c.otherPaths, {
+                    force_calibrated: c.forceCalibrated,
+                  })
                 : await rpcClient.appendImage(image.handle, c.otherPath, {
                     ra_shift_seconds: c.raShiftSeconds,
                     dec_shift_degrees: c.decShiftDegrees,
-                    pix: c.pix,
+                    force_calibrated: c.forceCalibrated,
                   })
-              : await rpcClient.superimposeImage(image.handle, c.otherPath, {
-                  weight: c.weight,
-                  ra_shift_seconds: c.raShiftSeconds,
-                  dec_shift_degrees: c.decShiftDegrees,
-                  pix: c.pix,
-                });
+              : c.otherPaths.length > 1
+                ? await rpcClient.superimposeImageMulti(image.handle, c.otherPaths, {
+                    force_calibrated: c.forceCalibrated,
+                  })
+                : await rpcClient.superimposeImage(image.handle, c.otherPath, {
+                    weight: c.weight,
+                    ra_shift_seconds: c.raShiftSeconds,
+                    dec_shift_degrees: c.decShiftDegrees,
+                    force_calibrated: c.forceCalibrated,
+                  });
           await adoptImage(meta, null);
         } catch (e) {
           setWarning((e as Error).message);
@@ -870,7 +937,6 @@ export function MainWindow() {
         decShiftDegrees: 0,
         tertiaryRaShiftSeconds: 0,
         tertiaryDecShiftDegrees: 0,
-        pix: 1,
         // tricolor-from-rgb auto-fills the unused channel — no color picks.
         // All other modes ask the user to pick colors explicitly.
         stage: mode === 'tricolor-from-rgb' ? 'same-cal' : 'pick-primary-color',
@@ -943,10 +1009,10 @@ export function MainWindow() {
     }
     // Tricolor-from-scalar takes three fresh inputs and needs an independent
     // shift cascade for the tertiary image; the other two modes only ever
-    // shift a single new image, so they jump straight to 'pix' after the
-    // secondary shift.
+    // shift a single new image, so they commit straight after the secondary
+    // shift.
     const afterSecondaryShift =
-      colorCompose.mode === 'tricolor-from-scalar' ? 'tertiary-shift-q' : 'pix';
+      colorCompose.mode === 'tricolor-from-scalar' ? 'tertiary-shift-q' : 'commit';
     if (colorCompose.stage === 'shift-q') {
       setYesNoPrompt({
         title: 'Shift second image?',
@@ -999,7 +1065,7 @@ export function MainWindow() {
           next({
             tertiaryRaShiftSeconds: 0,
             tertiaryDecShiftDegrees: 0,
-            stage: 'pix',
+            stage: 'commit',
           });
         },
       });
@@ -1024,20 +1090,7 @@ export function MainWindow() {
         defaultValue: 0,
         onSubmit: (value) => {
           setNumericPrompt(null);
-          next({ tertiaryDecShiftDegrees: value, stage: 'pix' });
-        },
-      });
-      return;
-    }
-    if (colorCompose.stage === 'pix') {
-      setNumericPrompt({
-        title: 'Grid coarseness',
-        label: 'Grid coarseness (1 = finest):',
-        hint: 'Subdivision of the native pixel size. 1 keeps each map at its own pixel size (0.06° by default); larger values subdivide the grid finer.',
-        defaultValue: colorCompose.pix,
-        onSubmit: (value) => {
-          setNumericPrompt(null);
-          next({ pix: Math.max(1, Math.trunc(value)), stage: 'commit' });
+          next({ tertiaryDecShiftDegrees: value, stage: 'commit' });
         },
       });
       return;
@@ -1065,7 +1118,6 @@ export function MainWindow() {
               {
                 ra_shift_seconds: c.raShiftSeconds,
                 dec_shift_degrees: c.decShiftDegrees,
-                pix: c.pix,
               },
             );
           } else if (c.mode === 'tricolor-from-scalar') {
@@ -1139,7 +1191,6 @@ export function MainWindow() {
                 dec_shift_degrees: c.decShiftDegrees,
                 tertiary_ra_shift_seconds: c.tertiaryRaShiftSeconds,
                 tertiary_dec_shift_degrees: c.tertiaryDecShiftDegrees,
-                pix: c.pix,
               },
             );
             meta = intermediate;
@@ -1805,6 +1856,14 @@ export function MainWindow() {
             cancelCompose();
             cancelColorCompose();
           }}
+        />
+      )}
+      {ackPrompt && (
+        <ConfirmDialog
+          title={ackPrompt.title}
+          message={ackPrompt.message}
+          onConfirm={ackPrompt.onOk}
+          onCancel={cancelCompose}
         />
       )}
       {numericPrompt && (

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 
@@ -15,6 +17,7 @@ from radio_cartographer.image_compose import (
     bicolor_compose,
     extend_rgb_compose,
     superimpose_images,
+    superimpose_images_multi,
     tricolor_compose,
 )
 
@@ -53,6 +56,34 @@ def test_append_overlap_uses_max():
     assert out.pixels.max() == 3.0
     # Cells covered only by `a` keep 1.0.
     assert (out.pixels == 1.0).any()
+
+
+def test_append_uses_finest_cell_independent_of_open_order():
+    # Different pixel sizes: a coarse wide map (cell = 10) and a fine small map
+    # (cell = 0.1). The composite must adopt the FINEST input's cell regardless
+    # of which image is the primary, so no map is downsampled to whichever
+    # happened to be open first.
+    coarse = _make(11, 11, 0.0, 100.0, 0.0, 100.0, fill=1.0)  # cell = 100/10 = 10
+    fine = _make(101, 101, 0.0, 10.0, 0.0, 10.0, fill=2.0)  # cell = 10/100 = 0.1
+    coarse_primary = append_images(coarse, fine)
+    fine_primary = append_images(fine, coarse)
+    # Same (fine) grid either way — resolution is open-order independent.
+    assert coarse_primary.pixels.shape == fine_primary.pixels.shape
+    # And it's the fine cell (~0.1), not the coarse one (10).
+    assert abs(coarse_primary.wcs.cdelt2) < 1.0
+    assert abs(fine_primary.wcs.cdelt2) < 1.0
+
+
+def test_append_multi_uses_finest_cell_across_all_inputs():
+    # The finest map is neither the primary nor first in `others` — its cell
+    # must still drive the output grid.
+    coarse = _make(11, 11, 0.0, 100.0, 0.0, 100.0, fill=1.0)  # cell = 10
+    mid = _make(21, 21, 0.0, 100.0, 0.0, 100.0, fill=2.0)  # cell = 5
+    fine = _make(201, 201, 0.0, 100.0, 0.0, 100.0, fill=3.0)  # cell = 0.5
+    out = append_images_multi(coarse, [mid, fine])
+    # Grid adopts the finest (0.5) cell → ~201 cells across the 100-wide span.
+    assert out.pixels.shape[1] >= 190
+    assert abs(out.wcs.cdelt1) < 1.0
 
 
 def test_superimpose_overlap_uses_weighted_average():
@@ -150,6 +181,149 @@ def test_append_multi_rejects_grid_explosion():
     secondary = _make(*_MISMATCHED_SECONDARY, fill=2.0)
     with pytest.raises(ValueError, match="combined sky area"):
         append_images_multi(primary, [secondary])
+
+
+# ── N-way superimpose (equal-weight blend) ───────────────────────────────────
+
+
+def test_superimpose_multi_requires_at_least_one_other():
+    a = _make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=1.0)
+    with pytest.raises(ValueError, match="at least one"):
+        superimpose_images_multi(a, [])
+
+
+def test_superimpose_multi_shifts_length_must_match():
+    a = _make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=1.0)
+    b = _make(11, 11, 10.0, 20.0, 0.0, 10.0, fill=2.0)
+    with pytest.raises(ValueError, match="shifts length"):
+        superimpose_images_multi(a, [b], shifts=[(0.0, 0.0), (0.0, 0.0)])
+
+
+def test_superimpose_multi_overlap_is_equal_weight_mean():
+    # Three fully-overlapping maps with fills 3, 6, 9 → every covered cell is the
+    # mean (6.0), regardless of argument order.
+    a = _make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=3.0)
+    b = _make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=6.0)
+    c = _make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=9.0)
+    out1 = superimpose_images_multi(a, [b, c])
+    out2 = superimpose_images_multi(c, [b, a])
+    finite = out1.pixels[np.isfinite(out1.pixels)]
+    assert np.allclose(finite, 6.0)
+    np.testing.assert_allclose(out1.pixels, out2.pixels, equal_nan=True)
+
+
+def test_superimpose_multi_partial_overlap_averages_only_covering_inputs():
+    # a covers 0..10, b covers 5..15, both fill 2 and 6. The overlap (5..10) is
+    # the mean (4.0); a-only cells keep 2.0; b-only cells keep 6.0. This matches
+    # pairwise superimpose at weight 0.5.
+    a = _make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=2.0)
+    b = _make(11, 11, 5.0, 15.0, 0.0, 10.0, fill=6.0)
+    out = superimpose_images_multi(a, [b])
+    assert np.any(np.isclose(out.pixels, 4.0))
+    assert (out.pixels == 2.0).any()
+    assert (out.pixels == 6.0).any()
+
+
+def test_superimpose_multi_matches_pairwise_half_weight():
+    # Two overlapping maps: the one-shot multi result equals pairwise
+    # superimpose at weight 0.5 cell-for-cell (both are the equal-weight mean).
+    a = _make(21, 21, 0.0, 20.0, 0.0, 20.0, fill=2.0)
+    a.pixels[5, 5] = 10.0
+    b = _make(11, 11, 5.0, 15.0, 5.0, 15.0, fill=8.0)
+    multi = superimpose_images_multi(a, [b])
+    pair = superimpose_images(a, b, weight=0.5)
+    assert multi.pixels.shape == pair.pixels.shape
+    np.testing.assert_allclose(multi.pixels, pair.pixels, equal_nan=True)
+
+
+def test_superimpose_multi_disjoint_gaps_render_as_nan():
+    a = _make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=1.0)
+    b = _make(11, 11, 20.0, 30.0, 0.0, 10.0, fill=2.0)
+    out = superimpose_images_multi(a, [b])
+    assert np.isnan(out.pixels).any(), "no-coverage gap should be NaN, not 0.0"
+    finite = out.pixels[np.isfinite(out.pixels)]
+    assert (finite == 1.0).any() and (finite == 2.0).any()
+
+
+def test_superimpose_multi_rejects_grid_explosion():
+    primary = _make(*_FINE_PRIMARY, fill=1.0)
+    secondary = _make(*_MISMATCHED_SECONDARY, fill=2.0)
+    with pytest.raises(ValueError, match="combined sky area"):
+        superimpose_images_multi(primary, [secondary])
+
+
+# ── Flux-calibration state propagates through compose ────────────────────────
+#
+# The "this map is flux-calibrated" fact lives only in the `.img` unit suffix on
+# disk, so a composite must carry it (unit="Jy", flux_calibrated=True) whenever
+# every input is calibrated — otherwise saving the composite and reopening it in
+# a fresh instance (no .cal loaded) would show it as uncalibrated.
+
+
+def _cal(img: GriddedImage) -> GriddedImage:
+    """Mark an image flux-calibrated (Jy), as apply_flux_calibration_image does."""
+    return dataclasses.replace(img, unit="Jy", flux_calibrated=True, flux_slope=2.0)
+
+
+def test_append_both_calibrated_composite_is_calibrated():
+    a = _cal(_make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=1.0))
+    b = _cal(_make(11, 11, 5.0, 15.0, 0.0, 10.0, fill=3.0))
+    out = append_images(a, b)
+    assert out.flux_calibrated is True
+    assert out.unit == "Jy"
+    # A composite blends sources, so it isn't single-slope revertible.
+    assert out.flux_slope is None
+
+
+def test_superimpose_both_calibrated_composite_is_calibrated():
+    a = _cal(_make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=2.0))
+    b = _cal(_make(11, 11, 5.0, 15.0, 0.0, 10.0, fill=6.0))
+    out = superimpose_images(a, b, weight=0.5)
+    assert out.flux_calibrated is True
+    assert out.unit == "Jy"
+
+
+def test_compose_mixed_calibration_is_not_calibrated():
+    # One calibrated (Jy), one not: the composite can't claim a Jy scale.
+    a = _cal(_make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=1.0))
+    b = _make(11, 11, 5.0, 15.0, 0.0, 10.0, fill=3.0)  # unit=None, uncalibrated
+    out = append_images(a, b)
+    assert out.flux_calibrated is False
+
+
+def test_append_multi_all_calibrated_composite_is_calibrated():
+    a = _cal(_make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=1.0))
+    b = _cal(_make(11, 11, 10.0, 20.0, 0.0, 10.0, fill=2.0))
+    c = _cal(_make(11, 11, 20.0, 30.0, 0.0, 10.0, fill=3.0))
+    out = append_images_multi(a, [b, c])
+    assert out.flux_calibrated is True
+    assert out.unit == "Jy"
+
+
+def test_append_multi_one_uncalibrated_is_not_calibrated():
+    a = _cal(_make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=1.0))
+    b = _cal(_make(11, 11, 10.0, 20.0, 0.0, 10.0, fill=2.0))
+    c = _make(11, 11, 20.0, 30.0, 0.0, 10.0, fill=3.0)  # uncalibrated
+    out = append_images_multi(a, [b, c])
+    assert out.flux_calibrated is False
+
+
+def test_superimpose_multi_all_calibrated_composite_is_calibrated():
+    a = _cal(_make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=2.0))
+    b = _cal(_make(11, 11, 5.0, 15.0, 0.0, 10.0, fill=6.0))
+    out = superimpose_images_multi(a, [b])
+    assert out.flux_calibrated is True
+    assert out.unit == "Jy"
+
+
+def test_compose_all_gcu_preserves_gcu_label_uncalibrated():
+    # Same agreed unit (GCU) but not flux-calibrated: keep the label, stay
+    # uncalibrated so a later .cal load can still promote it.
+    a = dataclasses.replace(_make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=1.0), unit="GCU")
+    b = dataclasses.replace(_make(11, 11, 5.0, 15.0, 0.0, 10.0, fill=3.0), unit="GCU")
+    out = append_images(a, b)
+    assert out.flux_calibrated is False
+    assert out.unit == "GCU"
 
 
 # ── Grid-budget guard (BUG-009) ──────────────────────────────────────────────
