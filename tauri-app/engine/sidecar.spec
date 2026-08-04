@@ -14,6 +14,15 @@ block_cipher = None
 
 apple_identity = os.environ.get('APPLE_SIGNING_IDENTITY', None)
 
+# Signing with an identity turns on the hardened runtime, which enforces library
+# validation and so refuses to dlopen the adhoc-signed libpython this onefile
+# binary unpacks at startup. Reuse the same entitlements plist Tauri signs the
+# bundle with so the standalone binary and the copy inside the .app behave
+# identically. See the comments in that file for the full failure mode.
+entitlements = os.path.normpath(
+    os.path.join(SPEC_DIR, os.pardir, "app", "src-tauri", "Entitlements.plist")
+)
+
 a = Analysis(
     ["sidecar_entry.py"],
     pathex=[os.path.join(SPEC_DIR, "src")],
@@ -66,5 +75,6 @@ exe = EXE(
     # allocation. Trade-off: if the sidecar ever crashes hard, its stderr is
     # discarded; users only see Tauri's `sidecar_eof` / `spawn_failed` toast.
     console=False,
-    codesign_identity=apple_identity
+    codesign_identity=apple_identity,
+    entitlements_file=entitlements if apple_identity else None,
 )
