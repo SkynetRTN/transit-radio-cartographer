@@ -126,6 +126,26 @@ def _survey_from_workspace_sources(ws: "SurveyWorkspace") -> Survey:
     )
 
 
+def _validate_vb_name(name: Any) -> str:
+    """Validate a user-supplied name destined for a legacy line-oriented file.
+
+    The legacy formats are written via VB `Print #1` semantics as strict
+    ASCII, so a non-ASCII name would only fail later — at save time, as an
+    opaque I/O error after the user has finished their whole reduction.
+    Embedded CR/LF would corrupt the line-oriented framing outright. Reject
+    both up front, at rename time, with a message that names the cause.
+    """
+    if not isinstance(name, str):
+        raise RpcError(ERR_INVALID_PARAMS, "name must be a string")
+    if not name.isascii() or "\r" in name or "\n" in name:
+        raise RpcError(
+            ERR_INVALID_PARAMS,
+            "name must contain only plain ASCII characters (no accents or "
+            "line breaks) — the legacy file formats cannot store anything else",
+        )
+    return name
+
+
 def _array_to_jsonable_list(arr: NDArray) -> list:
     """Convert a numpy float array to a JSON-safe nested Python list.
 
@@ -375,6 +395,8 @@ class RpcError(Exception):
         self.data = data or {}
 
 
+ERR_PARSE = -32700
+ERR_INVALID_REQUEST = -32600
 ERR_INVALID_PARAMS = -32602
 ERR_INTERNAL = -32603
 ERR_UNKNOWN_METHOD = -32601
@@ -383,9 +405,16 @@ ERR_IO = 1002
 
 
 class BinaryChannel:
+    # No RPC method ever explicitly frees a frame, so the store must bound
+    # itself: without a cap, every get_sweep call would permanently retain
+    # three array copies for the lifetime of the sidecar. Oldest-first
+    # eviction keeps recently issued tokens resolvable.
+    MAX_BYTES = 64 * 1024 * 1024
+
     def __init__(self) -> None:
         self._store: dict[str, bytes] = {}
         self._next = 1
+        self._total_bytes = 0
 
     def put_array(self, arr: np.ndarray) -> dict[str, Any]:
         buf = io.BytesIO()
@@ -393,7 +422,14 @@ class BinaryChannel:
         payload = buf.getvalue()
         token = f"bin-{self._next}"
         self._next += 1
-        self._store[token] = struct.pack("<Q", len(payload)) + payload
+        frame = struct.pack("<Q", len(payload)) + payload
+        self._store[token] = frame
+        self._total_bytes += len(frame)
+        # dict preserves insertion order; evict oldest first, but never the
+        # frame just stored.
+        while self._total_bytes > self.MAX_BYTES and len(self._store) > 1:
+            oldest = next(iter(self._store))
+            self._total_bytes -= len(self._store.pop(oldest))
         return {"token": token, "size": len(payload)}
 
     def get_array(self, token: str) -> np.ndarray:
@@ -673,9 +709,9 @@ class RpcServer:
         else:
             ra, dec, flux = sweep.ra, sweep.dec, sweep.flux
         return {
-            "ra": ra.tolist(),
-            "dec": dec.tolist(),
-            "flux": flux.tolist(),
+            "ra": _array_to_jsonable_list(ra),
+            "dec": _array_to_jsonable_list(dec),
+            "flux": _array_to_jsonable_list(flux),
             "sample_count": n,
             "returned_count": int(flux.shape[0]),
         }
@@ -884,7 +920,7 @@ class RpcServer:
                     palette=palette,
                     flux_min=flux_min,
                     flux_max=flux_max,
-                    name=str(params.get("name", "image")),
+                    name=_validate_vb_name(str(params.get("name", "image"))),
                     pix=int(params.get("pix", 1)),
                     unit=unit,
                 )
@@ -965,6 +1001,9 @@ class RpcServer:
             "max_ra": float(image.max_ra),
             "min_dec": float(image.min_dec),
             "max_dec": float(image.max_dec),
+            # "r"/"g"/"b" for a bi-color result, null once all three channels
+            # are populated. Authoritative — recorded at compose time.
+            "unused_channel": image.unused_channel,
         }
 
     def _bicolor_image(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1169,9 +1208,9 @@ class RpcServer:
         max_points = int(params.get("max_points", 4000))
         ra, dec, flux_d = _maybe_downsample(raw.ra, raw.dec, flux, max_points)
         return {
-            "ra": ra.tolist(),
-            "dec": dec.tolist(),
-            "flux": flux_d.tolist(),
+            "ra": _array_to_jsonable_list(ra),
+            "dec": _array_to_jsonable_list(dec),
+            "flux": _array_to_jsonable_list(flux_d),
             "sample_count": int(raw.flux.shape[0]),
             "returned_count": int(flux_d.shape[0]),
             "index": index,
@@ -1225,15 +1264,15 @@ class RpcServer:
             return {
                 "label": bracket_label,
                 "on": {
-                    "ra": on.ra.tolist(),
-                    "dec": on.dec.tolist(),
-                    "flux": on.flux.tolist(),
+                    "ra": _array_to_jsonable_list(on.ra),
+                    "dec": _array_to_jsonable_list(on.dec),
+                    "flux": _array_to_jsonable_list(on.flux),
                     "mask": on_mask.astype(bool).tolist(),
                 },
                 "off": {
-                    "ra": off.ra.tolist(),
-                    "dec": off.dec.tolist(),
-                    "flux": off.flux.tolist(),
+                    "ra": _array_to_jsonable_list(off.ra),
+                    "dec": _array_to_jsonable_list(off.dec),
+                    "flux": _array_to_jsonable_list(off.flux),
                     "mask": off_mask.astype(bool).tolist(),
                 },
             }
@@ -1316,10 +1355,7 @@ class RpcServer:
         # the .srv `label2` on save, so changing it here is enough to persist
         # across save → close → reopen.
         ws = self._resolve_workspace(int(params.get("handle", -1)))
-        name = params.get("name")
-        if not isinstance(name, str):
-            raise RpcError(ERR_INVALID_PARAMS, "name must be a string")
-        ws.name = name
+        ws.name = _validate_vb_name(params.get("name"))
         return self._workspace_overview(ws)
 
     # ─────────────────────────────────────────────────────────────────────
@@ -1417,9 +1453,9 @@ class RpcServer:
                 "calibrated": True,
                 "unit": "jy" if ws.flux_calibrated else "gain",
                 "source": {
-                    "ra": ws.source_ra.tolist(),
-                    "dec": ws.source_dec.tolist(),
-                    "flux": flux.tolist(),
+                    "ra": _array_to_jsonable_list(ws.source_ra),
+                    "dec": _array_to_jsonable_list(ws.source_dec),
+                    "flux": _array_to_jsonable_list(flux),
                     "mask": ws.source_mask.astype(bool).tolist(),
                 },
                 "peak_flux": float(ws.peak_flux) if ws.peak_flux is not None else None,
@@ -1432,33 +1468,33 @@ class RpcServer:
             "calibrated": False,
             "unit": "volts",
             "initial_on": {
-                "ra": ws.initial.on_ra.tolist(),
-                "dec": ws.initial.on_dec.tolist(),
-                "flux": ws.initial.on_flux.tolist(),
+                "ra": _array_to_jsonable_list(ws.initial.on_ra),
+                "dec": _array_to_jsonable_list(ws.initial.on_dec),
+                "flux": _array_to_jsonable_list(ws.initial.on_flux),
                 "mask": ws.initial.on_mask.astype(bool).tolist(),
             },
             "initial_off": {
-                "ra": ws.initial.off_ra.tolist(),
-                "dec": ws.initial.off_dec.tolist(),
-                "flux": ws.initial.off_flux.tolist(),
+                "ra": _array_to_jsonable_list(ws.initial.off_ra),
+                "dec": _array_to_jsonable_list(ws.initial.off_dec),
+                "flux": _array_to_jsonable_list(ws.initial.off_flux),
                 "mask": ws.initial.off_mask.astype(bool).tolist(),
             },
             "source": {
-                "ra": ws.source_ra.tolist(),
-                "dec": ws.source_dec.tolist(),
-                "flux": ws.source_flux.tolist(),
+                "ra": _array_to_jsonable_list(ws.source_ra),
+                "dec": _array_to_jsonable_list(ws.source_dec),
+                "flux": _array_to_jsonable_list(ws.source_flux),
                 "mask": ws.source_mask.astype(bool).tolist(),
             },
             "terminal_on": {
-                "ra": ws.terminal.on_ra.tolist(),
-                "dec": ws.terminal.on_dec.tolist(),
-                "flux": ws.terminal.on_flux.tolist(),
+                "ra": _array_to_jsonable_list(ws.terminal.on_ra),
+                "dec": _array_to_jsonable_list(ws.terminal.on_dec),
+                "flux": _array_to_jsonable_list(ws.terminal.on_flux),
                 "mask": ws.terminal.on_mask.astype(bool).tolist(),
             },
             "terminal_off": {
-                "ra": ws.terminal.off_ra.tolist(),
-                "dec": ws.terminal.off_dec.tolist(),
-                "flux": ws.terminal.off_flux.tolist(),
+                "ra": _array_to_jsonable_list(ws.terminal.off_ra),
+                "dec": _array_to_jsonable_list(ws.terminal.off_dec),
+                "flux": _array_to_jsonable_list(ws.terminal.off_flux),
                 "mask": ws.terminal.off_mask.astype(bool).tolist(),
             },
         }
@@ -1471,15 +1507,15 @@ class RpcServer:
             return {
                 "label": label,
                 "on": {
-                    "ra": br.on_ra.tolist(),
-                    "dec": br.on_dec.tolist(),
-                    "flux": br.on_flux.tolist(),
+                    "ra": _array_to_jsonable_list(br.on_ra),
+                    "dec": _array_to_jsonable_list(br.on_dec),
+                    "flux": _array_to_jsonable_list(br.on_flux),
                     "mask": br.on_mask.astype(bool).tolist(),
                 },
                 "off": {
-                    "ra": br.off_ra.tolist(),
-                    "dec": br.off_dec.tolist(),
-                    "flux": br.off_flux.tolist(),
+                    "ra": _array_to_jsonable_list(br.off_ra),
+                    "dec": _array_to_jsonable_list(br.off_dec),
+                    "flux": _array_to_jsonable_list(br.off_flux),
                     "mask": br.off_mask.astype(bool).tolist(),
                 },
             }
@@ -1546,10 +1582,7 @@ class RpcServer:
         # serialises this name into the .scn file's `Scan.name`, which is what
         # `scan_from_scn` reads back on reopen.
         ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
-        name = params.get("name")
-        if not isinstance(name, str):
-            raise RpcError(ERR_INVALID_PARAMS, "name must be a string")
-        ws.name = name
+        ws.name = _validate_vb_name(params.get("name"))
         return self._scan_overview(ws)
 
     def _select_scan_declination(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1952,8 +1985,28 @@ def serve(stdin: Any = sys.stdin, stdout: Any = sys.stdout) -> int:
     for line in stdin:
         if not line.strip():
             continue
-        req = json.loads(line)
-        resp = server.handle_request(req)
+        # PROTOCOL.md: the sidecar must return structured errors and keep
+        # serving. A garbled line must not take down every open handle.
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError as err:
+            resp = {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": ERR_PARSE, "message": f"parse error: {err}"},
+            }
+        else:
+            if isinstance(req, dict):
+                resp = server.handle_request(req)
+            else:
+                resp = {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {
+                        "code": ERR_INVALID_REQUEST,
+                        "message": "request must be a JSON object",
+                    },
+                }
         stdout.write(json.dumps(resp) + "\n")
         stdout.flush()
         if server._shutdown:

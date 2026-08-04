@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { rpcClient, type ImageMeta, type ImagePixels } from '../ipc/client';
 import { useSurvey } from '../state/survey-context';
 import { ImagePlot } from '../lib/plots/ImagePlot';
@@ -17,6 +17,8 @@ export function PreImageView() {
     setViewMode,
     makeImage,
     imageDisplay,
+    reductionsDone,
+    markReductionDone,
   } = useSurvey();
   const [imagePixels, setImagePixels] = useState<ImagePixels | null>(null);
   const [imageMeta, setImageMeta] = useState<ImageMeta | null>(null);
@@ -25,13 +27,10 @@ export function PreImageView() {
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState<NumericPrompt | null>(null);
-  // Track whether each reduction has been run at least once in this Pre Image
-  // session. The Make Image button only enables after all three have fired —
-  // returning to the per-sweep view unmounts this component, so the flags
-  // implicitly reset on re-entry.
-  const [didSmooth, setDidSmooth] = useState(false);
-  const [didBaseline, setDidBaseline] = useState(false);
-  const [didAlign, setDidAlign] = useState(false);
+  // Handle of the preview image currently held by the engine. Each
+  // generateImage call allocates a fresh engine-side image, so the previous
+  // one must be closed or it stays pinned in engine memory for the session.
+  const previewHandleRef = useRef<number | null>(null);
 
   const generateImage = useCallback(
     async (pixValue: number) => {
@@ -45,6 +44,11 @@ export function PreImageView() {
         const pixels = await rpcClient.getImagePixels(meta.handle);
         setImagePixels(pixels);
         setStatus(null);
+        const prev = previewHandleRef.current;
+        previewHandleRef.current = meta.handle;
+        if (prev !== null && prev !== meta.handle) {
+          void rpcClient.closeHandle(prev).catch(() => {});
+        }
       } catch (e) {
         setError((e as Error).message);
         setStatus(null);
@@ -53,6 +57,17 @@ export function PreImageView() {
       }
     },
     [survey, workspaceHandle],
+  );
+
+  // Release the last preview on unmount. The committed image made via the
+  // context's makeImage is a separate handle, so this never closes it.
+  useEffect(
+    () => () => {
+      const h = previewHandleRef.current;
+      previewHandleRef.current = null;
+      if (h !== null) void rpcClient.closeHandle(h).catch(() => {});
+    },
+    [],
   );
 
   useEffect(() => {
@@ -103,7 +118,7 @@ export function PreImageView() {
     try {
       await rpcClient.smooth(survey.handle, 5, workspaceHandle);
       await generateImage(pix);
-      setDidSmooth(true);
+      markReductionDone('smooth');
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -126,7 +141,7 @@ export function PreImageView() {
         try {
           await rpcClient.baseline(survey.handle, value, workspaceHandle);
           await generateImage(pix);
-          setDidBaseline(true);
+          markReductionDone('baseline');
         } catch (e) {
           setError((e as Error).message);
         } finally {
@@ -151,7 +166,7 @@ export function PreImageView() {
         try {
           await rpcClient.align(survey.handle, value, workspaceHandle);
           await generateImage(pix);
-          setDidAlign(true);
+          markReductionDone('align');
         } catch (e) {
           setError((e as Error).message);
         } finally {
@@ -170,11 +185,12 @@ export function PreImageView() {
     setViewMode('survey');
   }, [setViewMode]);
 
-  const canMakeImage = didSmooth && didBaseline && didAlign;
+  const canMakeImage =
+    reductionsDone.smooth && reductionsDone.baseline && reductionsDone.align;
   const remainingSteps: string[] = [];
-  if (!didSmooth) remainingSteps.push('smooth sweeps');
-  if (!didBaseline) remainingSteps.push('apply a baseline');
-  if (!didAlign) remainingSteps.push('align sweeps');
+  if (!reductionsDone.smooth) remainingSteps.push('smooth sweeps');
+  if (!reductionsDone.baseline) remainingSteps.push('apply a baseline');
+  if (!reductionsDone.align) remainingSteps.push('align sweeps');
   const makeImageTitle = canMakeImage
     ? 'Build the gridded image at a chosen pixel resolution (default 2)'
     : `Before making the image you must: smooth sweeps, apply a baseline, align sweeps. Remaining: ${remainingSteps.join(', ')}.`;

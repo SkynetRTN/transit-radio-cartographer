@@ -104,7 +104,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
         setError('Engine handle expired. Please re-open your files.');
         return;
       }
-      handleRpcError(e);
+      setError(e instanceof Error ? e.message : String(e));
     },
     [resetForEngineRestart],
   );

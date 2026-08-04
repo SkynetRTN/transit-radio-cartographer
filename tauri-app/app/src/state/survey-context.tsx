@@ -69,6 +69,15 @@ export interface SurveyState {
   // mode flips to 'pre-image' so the user can render the gridded image.
   currentSweepIndex: number;
   acceptedSweeps: Set<number>;
+  // Which pre-image reductions have been applied to the engine workspace.
+  // Lives here (not in PreImageView) so "Back to Pre Image" from the Image
+  // view doesn't forget them — the reductions are already applied engine-side,
+  // and re-running them would apply them a second time.
+  reductionsDone: { smooth: boolean; baseline: boolean; align: boolean };
+  markReductionDone: (op: 'smooth' | 'baseline' | 'align') => void;
+  // The engine drops prior reductions when gain calibration is (re)applied —
+  // callers of apply_gain_calibration must reset the flags to match.
+  resetReductions: () => void;
   open: (path: string) => Promise<void>;
   close: () => Promise<void>;
   setViewMode: (mode: WorkspaceViewMode) => void;
@@ -131,6 +140,11 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   const [savePath, setSavePath] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [reductionsDone, setReductionsDone] = useState({
+    smooth: false,
+    baseline: false,
+    align: false,
+  });
 
   const surveyRef = useRef<SurveyMeta | null>(survey);
   const workspaceHandleRef = useRef<number | null>(workspaceHandle);
@@ -200,6 +214,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     setReducing(false);
     setSaving(false);
     setError(null);
+    setReductionsDone({ smooth: false, baseline: false, align: false });
     return wasDirty;
   }, []);
 
@@ -213,7 +228,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
         setError('Engine handle expired. Please re-open your files.');
         return;
       }
-      handleRpcError(e);
+      setError(e instanceof Error ? e.message : String(e));
     },
     [resetForEngineRestart],
   );
@@ -240,6 +255,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       setImageFluxRangeState(null);
       setImageSavePath(null);
       setImageNameState(meta.workspace?.name ?? 'image');
+      setReductionsDone({ smooth: false, baseline: false, align: false });
       if (isSaved) {
         const sweepCount = meta.workspace?.source_count ?? 0;
         const acceptedList =
@@ -304,6 +320,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     setAcceptedSweeps(new Set());
     setSavePath(null);
     setDirty(false);
+    setReductionsDone({ smooth: false, baseline: false, align: false });
   }, []);
 
   const acceptCurrentSweep = useCallback(() => {
@@ -329,6 +346,14 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   const resetSweepReview = useCallback(() => {
     setAcceptedSweeps(new Set());
     setCurrentSweepIndex(0);
+  }, []);
+
+  const markReductionDone = useCallback((op: 'smooth' | 'baseline' | 'align') => {
+    setReductionsDone((prev) => (prev[op] ? prev : { ...prev, [op]: true }));
+  }, []);
+
+  const resetReductions = useCallback(() => {
+    setReductionsDone({ smooth: false, baseline: false, align: false });
   }, []);
 
   const refreshWorkspace = useCallback(async () => {
@@ -390,10 +415,17 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       );
       const pixels = await rpcClient.getImagePixels(meta.handle);
       const prevImage = imageRef.current;
+      const prevRgb = rgbImageRef.current;
       setImage(meta);
       setImagePixels(pixels);
+      // Invariant: only one of image/rgbImage is non-null. Clear any RGB
+      // composite left from a previous bi/tri-color build, or the stale
+      // channel state would misdirect the next Make Tri-Color Image.
+      setRgbImageState(null);
+      setRgbImagePixels(null);
       setViewMode('image');
       closeInBackground(prevImage?.handle);
+      if (prevRgb) closeInBackground(prevRgb.handle);
       return meta;
     } catch (e) {
       handleRpcError(e);
@@ -618,6 +650,9 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       saving,
       currentSweepIndex,
       acceptedSweeps,
+      reductionsDone,
+      markReductionDone,
+      resetReductions,
       open,
       close,
       setViewMode,
@@ -665,6 +700,9 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       saving,
       currentSweepIndex,
       acceptedSweeps,
+      reductionsDone,
+      markReductionDone,
+      resetReductions,
       open,
       close,
       acceptCurrentSweep,

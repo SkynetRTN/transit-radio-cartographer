@@ -294,6 +294,15 @@ def apply_gain_calibration(workspace: SurveyWorkspace) -> None:
         cal1 = cal2
     if not workspace.terminal_enabled:
         cal2 = cal1
+    # Opposite-sign endpoints make the interpolated cal voltage cross zero
+    # partway through the survey — some sweep would divide by ~0 and produce
+    # Inf/NaN flux with no diagnostic. This is a broken bracket, not a usable
+    # calibration; refuse it up front.
+    if cal1 * cal2 < 0.0:
+        raise ValueError(
+            "Cal1 and Cal2 have opposite signs — the interpolated cal voltage "
+            "crosses zero mid-survey; re-check the cal bracket cuts"
+        )
 
     n = workspace.source_count
     if n == 1:

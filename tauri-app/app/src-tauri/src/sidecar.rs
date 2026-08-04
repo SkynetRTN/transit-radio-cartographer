@@ -44,6 +44,43 @@ struct ChildIo {
     stdout: BufReader<ChildStdout>,
 }
 
+/// Split a command-line override into tokens, honoring single/double quotes
+/// so Windows paths with spaces (`"C:\Program Files\...\python.exe" -m ...`)
+/// survive intact. Naive `split_whitespace` would hand `Command::new` the
+/// bogus program name `C:\Program`.
+fn split_command_line(raw: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut has_token = false;
+    for c in raw.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => cur.push(c),
+            None => match c {
+                '"' | '\'' => {
+                    quote = Some(c);
+                    has_token = true;
+                }
+                c if c.is_whitespace() => {
+                    if has_token {
+                        parts.push(std::mem::take(&mut cur));
+                        has_token = false;
+                    }
+                }
+                c => {
+                    cur.push(c);
+                    has_token = true;
+                }
+            },
+        }
+    }
+    if has_token {
+        parts.push(cur);
+    }
+    parts
+}
+
 pub struct PythonSidecar {
     workspace_dir: PathBuf,
     bundled_exe: Option<PathBuf>,
@@ -61,10 +98,7 @@ impl PythonSidecar {
         let command_override = std::env::var("RADIO_CART_SIDECAR_CMD")
             .ok()
             .and_then(|raw| {
-                let parts: Vec<String> = raw
-                    .split_whitespace()
-                    .map(|s| s.to_string())
-                    .collect();
+                let parts = split_command_line(&raw);
                 if parts.is_empty() {
                     None
                 } else {
@@ -83,6 +117,17 @@ impl PythonSidecar {
 
     pub fn take_restart_signal(&mut self) -> Option<u32> {
         self.restart_signal.take()
+    }
+
+    // Tear down a broken stream. std's Child does not reap on drop, so a
+    // plain `self.io = None` leaves a zombie on Unix for every crashed
+    // engine; kill() also ends a still-live child on the desync paths
+    // (a dead one makes it a harmless error).
+    fn discard_io(&mut self) {
+        if let Some(mut io) = self.io.take() {
+            let _ = io.child.kill();
+            let _ = io.child.wait();
+        }
     }
 
     // BUG-012: first call marks "we've started"; every subsequent call arms
@@ -140,14 +185,14 @@ impl PythonSidecar {
             message: e.to_string(),
         })?;
         if let Err(err) = writeln!(io.stdin, "{}", line) {
-            self.io = None;
+            self.discard_io();
             return Err(AppError {
                 code: "sidecar_write_failed".into(),
                 message: err.to_string(),
             });
         }
         if let Err(err) = io.stdin.flush() {
-            self.io = None;
+            self.discard_io();
             return Err(AppError {
                 code: "sidecar_flush_failed".into(),
                 message: err.to_string(),
@@ -156,18 +201,48 @@ impl PythonSidecar {
         let mut response_line = String::new();
         match io.stdout.read_line(&mut response_line) {
             Ok(0) => {
-                self.io = None;
+                self.discard_io();
                 Err(AppError {
                     code: "sidecar_eof".into(),
                     message: "sidecar closed stdout".into(),
                 })
             }
-            Ok(_) => serde_json::from_str(response_line.trim()).map_err(|e| AppError {
-                code: "decode_failed".into(),
-                message: format!("{e}: {response_line}"),
-            }),
+            Ok(_) => {
+                let response: Value = match serde_json::from_str(response_line.trim()) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // A non-JSON line means the stream is desynchronized:
+                        // the real response may still be buffered, and every
+                        // later call would read the previous call's reply.
+                        // Kill the stream so the next call respawns cleanly.
+                        self.discard_io();
+                        return Err(AppError {
+                            code: "decode_failed".into(),
+                            message: format!("{e}: {response_line}"),
+                        });
+                    }
+                };
+                // Responses are strictly sequential, so the id must echo the
+                // request's. The one legitimate exception is a structured
+                // parse/invalid-request error, which carries id null per
+                // JSON-RPC when the engine couldn't read the request id.
+                let req_id = request.get("id");
+                let resp_id = response.get("id");
+                let null_id_error = response.get("error").is_some()
+                    && matches!(resp_id, None | Some(Value::Null));
+                if req_id.is_some() && resp_id != req_id && !null_id_error {
+                    self.discard_io();
+                    return Err(AppError {
+                        code: "response_id_mismatch".into(),
+                        message: format!(
+                            "expected response id {req_id:?}, got {resp_id:?} (stream desynchronized)"
+                        ),
+                    });
+                }
+                Ok(response)
+            }
             Err(err) => {
-                self.io = None;
+                self.discard_io();
                 Err(AppError {
                     code: "sidecar_read_failed".into(),
                     message: err.to_string(),
@@ -179,9 +254,12 @@ impl PythonSidecar {
     fn ensure_started_internal(&mut self) -> Result<(), AppError> {
         if let Some(io) = self.io.as_mut() {
             match io.child.try_wait() {
+                // try_wait(Some) has already reaped the exit status; drop is
+                // safe here. The Err arm's liveness is unknown — discard_io
+                // kills and reaps to be certain.
                 Ok(Some(_)) => self.io = None,
                 Ok(None) => return Ok(()),
-                Err(_) => self.io = None,
+                Err(_) => self.discard_io(),
             }
         }
         self.start()
@@ -204,6 +282,23 @@ impl SidecarOps for PythonSidecar {
             code: "stdout_unavailable".into(),
             message: "sidecar stdout pipe missing".into(),
         })?;
+        // stderr must be continuously drained: if the pipe buffer fills (numpy
+        // warnings, tracebacks, `uv run` progress output), the engine blocks
+        // mid-write and never produces its stdout response, deadlocking send().
+        // The thread exits on its own when the child closes the pipe.
+        if let Some(stderr) = child.stderr.take() {
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stderr);
+                let mut buf = Vec::new();
+                loop {
+                    buf.clear();
+                    match reader.read_until(b'\n', &mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => eprint!("[sidecar] {}", String::from_utf8_lossy(&buf)),
+                    }
+                }
+            });
+        }
         self.io = Some(ChildIo {
             child,
             stdin,
@@ -221,13 +316,34 @@ impl SidecarOps for PythonSidecar {
     }
 
     fn stop(&mut self) {
-        if let Some(mut io) = self.io.take() {
+        if let Some(io) = self.io.take() {
+            let ChildIo {
+                mut child,
+                mut stdin,
+                stdout: _,
+            } = io;
             let shutdown = json!({"jsonrpc": "2.0", "id": 0, "method": "shutdown", "params": {}});
             if let Ok(line) = serde_json::to_string(&shutdown) {
-                let _ = writeln!(io.stdin, "{}", line);
-                let _ = io.stdin.flush();
+                let _ = writeln!(stdin, "{}", line);
+                let _ = stdin.flush();
             }
-            let _ = io.child.wait();
+            // Closing stdin gives the engine a second exit path: serve()'s
+            // read loop hits EOF even if the shutdown request was never read.
+            drop(stdin);
+            // A wedged engine must not block window close forever: give it a
+            // grace period to exit cleanly, then kill and reap it.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    Ok(None) | Err(_) => break,
+                }
+            }
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 }
@@ -268,9 +384,13 @@ impl SidecarBridge {
     }
 
     pub fn shutdown(&self) {
-        if let Ok(mut sidecar) = self.inner.lock() {
-            sidecar.stop();
-        }
+        // Recover from a poisoned lock like rpc() does — a prior panic in the
+        // RPC path must not leave the engine process unreaped on window close.
+        let mut sidecar = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        sidecar.stop();
     }
 }
 
@@ -302,6 +422,25 @@ mod tests {
             s.take_restart_signal().is_none(),
             "signal drains once — bridge must not double-emit"
         );
+    }
+
+    #[test]
+    fn split_command_line_honors_quotes() {
+        assert_eq!(
+            split_command_line(r#""C:\Program Files\Python313\python.exe" -m radio_cartographer.rpc"#),
+            vec![
+                r"C:\Program Files\Python313\python.exe".to_string(),
+                "-m".to_string(),
+                "radio_cartographer.rpc".to_string(),
+            ]
+        );
+        assert_eq!(
+            split_command_line("uv run python -m radio_cartographer.rpc"),
+            vec!["uv", "run", "python", "-m", "radio_cartographer.rpc"]
+        );
+        assert_eq!(split_command_line("  "), Vec::<String>::new());
+        // An empty quoted token is still a token (edge case, but must not panic).
+        assert_eq!(split_command_line(r#""" x"#), vec!["".to_string(), "x".to_string()]);
     }
 
     #[test]

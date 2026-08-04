@@ -112,11 +112,14 @@ export function SurveyView() {
   }, [workspaceHandle, workspace?.calibrated, workspace?.flux_calibrated, sweepIndex]);
 
   // When the workspace itself changes (different .md2 / .srv opened), drop
-  // any pending per-sweep baseline edits from the previous survey.
+  // any pending per-sweep baseline edits from the previous survey. Also drop
+  // them when gain or flux calibration rescales the engine's flux arrays:
+  // pending removal deltas were computed against the old scale, and applying
+  // them to the rescaled sweep would commit corrupted flux on Accept Sweep.
   useEffect(() => {
     setRemovedBySweep({});
     setHistoryBySweep({});
-  }, [workspaceHandle]);
+  }, [workspaceHandle, workspace?.calibrated, workspace?.flux_calibrated]);
 
   useEffect(() => {
     setSweepInput(String(sweepIndex + 1));

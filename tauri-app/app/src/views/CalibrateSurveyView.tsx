@@ -14,7 +14,7 @@ function formatRa(volts: number): string {
 }
 
 function formatDec(deg: number): string {
-  const totalArcSec = deg * 60;
+  const totalArcSec = deg * 3600;
   const sign = totalArcSec < 0 ? '-' : '';
   const abs = Math.abs(totalArcSec);
   const d = Math.floor(abs / 3600);
@@ -105,7 +105,8 @@ function splitKeptCut(points: ScatterPoint[], color: string) {
 }
 
 export function CalibrateSurveyView() {
-  const { workspace, workspaceHandle, setViewMode, refreshWorkspace } = useSurvey();
+  const { workspace, workspaceHandle, setViewMode, refreshWorkspace, resetReductions } =
+    useSurvey();
   const { theme } = useTheme();
   const dc = dataColors(theme);
   const [view, setView] = useState<CalibrationView | null>(null);
@@ -266,12 +267,15 @@ export function CalibrateSurveyView() {
     if (workspaceHandle === null) return;
     try {
       await rpcClient.applyGainCalibration(workspaceHandle);
+      // The engine drops any prior pre-image reductions when gain calibration
+      // is applied — the Make Image gating flags must reset to match.
+      resetReductions();
       await refreshWorkspace();
       setViewMode('survey');
     } catch (e) {
       setError((e as Error).message);
     }
-  }, [workspaceHandle, refreshWorkspace, setViewMode]);
+  }, [workspaceHandle, refreshWorkspace, setViewMode, resetReductions]);
 
   const toggleInitial = useCallback(
     async (enabled: boolean) => {

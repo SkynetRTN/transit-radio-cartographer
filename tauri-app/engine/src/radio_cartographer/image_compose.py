@@ -252,9 +252,12 @@ def bicolor_compose(
     # whenever ANY channel for that pixel is NaN.
     union_mask = p_mask | s_mask
     unused = np.where(union_mask, 0.0, np.nan)
+    unused_name: str | None = None
     for c in ("r", "g", "b"):
-        channels.setdefault(c, unused)
-    return _rgb_image_from_channels(channels, bbox)
+        if c not in channels:
+            unused_name = c
+            channels[c] = unused
+    return _rgb_image_from_channels(channels, bbox, unused_channel=unused_name)
 
 
 def tricolor_compose(
@@ -354,21 +357,26 @@ def extend_rgb_compose(
         "g": np.asarray(rgb.pixels_g, dtype=np.float64),
         "b": np.asarray(rgb.pixels_b, dtype=np.float64),
     }
-    unused: str | None = None
-    for name, ch in channels.items():
-        if ch.size == 0:
-            unused = name
-            break
-        # An unused channel is one where no covered cell carries data — the
-        # bicolor path fills it with 0.0 inside coverage and NaN outside, so
-        # `nanmax` is either 0.0 (covered-but-empty) or NaN (all-NaN). Either
-        # way it counts as unused for the extend operation.
-        with np.errstate(invalid="ignore"), warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            ch_max = float(np.nanmax(ch))
-        if np.isnan(ch_max) or ch_max == 0.0:
-            unused = name
-            break
+    # Prefer the channel recorded at compose time — pixel values cannot
+    # distinguish a truly unused channel from a populated one whose flat
+    # input normalized to all-zeros.
+    unused: str | None = getattr(rgb, "unused_channel", None)
+    if unused not in ("r", "g", "b"):
+        unused = None
+        for name, ch in channels.items():
+            if ch.size == 0:
+                unused = name
+                break
+            # Fallback heuristic for RGB images with no recorded unused
+            # channel: the bicolor path fills the empty channel with 0.0
+            # inside coverage and NaN outside, so `nanmax` is either 0.0
+            # (covered-but-empty) or NaN (all-NaN).
+            with np.errstate(invalid="ignore"), warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                ch_max = float(np.nanmax(ch))
+            if np.isnan(ch_max) or ch_max == 0.0:
+                unused = name
+                break
     if unused is None:
         raise ValueError("all 3 channels already populated; cannot extend to tri-color")
 
@@ -548,6 +556,7 @@ def _two_image_masks(
 def _rgb_image_from_channels(
     channels: dict[str, NDArray[np.float64]],
     bbox: dict[str, float | int],
+    unused_channel: str | None = None,
 ) -> RgbGriddedImage:
     width = int(bbox["width"])
     height = int(bbox["height"])
@@ -576,6 +585,7 @@ def _rgb_image_from_channels(
         max_ra=max_ra,
         min_dec=min_dec,
         max_dec=max_dec,
+        unused_channel=unused_channel,
     )
 
 

@@ -101,6 +101,13 @@ export function MainWindow() {
   // dialog accordingly. Returns null if every channel has data (already a
   // tricolor) or if there's no RGB image.
   const rgbUnusedChannel: ChannelColor | null = (() => {
+    // Prefer the engine-recorded channel: pixel values can't distinguish a
+    // truly unused channel from a populated one whose flat input normalized
+    // to all-zeros. The heuristic below remains as a fallback for metas
+    // that predate the field.
+    if (rgbImage && rgbImage.unused_channel !== undefined) {
+      return rgbImage.unused_channel;
+    }
     if (!rgbImagePixels) return null;
     // No-coverage cells arrive as `null` (BUG-014). `v > 0` is false for null
     // and for 0, which is the correct semantic: an "unused" channel is one
