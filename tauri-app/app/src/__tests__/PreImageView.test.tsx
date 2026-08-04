@@ -92,10 +92,12 @@ test('Pre Image view auto-generates an image on entry', async () => {
     );
   });
   // The auto-generated pre-image uses the default pixel size 0.06° (1/20 of
-  // the 40 ft beam). `(handle, pix, workspaceHandle)` — workspace_handle=2
-  // comes from the mocked SurveyMeta below. Passing it drops cal sweeps.
+  // the 40 ft beam). `(handle, pix, workspaceHandle, fill)` —
+  // workspace_handle=2 comes from the mocked SurveyMeta below (passing it
+  // drops cal sweeps); fill='bars' requests the legacy pre-image rendering
+  // (horizontal bars, no inter-sweep interpolation).
   await waitFor(() =>
-    expect(rpcClient.makeImage as unknown as ReturnType<typeof vi.fn>).toHaveBeenCalledWith(1, 0.06, 2),
+    expect(rpcClient.makeImage as unknown as ReturnType<typeof vi.fn>).toHaveBeenCalledWith(1, 0.06, 2, 'bars'),
   );
   await waitFor(() => expect(screen.getByText('Smooth Sweeps')).not.toBeDisabled());
 });

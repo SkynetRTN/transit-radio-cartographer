@@ -160,7 +160,10 @@ export function PreImageView() {
       setError(null);
       setStatus('Building pre-image…');
       try {
-        const meta = await rpcClient.makeImage(survey.handle, pixValue, workspaceHandle);
+        // 'bars' = legacy pre-image rendering: each sample paints a
+        // constant-flux horizontal bar with no inter-sweep interpolation.
+        // The interpolated fill only appears after the Make Image commit.
+        const meta = await rpcClient.makeImage(survey.handle, pixValue, workspaceHandle, 'bars');
         if (gen !== generationRef.current) {
           // A newer run took over while the engine gridded — release our
           // image rather than displaying stale data or leaking the handle.

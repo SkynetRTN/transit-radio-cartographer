@@ -92,6 +92,28 @@ def test_make_image_returns_image_handle() -> None:
     assert isinstance(server._handles.get(h0), Survey)
 
 
+def test_make_image_fill_param() -> None:
+    # The Pre Image view passes fill="bars" (legacy pre-image horizontal
+    # bars); the Make Image commit omits the param and gets the interpolated
+    # strip-fill. Both must succeed and produce different grids; an unknown
+    # fill is an invalid-params error.
+    server = RpcServer()
+    h0 = _open_survey(server)
+
+    interp = call(server, "make_image", {"handle": h0, "pix": 1})
+    bars = call(server, "make_image", {"handle": h0, "pix": 1, "fill": "bars"})
+    assert "error" not in interp, interp
+    assert "error" not in bars, bars
+    interp_px = server._handles.get(int(interp["result"]["handle"])).pixels
+    bars_px = server._handles.get(int(bars["result"]["handle"])).pixels
+    assert interp_px.shape == bars_px.shape
+    assert not np.array_equal(interp_px, bars_px)
+
+    bad = call(server, "make_image", {"handle": h0, "fill": "nearest"})
+    assert "error" in bad
+    assert bad["error"]["code"] == -32602  # ERR_INVALID_PARAMS
+
+
 def test_get_image_pixels_shape_matches_descriptor() -> None:
     server = RpcServer()
     h0 = _open_survey(server)

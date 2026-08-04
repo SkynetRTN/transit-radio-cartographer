@@ -887,6 +887,16 @@ class RpcServer:
 
     def _make_image(self, params: dict[str, Any]) -> dict[str, Any]:
         pixel_deg = _pixel_deg_param(params, default=DEFAULT_PIXEL_DEG)
+        # "bars" reproduces the legacy Pre-Image screen (constant-flux
+        # horizontal bars per sample, no inter-sweep interpolation);
+        # "interpolate" is the legacy Make Image strip-fill. The Pre Image
+        # view requests bars; the Make Image commit omits the param.
+        fill = str(params.get("fill", "interpolate"))
+        if fill not in ("interpolate", "bars"):
+            raise RpcError(
+                ERR_INVALID_PARAMS,
+                f"make_image: fill must be 'interpolate' or 'bars', got {fill!r}",
+            )
         ws_handle = params.get("workspace_handle")
         unit: str | None = None
         flux_calibrated = False
@@ -913,7 +923,7 @@ class RpcServer:
         else:
             handle = int(params.get("handle", -1))
             survey = self._resolve_survey(handle)
-        image = make_image(survey, pixel_deg=pixel_deg)
+        image = make_image(survey, pixel_deg=pixel_deg, fill=fill)
         if unit is not None or flux_calibrated:
             image = replace_dataclass(
                 image,

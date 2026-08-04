@@ -484,14 +484,25 @@ export class RpcClient {
   }
   // `pix` is the on-sky pixel size in DEGREES (default 1/20 of the 40 ft
   // beam = 0.06°), not the old integer coarseness factor.
-  makeImage(handle: number, pix = 0.06, workspaceHandle?: number | null) {
+  makeImage(
+    handle: number,
+    pix = 0.06,
+    workspaceHandle?: number | null,
+    fill?: 'interpolate' | 'bars',
+  ) {
     // When `workspaceHandle` is provided, the engine builds the pre-image
     // from the workspace's source sweeps only (cal brackets excluded) and
     // uses calibrated flux if `apply_gain_calibration` has run. The survey
     // handle is sent unconditionally as the fallback path.
+    // `fill: 'bars'` requests the legacy Pre-Image rendering (constant-flux
+    // horizontal bars, no inter-sweep interpolation); omitting it gives the
+    // interpolated strip-fill of the committed Make Image.
     const params: Record<string, unknown> = { handle, pix };
     if (workspaceHandle !== undefined && workspaceHandle !== null) {
       params.workspace_handle = workspaceHandle;
+    }
+    if (fill !== undefined) {
+      params.fill = fill;
     }
     return this.request<ImageMeta>('make_image', params);
   }
