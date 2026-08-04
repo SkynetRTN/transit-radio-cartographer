@@ -4,15 +4,14 @@ from __future__ import annotations
 
 
 def split_crlf_lines(blob: bytes) -> list[str]:
-    """Split bytes on CRLF, returning text lines without their terminators.
+    """Split bytes into text lines, accepting CRLF or LF terminators.
 
-    The legacy files are CRLF-terminated unconditionally and ASCII; we decode
-    strict here so any deviation surfaces as a parser error.
+    The legacy files are ASCII; we decode strict here so any deviation
+    surfaces as a parser error. Acquisition output is normally CRLF, but
+    LF-only files occur in the wild, so both are accepted.
     """
     text = blob.decode("ascii", errors="strict")
-    if text.endswith("\r\n"):
-        text = text[:-2]
-        lines = text.split("\r\n")
-    else:
-        lines = text.split("\r\n")
+    lines = [line.removesuffix("\r") for line in text.split("\n")]
+    if lines and lines[-1] == "":
+        lines.pop()
     return lines
