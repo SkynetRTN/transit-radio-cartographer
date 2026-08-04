@@ -1,6 +1,6 @@
 [package]
 name = "radio-cartographer-app"
-version = "0.1.5"
+version = "0.1.6"
 description = "Tauri shell for the Radio Cartographer app."
 edition = "2021"
 publish = false
