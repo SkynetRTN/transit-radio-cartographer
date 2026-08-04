@@ -163,8 +163,13 @@ def calibrate_scan(
     """
     flux = np.asarray(raw_flux, dtype=np.float64)
     ra = np.asarray(raw_ra, dtype=np.float64)
-    if flux.size < 240:
-        raise ValueError(f"calibrate_scan needs at least 240 samples, got {flux.size}")
+    # 241, not 240: the four 60-sample cal blocks alone leave zero source
+    # samples, and the RA-span interpolation below needs at least one.
+    if flux.size < 241:
+        raise ValueError(
+            f"calibrate_scan needs at least 241 samples "
+            f"(240 cal + 1 source), got {flux.size}"
+        )
     total = flux.size - 240
 
     cal1 = float(np.mean(flux[0:60] - flux[60:120]))

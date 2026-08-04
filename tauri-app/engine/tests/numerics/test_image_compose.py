@@ -58,6 +58,35 @@ def test_append_overlap_uses_max():
     assert (out.pixels == 1.0).any()
 
 
+def test_chained_append_keeps_new_data_over_composite_nan_gutter():
+    # Regression for bug #29: a composite primary carries NaN "no data" cells
+    # inside its bounding box (here: the dec 10..20 gutter between a and b).
+    # Appending c into that gutter must show c's flux, not blank it to NaN
+    # via maximum(NaN, x).
+    a = _make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=1.0)
+    b = _make(11, 11, 0.0, 10.0, 20.0, 30.0, fill=2.0)
+    ab = append_images(a, b)
+    assert np.isnan(ab.pixels).any()  # the gutter exists
+    c = _make(11, 11, 0.0, 10.0, 12.0, 18.0, fill=9.0)
+    out = append_images(ab, c)
+    assert (out.pixels == 9.0).any(), "c's data must survive the NaN gutter"
+    # And the same through superimpose: one-sided cells take the covering
+    # input's value instead of NaN-poisoning the blend.
+    out_s = superimpose_images(ab, c)
+    assert (out_s.pixels == 9.0).any()
+
+
+def test_superimpose_multi_mean_ignores_composite_nan_cells():
+    # Regression for bug #33: the N-way mean must not count a composite
+    # primary's interior NaN cells as coverage.
+    a = _make(11, 11, 0.0, 10.0, 0.0, 10.0, fill=1.0)
+    b = _make(11, 11, 0.0, 10.0, 20.0, 30.0, fill=2.0)
+    ab = append_images(a, b)
+    c = _make(11, 11, 0.0, 10.0, 12.0, 18.0, fill=9.0)
+    out = superimpose_images_multi(ab, [c])
+    assert (out.pixels == 9.0).any(), "c alone covers the gutter; mean is c"
+
+
 def test_append_uses_finest_cell_independent_of_open_order():
     # Different pixel sizes: a coarse wide map (cell = 10) and a fine small map
     # (cell = 0.1). The composite must adopt the FINEST input's cell regardless

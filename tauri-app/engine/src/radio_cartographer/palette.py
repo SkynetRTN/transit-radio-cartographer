@@ -15,6 +15,11 @@ def apply_palette(
     norm = (clipped - flux_min) / max(flux_max - flux_min, 1e-12)
 
     stops = sorted(palette.stops, key=lambda s: s.anchor)
+    # A `.pal` whose header count is 0 parses to an empty stops tuple;
+    # without this guard the reduction below raises an opaque "zero-size
+    # array" internal error deep in the bitmap-export path.
+    if not stops:
+        raise ValueError("palette has no stops")
     anchors = np.array([s.anchor for s in stops], dtype=np.float64)
     if anchors.max() > 1.0:
         anchors = anchors / 255.0

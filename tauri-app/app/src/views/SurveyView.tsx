@@ -123,12 +123,15 @@ export function SurveyView() {
   }, [workspaceHandle, workspace?.calibrated, workspace?.flux_calibrated, sweepIndex]);
 
   // When the workspace itself changes (different .md2 / .srv opened), drop
-  // any pending per-sweep baseline edits from the previous survey.
+  // any pending per-sweep baseline edits from the previous survey. Also drop
+  // them when gain or flux calibration rescales the engine's flux arrays:
+  // pending removal deltas were computed against the old scale, and applying
+  // them to the rescaled sweep would commit corrupted flux on Accept Sweep.
   useEffect(() => {
     setRemovedBySweep({});
     setHistoryBySweep({});
     setOriginalBySweep({});
-  }, [workspaceHandle]);
+  }, [workspaceHandle, workspace?.calibrated, workspace?.flux_calibrated]);
 
   useEffect(() => {
     setSweepInput(String(sweepIndex + 1));
@@ -470,6 +473,12 @@ export function SurveyView() {
       ) {
         return;
       }
+      // Dialogs autofocus a BUTTON and don't stop keydown propagation, so
+      // without this guard ArrowRight / Ctrl+Shift+A would accept (and
+      // commit!) sweeps invisibly behind an open modal — even one the user
+      // is about to cancel (bug #36). Both the retro modal and MUI's Dialog
+      // render role="dialog".
+      if (document.querySelector('[role="dialog"]')) return;
       const count = workspace?.source_count ?? 0;
       if (count <= 0) return;
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'a' || e.key === 'A')) {

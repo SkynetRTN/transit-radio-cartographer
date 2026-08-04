@@ -279,6 +279,10 @@ export interface RgbImageMeta {
   max_ra: number;
   min_dec: number;
   max_dec: number;
+  // 'r'/'g'/'b' for a bi-color result, null once all three channels carry
+  // data. Recorded by the engine at compose time — authoritative, unlike
+  // inferring from pixel values (a flat input normalizes to all-zeros).
+  unused_channel?: 'r' | 'g' | 'b' | null;
 }
 
 export interface RgbImagePixels {
@@ -307,6 +311,36 @@ export interface PaletteResult {
   path: string;
 }
 
+// Methods whose runtime scales with survey/image size (gridding, composition,
+// file opens/saves, reductions, plus the first-ever call which may cold-start
+// the sidecar). The Rust command cannot cancel an in-flight engine call, so a
+// too-short timeout makes the UI report failure while the operation actually
+// completes — for saves that means telling the user a written file failed.
+const LONG_RUNNING_METHODS = new Set([
+  'open_survey',
+  'open_saved_survey',
+  'open_scan',
+  'open_saved_scan',
+  'open_image',
+  'make_image',
+  'append_image',
+  'append_image_multi',
+  'superimpose_image',
+  'superimpose_image_multi',
+  'bicolor_image',
+  'tricolor_image',
+  'extend_rgb_image',
+  'smooth',
+  'baseline',
+  'align',
+  'save_survey',
+  'save_scan',
+  'save_image',
+  'save_bitmap',
+  'export_fits',
+]);
+const LONG_TIMEOUT_MS = 300000;
+
 export class RpcClient {
   private nextId = 1;
   constructor(private timeoutMs = 15000) {}
@@ -314,13 +348,28 @@ export class RpcClient {
   async request<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     const id = this.nextId++;
     const p = invoke<RpcResponse<T>>('rpc_request', { payload: { jsonrpc: '2.0', id, method, params } });
-    const timeout = new Promise<never>((_, rej) =>
-      setTimeout(() => rej(new Error('sidecar_timeout')), this.timeoutMs),
-    );
-    const resp = await Promise.race([p, timeout]);
-    if (resp.error) throw new RpcError(resp.error.code, resp.error.message, resp.error.data);
-    if (resp.result === undefined) throw new Error('missing_result');
-    return resp.result;
+    // If the timeout wins the race below, `p` lives on unobserved; a later
+    // transport rejection (e.g. the engine dies after the timeout already
+    // fired) must not surface as a window-level unhandled rejection.
+    void p.catch(() => {});
+    const timeoutMs = LONG_RUNNING_METHODS.has(method)
+      ? Math.max(this.timeoutMs, LONG_TIMEOUT_MS)
+      : this.timeoutMs;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, rej) => {
+      timer = setTimeout(
+        () => rej(new Error(`sidecar_timeout: ${method} did not respond within ${timeoutMs / 1000}s`)),
+        timeoutMs,
+      );
+    });
+    try {
+      const resp = await Promise.race([p, timeout]);
+      if (resp.error) throw new RpcError(resp.error.code, resp.error.message, resp.error.data);
+      if (resp.result === undefined) throw new Error('missing_result');
+      return resp.result;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   ping() {

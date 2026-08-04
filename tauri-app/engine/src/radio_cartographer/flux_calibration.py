@@ -30,11 +30,13 @@ __all__ = [
 ]
 
 # Known-flux defaults for the standard calibrators. Keys are the first
-# three characters of the source name, matched case-insensitively.
+# three characters of the source name, matched case-insensitively. These are
+# updated flux densities, intentionally different from the legacy VB
+# defaults (calform.frm: VIR=213, TAU=942, CYG=1581).
 _DEFAULT_JY: dict[str, float] = {
-    "VIR": 226.1,
-    "TAU": 841.7,
-    "CYG": 1566.8,
+    "VIR": 230.8,
+    "TAU": 846.3,
+    "CYG": 1605.9,
 }
 
 

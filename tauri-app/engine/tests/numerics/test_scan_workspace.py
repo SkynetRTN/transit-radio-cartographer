@@ -185,3 +185,17 @@ def test_apply_scan_calibration_resets_reductions() -> None:
     apply_scan_calibration(ws)  # re-calibrate
     assert ws.reduced_source_flux is None
     assert ws.peak_flux is None
+
+
+def test_parse_scn_peak_handles_vb_sub_unity_format() -> None:
+    # VB's Format$(x, "#.###") writes sub-unity peaks without a leading zero
+    # ("Peak Flux: .456"); the parser must read them (bug #37) — losing the
+    # peak here destroys it permanently on the next save.
+    from radio_cartographer.scan_workspace import _parse_scn_peak
+
+    assert _parse_scn_peak("Peak Flux: .456") == pytest.approx(0.456)
+    assert _parse_scn_peak("Peak Flux: -.456") == pytest.approx(-0.456)
+    assert _parse_scn_peak("Peak Flux: 1.25") == pytest.approx(1.25)
+    assert _parse_scn_peak("Peak Flux: 12") == pytest.approx(12.0)
+    assert _parse_scn_peak("") is None
+    assert _parse_scn_peak("Peak Flux: ") is None

@@ -148,6 +148,11 @@ class RgbGriddedImage:
     max_ra: float
     min_dec: float
     max_dec: float
+    # Which channel carries no input ("r"/"g"/"b"), or None when all three are
+    # populated. Recorded at compose time because it cannot be reliably
+    # inferred from pixel values: a populated channel whose input is flat
+    # normalizes to all-zeros, indistinguishable from the bi-color filler.
+    unused_channel: str | None = None
 
 
 def make_image(
