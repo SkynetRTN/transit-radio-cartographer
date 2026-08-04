@@ -781,7 +781,11 @@ def workspace_to_scan(workspace: ScanWorkspace) -> Scan:
     )
 
 
-_PEAK_RE = re.compile(r"Peak Flux:\s*(-?\d+(?:\.\d+)?)", re.IGNORECASE)
+# VB's Format$(x, "#.###") omits the leading zero for |x| < 1, so legacy
+# files carry "Peak Flux: .456" / "Peak Flux: -.456" — the integer part must
+# be optional or sub-unity peaks parse to None and get destroyed on the next
+# save (bug #37).
+_PEAK_RE = re.compile(r"Peak Flux:\s*(-?(?:\d+(?:\.\d+)?|\.\d+))", re.IGNORECASE)
 
 
 def _parse_scn_peak(peak: str) -> float | None:

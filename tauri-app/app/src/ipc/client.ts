@@ -324,7 +324,9 @@ const LONG_RUNNING_METHODS = new Set([
   'open_image',
   'make_image',
   'append_image',
+  'append_image_multi',
   'superimpose_image',
+  'superimpose_image_multi',
   'bicolor_image',
   'tricolor_image',
   'extend_rgb_image',
@@ -346,6 +348,10 @@ export class RpcClient {
   async request<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     const id = this.nextId++;
     const p = invoke<RpcResponse<T>>('rpc_request', { payload: { jsonrpc: '2.0', id, method, params } });
+    // If the timeout wins the race below, `p` lives on unobserved; a later
+    // transport rejection (e.g. the engine dies after the timeout already
+    // fired) must not surface as a window-level unhandled rejection.
+    void p.catch(() => {});
     const timeoutMs = LONG_RUNNING_METHODS.has(method)
       ? Math.max(this.timeoutMs, LONG_TIMEOUT_MS)
       : this.timeoutMs;

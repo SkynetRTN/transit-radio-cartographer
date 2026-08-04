@@ -473,6 +473,12 @@ export function SurveyView() {
       ) {
         return;
       }
+      // Dialogs autofocus a BUTTON and don't stop keydown propagation, so
+      // without this guard ArrowRight / Ctrl+Shift+A would accept (and
+      // commit!) sweeps invisibly behind an open modal — even one the user
+      // is about to cancel (bug #36). Both the retro modal and MUI's Dialog
+      // render role="dialog".
+      if (document.querySelector('[role="dialog"]')) return;
       const count = workspace?.source_count ?? 0;
       if (count <= 0) return;
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'a' || e.key === 'A')) {

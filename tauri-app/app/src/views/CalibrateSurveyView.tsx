@@ -293,22 +293,30 @@ export function CalibrateSurveyView() {
     }
   }, [workspaceHandle, view, refreshWorkspace, setViewMode, resetReductions]);
 
-  const toggleInitial = useCallback(
-    async (enabled: boolean) => {
+  const toggleBracket = useCallback(
+    async (bracket: 'initial' | 'terminal', enabled: boolean) => {
       if (workspaceHandle === null) return;
-      await rpcClient.setBracketEnabled(workspaceHandle, 'initial', enabled);
-      await Promise.all([loadView(), refreshWorkspace()]);
+      // Invoked as `void toggle...` from the checkbox onChange — without the
+      // catch, an RPC failure is an unhandled rejection and the checkbox
+      // silently snaps back with no explanation (bug #41).
+      try {
+        await rpcClient.setBracketEnabled(workspaceHandle, bracket, enabled);
+        await Promise.all([loadView(), refreshWorkspace()]);
+      } catch (e) {
+        setError((e as Error).message);
+      }
     },
     [workspaceHandle, loadView, refreshWorkspace],
   );
 
+  const toggleInitial = useCallback(
+    (enabled: boolean) => toggleBracket('initial', enabled),
+    [toggleBracket],
+  );
+
   const toggleTerminal = useCallback(
-    async (enabled: boolean) => {
-      if (workspaceHandle === null) return;
-      await rpcClient.setBracketEnabled(workspaceHandle, 'terminal', enabled);
-      await Promise.all([loadView(), refreshWorkspace()]);
-    },
-    [workspaceHandle, loadView, refreshWorkspace],
+    (enabled: boolean) => toggleBracket('terminal', enabled),
+    [toggleBracket],
   );
 
   if (!workspace || workspaceHandle === null) {

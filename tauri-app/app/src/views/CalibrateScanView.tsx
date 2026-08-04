@@ -248,24 +248,30 @@ export function CalibrateScanView() {
     }
   }, [handle, setOverview, setViewMode, markDirty]);
 
-  const toggleInitial = useCallback(
-    async (enabled: boolean) => {
+  const toggleBracket = useCallback(
+    async (bracket: 'initial' | 'terminal', enabled: boolean) => {
       if (handle === null) return;
-      const overv = await rpcClient.setScanBracketEnabled(handle, 'initial', enabled);
-      setOverview(overv);
-      await loadView();
+      // See CalibrateSurveyView.toggleBracket — surface failures instead of
+      // an unhandled rejection with a silently reverting checkbox (bug #41).
+      try {
+        const overv = await rpcClient.setScanBracketEnabled(handle, bracket, enabled);
+        setOverview(overv);
+        await loadView();
+      } catch (e) {
+        setError((e as Error).message);
+      }
     },
     [handle, loadView, setOverview],
   );
 
+  const toggleInitial = useCallback(
+    (enabled: boolean) => toggleBracket('initial', enabled),
+    [toggleBracket],
+  );
+
   const toggleTerminal = useCallback(
-    async (enabled: boolean) => {
-      if (handle === null) return;
-      const overv = await rpcClient.setScanBracketEnabled(handle, 'terminal', enabled);
-      setOverview(overv);
-      await loadView();
-    },
-    [handle, loadView, setOverview],
+    (enabled: boolean) => toggleBracket('terminal', enabled),
+    [toggleBracket],
   );
 
   if (!overview || handle === null) {

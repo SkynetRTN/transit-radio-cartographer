@@ -49,6 +49,49 @@ def test_fits_roundtrip(tmp_path):
     assert back.max_dec == pytest.approx(img.max_dec, rel=1e-9, abs=1e-9)
 
 
+def test_fits_roundtrip_survey_seconds_of_time_wcs(tmp_path):
+    # Regression for bug #28: make_image builds WCS with the RA axis in
+    # SECONDS OF TIME (cdelt1 ≈ -17 s/px for the default 0.06° pixel).
+    # write_fits must emit standard degrees (else DS9 misreads the header and
+    # read_fits's own BUG-009 validation rejects the file), and read_fits must
+    # convert back into seconds of time.
+    h, w = 6, 8
+    wcs = WCSMetadata(
+        ctype1="RA---TAN",
+        ctype2="DEC--TAN",
+        crval1=4000.0,  # seconds of time
+        crval2=35.0,
+        crpix1=(w + 1) / 2.0,
+        crpix2=(h + 1) / 2.0,
+        cdelt1=-17.0,  # seconds of time per pixel
+        cdelt2=0.06,
+    )
+    ra_a = wcs.crval1 + (1 - wcs.crpix1) * wcs.cdelt1
+    ra_b = wcs.crval1 + (w - wcs.crpix1) * wcs.cdelt1
+    dec_a = wcs.crval2 + (1 - wcs.crpix2) * wcs.cdelt2
+    dec_b = wcs.crval2 + (h - wcs.crpix2) * wcs.cdelt2
+    img = GriddedImage(
+        pixels=np.ones((h, w), dtype=np.float64),
+        wcs=wcs,
+        min_ra=min(ra_a, ra_b),
+        max_ra=max(ra_a, ra_b),
+        min_dec=min(dec_a, dec_b),
+        max_dec=max(dec_a, dec_b),
+    )
+    fp = tmp_path / "survey.fits"
+    write_fits(img, fp)
+    with fits.open(str(fp)) as hdul:
+        header = hdul[0].header
+        assert header["CDELT1"] == pytest.approx(-17.0 / 240.0)
+        assert header["CRVAL1"] == pytest.approx(4000.0 / 240.0)
+    back = read_fits(fp)
+    assert back.wcs.cdelt1 == pytest.approx(-17.0)
+    assert back.wcs.crval1 == pytest.approx(4000.0)
+    assert back.min_ra == pytest.approx(img.min_ra)
+    assert back.max_ra == pytest.approx(img.max_ra)
+    assert back.min_dec == pytest.approx(img.min_dec)
+
+
 def test_fits_reads_cas_a_fixture():
     # The CAS-A fixture has NaN sentinels in off-survey cells. read_fits must
     # silently convert them to 0 so downstream rendering doesn't see NaN.

@@ -460,6 +460,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       const pixels = await rpcClient.getImagePixels(meta.handle);
       const prevImage = imageRef.current;
       const prevRgb = rgbImageRef.current;
+      const prevPreCompose = preComposeImageRef.current;
       setImage(meta);
       setImagePixels(pixels);
       // Invariant: only one of image/rgbImage is non-null. Clear any RGB
@@ -467,6 +468,13 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       // channel state would misdirect the next Make Tri-Color Image.
       setRgbImageState(null);
       setRgbImagePixels(null);
+      // The scalar stashed for "Back to Pre Image" backed the composite we
+      // just discarded — drop it too, or its engine handle leaks and
+      // canRestoreScalar stays stale (bug #40).
+      if (prevPreCompose) {
+        closeInBackground(prevPreCompose.meta.handle);
+        setPreComposeImage(null);
+      }
       setViewMode('image');
       closeInBackground(prevImage?.handle);
       if (prevRgb) closeInBackground(prevRgb.handle);

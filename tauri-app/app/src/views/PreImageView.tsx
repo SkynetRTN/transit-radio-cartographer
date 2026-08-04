@@ -146,17 +146,38 @@ export function PreImageView() {
   // generateImage call allocates a fresh engine-side image, so the previous
   // one must be closed or it stays pinned in engine memory for the session.
   const previewHandleRef = useRef<number | null>(null);
+  // Monotonic run id: generateImage fires from the mount/flux-cal effect AND
+  // the Smooth/Baseline/Align handlers, so overlapping runs are possible. A
+  // superseded run must not display its (stale) preview or clobber the
+  // handle bookkeeping (bug #38).
+  const generationRef = useRef(0);
 
   const generateImage = useCallback(
     async (pixValue: number) => {
       if (!survey) return;
+      const gen = ++generationRef.current;
       setBusy(true);
       setError(null);
       setStatus('Building pre-image…');
       try {
         const meta = await rpcClient.makeImage(survey.handle, pixValue, workspaceHandle);
-        setImageMeta(meta);
+        if (gen !== generationRef.current) {
+          // A newer run took over while the engine gridded — release our
+          // image rather than displaying stale data or leaking the handle.
+          void rpcClient.closeHandle(meta.handle).catch(() => {});
+          return;
+        }
+        // Track the new handle BEFORE fetching pixels: if the fetch below
+        // throws, the engine image must still be closed on the next swap or
+        // unmount rather than leak (bug #38).
+        const prev = previewHandleRef.current;
+        previewHandleRef.current = meta.handle;
+        if (prev !== null && prev !== meta.handle) {
+          void rpcClient.closeHandle(prev).catch(() => {});
+        }
         const pixels = await rpcClient.getImagePixels(meta.handle);
+        if (gen !== generationRef.current) return;
+        setImageMeta(meta);
         setImagePixels(pixels);
         // Refresh the sweep tracks alongside the image so the hover readout's
         // sweep numbers stay in step with the (possibly aligned) grid. A
@@ -164,27 +185,24 @@ export function PreImageView() {
         if (workspaceHandle !== null && workspaceHandle !== undefined) {
           try {
             const paths = await rpcClient.getSweepPaths(workspaceHandle);
-            setSweepPaths(paths.sweeps);
+            if (gen === generationRef.current) setSweepPaths(paths.sweeps);
           } catch (e) {
             // Degrade gracefully — the RA/Dec/Flux readout still works without
             // sweep numbers. Log so a stale/missing engine method (e.g. an old
             // bundled sidecar without get_sweep_paths) is diagnosable rather
             // than silently showing "Sweep: —".
             console.warn('getSweepPaths failed; sweep readout disabled:', e);
-            setSweepPaths([]);
+            if (gen === generationRef.current) setSweepPaths([]);
           }
         }
         setStatus(null);
-        const prev = previewHandleRef.current;
-        previewHandleRef.current = meta.handle;
-        if (prev !== null && prev !== meta.handle) {
-          void rpcClient.closeHandle(prev).catch(() => {});
-        }
       } catch (e) {
-        setError((e as Error).message);
-        setStatus(null);
+        if (gen === generationRef.current) {
+          setError((e as Error).message);
+          setStatus(null);
+        }
       } finally {
-        setBusy(false);
+        if (gen === generationRef.current) setBusy(false);
       }
     },
     [survey, workspaceHandle],

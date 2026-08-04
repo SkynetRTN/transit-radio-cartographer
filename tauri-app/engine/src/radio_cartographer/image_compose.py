@@ -321,8 +321,14 @@ def superimpose_images_multi(
         mask = _coverage_mask(
             img, min_ra, max_ra, min_dec, max_dec, width, height, ra_shift[i], dec_shift[i]
         )
-        pixels_sum[mask] += resampled[mask]
-        counts[mask] += 1.0
+        # Accumulate only finite cells: a composite input has NaN "no data"
+        # cells inside its rectangular coverage mask, and summing them would
+        # poison the mean for every other input covering that cell (bug #33 —
+        # the append variant's np.fmax handles this; give the mean the same
+        # treatment by not counting NaN cells as coverage).
+        finite = mask & np.isfinite(resampled)
+        pixels_sum[finite] += resampled[finite]
+        counts[finite] += 1.0
     with np.errstate(invalid="ignore"):
         pixels = np.where(counts > 0, pixels_sum / counts, np.nan)
 
@@ -419,10 +425,24 @@ def _compose(
     both = p_mask & s_mask
     pixels[only_p] = p_resampled[only_p]
     pixels[only_s] = s_resampled[only_s]
+    # NaN-aware combination: coverage masks are bounding-box rectangles, and a
+    # composite input carries NaN "no data" cells INSIDE its bbox (the BUG-014
+    # contract). np.maximum / a plain weighted sum propagate NaN, which would
+    # erase the other image's real data wherever it falls over such a cell —
+    # so take the finite operand when only one side has data (bug #29).
+    p_b = p_resampled[both]
+    s_b = s_resampled[both]
     if mode == "append":
-        pixels[both] = np.maximum(p_resampled[both], s_resampled[both])
+        pixels[both] = np.fmax(p_b, s_b)
     else:
-        pixels[both] = weight * p_resampled[both] + (1.0 - weight) * s_resampled[both]
+        p_ok = np.isfinite(p_b)
+        s_ok = np.isfinite(s_b)
+        with np.errstate(invalid="ignore"):
+            pixels[both] = np.where(
+                p_ok & s_ok,
+                weight * p_b + (1.0 - weight) * s_b,
+                np.where(p_ok, p_b, s_b),
+            )
 
     cdelt1 = -(max_ra - min_ra) / max(width - 1, 1)
     cdelt2 = (max_dec - min_dec) / max(height - 1, 1)

@@ -79,6 +79,30 @@ function fixedIntervalTicks(
   return { tickvals, ticktext: tickvals.map(format) };
 }
 
+// Magnifier box shapes in data coords. Kept out of the main render effect's
+// closure so overlay changes can be pushed via a shapes-only relayout that
+// never touches the axes (preserving an active zoom — BUG-025 parity with
+// ImagePlot; bug #34).
+function buildBoxShapes(
+  boxOverlay: BoxOverlay | null | undefined,
+  hasBounds: boolean,
+): Partial<Plotly.Shape>[] {
+  if (!boxOverlay || !hasBounds) return [];
+  return [
+    {
+      type: 'rect',
+      xref: 'x',
+      yref: 'y',
+      x0: boxOverlay.raCenter - boxOverlay.raHalfWidth,
+      x1: boxOverlay.raCenter + boxOverlay.raHalfWidth,
+      y0: boxOverlay.decCenter - boxOverlay.decHalfHeight,
+      y1: boxOverlay.decCenter + boxOverlay.decHalfHeight,
+      line: { color: 'white', width: 2 },
+      fillcolor: 'rgba(255, 255, 255, 0.05)',
+    } as Partial<Plotly.Shape>,
+  ];
+}
+
 export function RgbImagePlot({
   image,
   meta,
@@ -99,6 +123,12 @@ export function RgbImagePlot({
   const onContextMenuRef = useRef(onContextMenu);
   onHoverRef.current = onHover;
   onContextMenuRef.current = onContextMenu;
+  // The magnifier box must NOT be a dep of the full-rebuild effect: purging
+  // and re-reacting resets the axes, so opening/moving the magnifier would
+  // destroy an active zoom. Mirror ImagePlot (BUG-025): read it via a ref on
+  // first render and push later changes through a shapes-only relayout.
+  const boxOverlayRef = useRef(boxOverlay);
+  boxOverlayRef.current = boxOverlay;
 
   useEffect(() => {
     const node = ref.current;
@@ -264,21 +294,9 @@ export function RgbImagePlot({
       : [];
 
     // Magnifier box drawn on the main plot (BUG-017), in data coords so it
-    // tracks the region being magnified as the user zooms.
-    const shapes: Partial<Plotly.Shape>[] = [];
-    if (boxOverlay && hasBounds) {
-      shapes.push({
-        type: 'rect',
-        xref: 'x',
-        yref: 'y',
-        x0: boxOverlay.raCenter - boxOverlay.raHalfWidth,
-        x1: boxOverlay.raCenter + boxOverlay.raHalfWidth,
-        y0: boxOverlay.decCenter - boxOverlay.decHalfHeight,
-        y1: boxOverlay.decCenter + boxOverlay.decHalfHeight,
-        line: { color: 'white', width: 2 },
-        fillcolor: 'rgba(255, 255, 255, 0.05)',
-      } as Partial<Plotly.Shape>);
-    }
+    // tracks the region being magnified as the user zooms. Initial state only —
+    // subsequent changes arrive via the shapes-only relayout effect below.
+    const shapes = buildBoxShapes(boxOverlayRef.current, hasBounds);
 
     const layout: Partial<Plotly.Layout> = {
       title: { text: title },
@@ -374,7 +392,27 @@ export function RgbImagePlot({
       plotEl.removeAllListeners?.('plotly_relayout');
       Plotly.purge(node);
     };
-  }, [image, meta, title, theme, onBitmap, boxOverlay]);
+  }, [image, meta, title, theme, onBitmap]);
+
+  // Push magnifier-box changes through a shapes-only relayout so an active
+  // zoom survives opening/moving the magnifier (bug #34).
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    // Skip until the main effect has built the plot at least once.
+    if (!(node as unknown as { _fullLayout?: unknown })._fullLayout) return;
+    const hasBounds =
+      !!meta &&
+      Number.isFinite(meta.min_ra) &&
+      Number.isFinite(meta.max_ra) &&
+      Number.isFinite(meta.min_dec) &&
+      Number.isFinite(meta.max_dec) &&
+      meta.max_ra > meta.min_ra &&
+      meta.max_dec > meta.min_dec;
+    void Plotly.relayout(node, {
+      shapes: buildBoxShapes(boxOverlay, hasBounds),
+    } as unknown as Partial<Plotly.Layout>);
+  }, [boxOverlay, meta]);
 
   // Refit Plotly when the container resizes — the workspace dividers change the
   // column width / magnifier box without a window resize, which `responsive`
