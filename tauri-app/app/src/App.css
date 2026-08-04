@@ -392,7 +392,10 @@ body {
 
 .workspace-body {
   display: grid;
-  grid-template-columns: 1fr 220px;
+  /* Side panel shrinks with the window (down to a usable floor) instead of
+     holding a fixed 220px and squeezing the plot column at medium widths.
+     minmax(0, …) on the plot column lets it actually shrink below its content. */
+  grid-template-columns: minmax(0, 1fr) clamp(150px, 16%, 220px);
   gap: 16px;
   padding: 16px;
   flex: 1;
@@ -404,6 +407,65 @@ body {
   flex-direction: column;
   gap: 12px;
   min-height: 0;
+}
+
+/* ---------- draggable panel dividers ------------ */
+
+:root {
+  /* Width of the vertical divider gutter between the plots and side columns,
+     and the height of the horizontal magnifier divider. */
+  --ws-divider-w: 12px;
+}
+
+/* A thin grab bar with a centered handle line. The vertical variant is a grid
+   column between the plot and side panels; the horizontal variant sits between
+   the buttons/readout and the magnifier. */
+.ws-divider {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  touch-action: none;
+  color: var(--border-strong);
+}
+
+.ws-divider:hover,
+.ws-divider:active {
+  color: var(--accent);
+}
+
+.ws-divider-line {
+  background: currentColor;
+  border-radius: 2px;
+}
+
+.ws-divider-vertical {
+  cursor: col-resize;
+  height: 100%;
+  min-height: 0;
+}
+
+.ws-divider-vertical .ws-divider-line {
+  width: 2px;
+  height: 40px;
+  max-height: 60%;
+}
+
+.ws-divider-horizontal {
+  cursor: row-resize;
+  height: var(--ws-divider-w);
+  margin: 2px 0;
+}
+
+.ws-divider-horizontal .ws-divider-line {
+  height: 2px;
+  width: 40px;
+}
+
+/* While a divider is being dragged, suppress text selection everywhere so the
+   pointer drag doesn't highlight labels/buttons. */
+body.ws-resizing {
+  user-select: none;
 }
 
 .workspace-plots > .plot-row {
@@ -585,6 +647,25 @@ body {
   color: var(--accent);
 }
 
+/* Live flux totals shown under the magnifier's Sum/Average buttons. */
+.magnifier-stats {
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: var(--surface-raised);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.magnifier-stats-note {
+  color: var(--text-faint);
+}
+
 .sweep-nav {
   display: flex;
   align-items: center;
@@ -602,6 +683,13 @@ body {
   text-align: center;
   font: inherit;
   font-variant-numeric: tabular-nums;
+}
+
+.sweep-nav-hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-subtle);
+  text-align: center;
 }
 
 .survey-view.empty {
@@ -692,6 +780,12 @@ body {
   font-size: 11px;
 }
 
+.modal-hint {
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-top: 4px;
+}
+
 .modal-buttons {
   display: flex;
   justify-content: flex-end;
@@ -729,6 +823,13 @@ body {
   font-style: italic;
 }
 
+.side-error {
+  font-size: 11px;
+  color: var(--danger);
+  margin-top: 4px;
+  word-break: break-word;
+}
+
 .point-readout {
   margin-top: 8px;
   padding: 6px 8px;
@@ -747,6 +848,12 @@ body {
   color: var(--accent);
   text-transform: uppercase;
   letter-spacing: 0.5px;
+}
+
+/* Unpin sits directly under the RA/Dec/Flux readout it clears (BUG-025). */
+.point-readout .unpin-button {
+  margin-top: 6px;
+  align-self: flex-start;
 }
 
 .magnifier-panel {
@@ -995,78 +1102,46 @@ body {
   background: var(--primary-bg-hover);
 }
 
-/* ---------- help dialog ------------ */
+/* ---------- tutorial window ------------ */
 
-.modal.help-modal {
-  width: min(1100px, 90vw);
-  height: min(80vh, 800px);
-  padding: 0;
-  gap: 0;
+/* Standalone tutorial window (tutorial.html). Fills its native window. The nav
+   is a horizontal bar across the top (not a sidebar) so the section text always
+   gets the full window width — important when the window is snapped to half the
+   screen beside the main app. The buttons wrap onto extra rows when narrow. */
+.tutorial-window {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--surface);
+  color: var(--text);
   overflow: hidden;
 }
 
-.help-modal-header {
+.tutorial-nav {
+  flex: 0 0 auto;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
   background: var(--surface-raised);
 }
 
-.help-modal-header .modal-title {
-  font-size: 14px;
-}
-
-.help-close {
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 3px;
-  padding: 2px 8px;
-  font-size: 14px;
-  color: inherit;
-  cursor: pointer;
-  line-height: 1;
-}
-
-.help-close:hover {
-  background: var(--menu-hover-bg);
-  border-color: var(--border-strong);
-}
-
-.help-modal-body {
-  display: flex;
-  flex: 1 1 auto;
-  min-height: 0;
-}
-
-.help-nav {
-  flex: 0 0 180px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 14px 10px;
-  border-right: 1px solid var(--border);
-  background: var(--surface-raised);
-  overflow-y: auto;
-}
-
-.help-nav button {
-  padding: 8px 12px;
+.tutorial-nav button {
+  padding: 6px 12px;
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--surface);
   color: var(--text);
   font: inherit;
-  text-align: left;
   cursor: pointer;
 }
 
-.help-nav button:hover {
+.tutorial-nav button:hover {
   background: var(--button-hover-bg);
 }
 
-.help-nav button.active {
+.tutorial-nav button.active {
   background: var(--accent-soft-bg);
   border-color: var(--accent);
   font-weight: 600;
@@ -1074,6 +1149,7 @@ body {
 
 .help-content {
   flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   padding: 18px 24px;
   font-size: 13px;

@@ -532,7 +532,10 @@ export function PointScatter({
       style={{
         width: '100%',
         height: '100%',
-        minHeight: `${height}px`,
+        // `height` is the preferred floor, but cap it at a fraction of the
+        // viewport so stacked plots compress on short/medium windows instead of
+        // overflowing the workspace and forcing the outer scrollbar.
+        minHeight: `min(${height}px, 40vh)`,
         cursor: dragEnabled ? 'crosshair' : 'default',
       }}
     />

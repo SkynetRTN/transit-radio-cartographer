@@ -27,8 +27,16 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
-                if let Some(bridge) = window.try_state::<SidecarBridge>() {
-                    bridge.shutdown();
+                // Only the main window owns the Python sidecar's lifetime.
+                // Auxiliary windows (e.g. the "tutorial" window) come and go
+                // freely without touching the engine. When the main window is
+                // destroyed, shut the sidecar down and exit the whole app so
+                // any remaining windows (the tutorial) close too.
+                if window.label() == "main" {
+                    if let Some(bridge) = window.try_state::<SidecarBridge>() {
+                        bridge.shutdown();
+                    }
+                    window.app_handle().exit(0);
                 }
             }
         })

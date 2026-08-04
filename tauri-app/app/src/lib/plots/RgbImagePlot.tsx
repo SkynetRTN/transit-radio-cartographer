@@ -1,14 +1,39 @@
 import { useEffect, useRef } from 'react';
 import Plotly from 'plotly.js-dist-min';
 import type { RgbImageMeta, RgbImagePixels } from '../../ipc/client';
+import type { BoxOverlay } from './ImagePlot';
 import { useTheme } from '../../state/theme-context';
 import { plotChrome } from './plot-theme';
+
+// A cell on the RGB composite. No flux (3-channel), just sky position + grid
+// indices — enough to drive the magnifier and an RA/Dec readout.
+export interface RgbImagePoint {
+  ra: number;
+  dec: number;
+  col: number;
+  row: number;
+}
 
 interface Props {
   image: RgbImagePixels;
   meta?: RgbImageMeta | null;
   title?: string;
   testId?: string;
+  // Reports the composited bitmap as a PNG data URL each render, so the view
+  // can export it client-side (BUG-015). Pass a stable (memoized) callback.
+  onBitmap?: (dataUrl: string) => void;
+  // Cursor/right-click reporting for the magnifier + readout (BUG-017). Cells
+  // are derived from the pointer position via the axis pixel→data transform
+  // (there is no per-cell trace to fire Plotly hover events).
+  onHover?: (point: RgbImagePoint | null) => void;
+  onContextMenu?: (point: RgbImagePoint | null) => void;
+  boxOverlay?: BoxOverlay | null;
+  // Fixed pixel height (used by the magnifier panel); defaults to a flexible
+  // min-height of 420 that fills the workspace.
+  fixedHeight?: number;
+  // Render as a square (used by the magnifier) instead of filling the box, so
+  // the loupe isn't collapsed to the wide/tall shape of the source image.
+  square?: boolean;
 }
 
 function pad2(n: number): string {
@@ -25,37 +50,55 @@ function formatRaSeconds(ra: number): string {
   return `${pad2(hrs)}:${pad2(mins)}:${pad2(secs)}`;
 }
 
-function formatDecDegrees(dec: number): string {
-  const sign = dec < 0 ? '-' : '';
-  const abs = Math.abs(dec);
-  const deg = Math.floor(abs);
-  const mins = Math.floor((abs - deg) * 60);
-  const secs = Math.floor((abs - deg - mins / 60) * 3600);
-  return `${sign}${pad2(deg)}:${pad2(mins)}:${pad2(secs)}`;
+// Forced light-gray sky grid on 10° boundaries; Dec labeled in decimal degrees.
+// Mirrors ImagePlot so the scalar and RGB viewers match.
+const GRID_COLOR = '#e6e6e6';
+const SEC_PER_DEG_RA = 240;
+const GRID_STEP_DEG = 10;
+
+function formatDecDeg(dec: number): string {
+  const rounded = Math.round(dec * 10) / 10;
+  return Number.isInteger(rounded) ? `${rounded}°` : `${rounded.toFixed(1)}°`;
 }
 
-function sexagesimalTicks(
+function fixedIntervalTicks(
   lo: number,
   hi: number,
-  count: number,
+  interval: number,
   format: (v: number) => string,
 ): { tickvals: number[]; ticktext: string[] } {
-  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo || count < 2) {
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo || interval <= 0) {
     return { tickvals: [lo], ticktext: [format(lo)] };
   }
   const tickvals: number[] = [];
-  const ticktext: string[] = [];
-  for (let i = 0; i < count; i++) {
-    const v = lo + ((hi - lo) * i) / (count - 1);
-    tickvals.push(v);
-    ticktext.push(format(v));
+  const start = Math.ceil(lo / interval) * interval;
+  for (let v = start; v <= hi + 1e-9; v += interval) tickvals.push(v);
+  if (tickvals.length < 2) {
+    return { tickvals: [lo, hi], ticktext: [format(lo), format(hi)] };
   }
-  return { tickvals, ticktext };
+  return { tickvals, ticktext: tickvals.map(format) };
 }
 
-export function RgbImagePlot({ image, meta, title = '', testId }: Props) {
+export function RgbImagePlot({
+  image,
+  meta,
+  title = '',
+  testId,
+  onBitmap,
+  onHover,
+  onContextMenu,
+  boxOverlay,
+  fixedHeight,
+  square = false,
+}: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
   const { theme } = useTheme();
+  // Keep the latest callbacks in refs so the pointer listeners (wired once)
+  // always call the current handler without re-running the Plotly effect.
+  const onHoverRef = useRef(onHover);
+  const onContextMenuRef = useRef(onContextMenu);
+  onHoverRef.current = onHover;
+  onContextMenuRef.current = onContextMenu;
 
   useEffect(() => {
     const node = ref.current;
@@ -87,15 +130,17 @@ export function RgbImagePlot({ image, meta, title = '', testId }: Props) {
     // So the rule is: paint white only when EVERY channel is non-finite; if
     // at least one channel carries data, treat the others as 0.
     //
-    // Canvas orientation: the bitmap fills the plot area in paper coords, so
-    //   - canvas col c (left-to-right) maps to engine col c. The engine puts
-    //     ra_grid = max_ra at col 0 and ra_grid = min_ra at col W-1. With the
-    //     x-axis reversed (max_ra displays on the visual LEFT), canvas col 0
-    //     (visual left of bitmap) already aligns with the visual-left RA tick.
-    //   - canvas row r (top-to-bottom) maps to engine row H-1-r. The engine
-    //     puts dec_grid = min_dec at row 0 (its native bottom) and max_dec at
-    //     row H-1 (top), but HTML canvas has row 0 at the top — hence the
-    //     row flip.
+    // Canvas orientation for a DATA-coordinate layout image (BUG-017/BUG-025).
+    // Plotly's layout-image renderer does NOT honor a reversed axis: it anchors
+    // the image at the pixel for `x` and always paints its source pixels left→
+    // right, top→bottom from there. So the canvas must be oriented for the FINAL
+    // on-screen layout, and the image anchored at the visual-left data value
+    // (max_ra) — see the layoutImages block below. Sky convention (as in
+    // ImagePlot): max_ra on the visual LEFT, min_dec at the visual BOTTOM.
+    //   - canvas col c → engine col c: source col 0 = engine col 0 = max_ra
+    //     (visual left), source last col = engine col W-1 = min_ra.
+    //   - canvas row r → engine row (H-1-r): source row 0 = engine row H-1 =
+    //     max_dec (visual top), source last row = min_dec (visual bottom).
     for (let r = 0; r < h; r++) {
       for (let c = 0; c < w; c++) {
         const srcRow = h - 1 - r;
@@ -122,6 +167,8 @@ export function RgbImagePlot({ image, meta, title = '', testId }: Props) {
     }
     ctx.putImageData(imgData, 0, 0);
     const dataUrl = canvas.toDataURL();
+    // Hand the composited PNG up so the view can export exactly what's shown.
+    onBitmap?.(dataUrl);
 
     const hasBounds =
       !!meta &&
@@ -147,23 +194,26 @@ export function RgbImagePlot({ image, meta, title = '', testId }: Props) {
       } as Plotly.Data,
     ];
 
+    // Sparse 10° sky grid: RA every 2400s (=10°, kept HH:MM:SS), Dec every 10°
+    // in decimal degrees.
     const raTicks = hasBounds
-      ? sexagesimalTicks(meta!.min_ra, meta!.max_ra, 5, formatRaSeconds)
+      ? fixedIntervalTicks(meta!.min_ra, meta!.max_ra, GRID_STEP_DEG * SEC_PER_DEG_RA, formatRaSeconds)
       : null;
     const decTicks = hasBounds
-      ? sexagesimalTicks(meta!.min_dec, meta!.max_dec, 5, formatDecDegrees)
+      ? fixedIntervalTicks(meta!.min_dec, meta!.max_dec, GRID_STEP_DEG, formatDecDeg)
       : null;
 
     const chrome = plotChrome(theme);
+    // A sparse light-gray 10° grid is unobtrusive enough to sit over the RGB
+    // bitmap without obscuring source structure (unlike a dense per-cell grid).
     const xaxis: Partial<Plotly.LayoutAxis> = {
       title: { text: 'Right Ascension' },
-      // RGB composites paint over the full plot area as a single bitmap; the
-      // gridlines that scalar heatmaps lean on for cell registration would
-      // overlay each footprint and obscure source structure.
-      showgrid: false,
+      showgrid: true,
+      gridcolor: GRID_COLOR,
+      gridwidth: 1,
       zeroline: false,
-      linecolor: chrome.axisColor,
-      tickcolor: chrome.axisColor,
+      linecolor: GRID_COLOR,
+      tickcolor: GRID_COLOR,
       ...(hasBounds ? { autorange: 'reversed' as const } : {}),
       ...(raTicks
         ? { tickmode: 'array', tickvals: raTicks.tickvals, ticktext: raTicks.ticktext }
@@ -171,35 +221,40 @@ export function RgbImagePlot({ image, meta, title = '', testId }: Props) {
     };
     const yaxis: Partial<Plotly.LayoutAxis> = {
       title: { text: 'Declination' },
-      showgrid: false,
+      showgrid: true,
+      gridcolor: GRID_COLOR,
+      gridwidth: 1,
       zeroline: false,
-      linecolor: chrome.axisColor,
-      tickcolor: chrome.axisColor,
+      linecolor: GRID_COLOR,
+      tickcolor: GRID_COLOR,
       ...(decTicks
         ? { tickmode: 'array', tickvals: decTicks.tickvals, ticktext: decTicks.ticktext }
         : {}),
     };
 
-    // Layout image placed in PAPER coords (0..1 plot fraction) rather than data
-    // coords. Plotly's data-coord layout images interact badly with reversed
-    // axes — the bitmap was rendering at a tiny fraction of the intended size
-    // for some sizex/sizey ranges. Paper coords sidestep that entirely; the
-    // bitmap fills the plot area, and we made sure the canvas pixel order
-    // matches the desired visual orientation:
-    //   - canvas col 0 (visual LEFT of bitmap) holds the source's max_ra data;
-    //     after reversed-axis display that lines up with the visual LEFT tick.
-    //   - canvas row 0 (visual TOP of bitmap) holds the source's max_dec data,
-    //     matching the visual TOP tick.
+    // Layout image placed in DATA coords (BUG-017) so it zooms/pans with the
+    // axes — the previous paper-coord placement pinned the bitmap to the plot
+    // rectangle, so zooming moved the ticks but not the picture.
+    //
+    // BUG-025: Plotly's layout-image renderer ignores the reversed x-axis. It
+    // anchors at the pixel for `x` and paints RIGHTWARD by `sizex`. Anchoring at
+    // min_ra (the old code) puts the anchor at the REVERSED axis's right edge,
+    // so the whole bitmap was painted off the right side — leaving only a
+    // one-column sliver on screen. Anchor instead at max_ra, which maps to the
+    // LEFT plot edge on the reversed axis, so the image paints left→right across
+    // the full plot. The canvas is oriented (above) to match: source-left =
+    // max_ra, source-top = max_dec, exactly what xanchor:'left'/yanchor:'top'
+    // consume. sizex/sizey stay the positive data span.
     const layoutImages = hasBounds
       ? [
           {
             source: dataUrl,
-            xref: 'paper',
-            yref: 'paper',
-            x: 0,
-            y: 1,
-            sizex: 1,
-            sizey: 1,
+            xref: 'x',
+            yref: 'y',
+            x: meta!.max_ra,
+            y: meta!.max_dec,
+            sizex: meta!.max_ra - meta!.min_ra,
+            sizey: meta!.max_dec - meta!.min_dec,
             xanchor: 'left',
             yanchor: 'top',
             sizing: 'stretch',
@@ -207,6 +262,23 @@ export function RgbImagePlot({ image, meta, title = '', testId }: Props) {
           },
         ]
       : [];
+
+    // Magnifier box drawn on the main plot (BUG-017), in data coords so it
+    // tracks the region being magnified as the user zooms.
+    const shapes: Partial<Plotly.Shape>[] = [];
+    if (boxOverlay && hasBounds) {
+      shapes.push({
+        type: 'rect',
+        xref: 'x',
+        yref: 'y',
+        x0: boxOverlay.raCenter - boxOverlay.raHalfWidth,
+        x1: boxOverlay.raCenter + boxOverlay.raHalfWidth,
+        y0: boxOverlay.decCenter - boxOverlay.decHalfHeight,
+        y1: boxOverlay.decCenter + boxOverlay.decHalfHeight,
+        line: { color: 'white', width: 2 },
+        fillcolor: 'rgba(255, 255, 255, 0.05)',
+      } as Partial<Plotly.Shape>);
+    }
 
     const layout: Partial<Plotly.Layout> = {
       title: { text: title },
@@ -221,22 +293,123 @@ export function RgbImagePlot({ image, meta, title = '', testId }: Props) {
       font: { family: 'Tahoma, sans-serif', size: 11, color: chrome.fontColor },
       xaxis,
       yaxis,
+      shapes,
       // Cast: Plotly's TS types for layout images are stricter than the
       // runtime allows (e.g. `sizing: 'stretch'` is supported but the type
       // sometimes restricts it).
       images: layoutImages as unknown as Plotly.Layout['images'],
     };
     Plotly.react(node, data, layout, { displayModeBar: false, responsive: true });
+
+    // Pointer → cell mapping via the axis pixel→data transform (there is no
+    // per-cell trace on the RGB plot to fire Plotly hover events).
+    type AxisInternal = {
+      p2d?: (px: number) => number;
+      _offset?: number;
+      _length?: number;
+    };
+    const toCell = (clientX: number, clientY: number): RgbImagePoint | null => {
+      if (!hasBounds) return null;
+      const internal = node as unknown as {
+        _fullLayout?: { xaxis?: AxisInternal; yaxis?: AxisInternal };
+      };
+      const rect = node.getBoundingClientRect();
+      const xa = internal._fullLayout?.xaxis;
+      const ya = internal._fullLayout?.yaxis;
+      if (!xa?.p2d || xa._offset === undefined) return null;
+      if (!ya?.p2d || ya._offset === undefined) return null;
+      const px = clientX - rect.left - xa._offset;
+      const py = clientY - rect.top - ya._offset;
+      if (xa._length !== undefined && (px < 0 || px > xa._length)) return null;
+      if (ya._length !== undefined && (py < 0 || py > ya._length)) return null;
+      const ra = xa.p2d(px);
+      const dec = ya.p2d(py);
+      const { min_ra, max_ra, min_dec, max_dec } = meta!;
+      const col = Math.max(
+        0,
+        Math.min(w - 1, Math.round(((max_ra - ra) / (max_ra - min_ra)) * (w - 1))),
+      );
+      const row = Math.max(
+        0,
+        Math.min(h - 1, Math.round(((dec - min_dec) / (max_dec - min_dec)) * (h - 1))),
+      );
+      return { ra, dec, col, row };
+    };
+    const onMove = (e: MouseEvent) => onHoverRef.current?.(toCell(e.clientX, e.clientY));
+    const onLeave = () => onHoverRef.current?.(null);
+    const onCtx = (e: MouseEvent) => {
+      // Suppress the browser menu and (like ImagePlot) prevent Plotly from
+      // resetting the reversed axis; report the right-clicked cell instead.
+      e.preventDefault();
+      onContextMenuRef.current?.(toCell(e.clientX, e.clientY));
+    };
+    node.addEventListener('mousemove', onMove);
+    node.addEventListener('mouseleave', onLeave);
+    node.addEventListener('contextmenu', onCtx);
+
+    // BUG-008: a double-click / zoom-out resets `xaxis.autorange` to `true`,
+    // dropping the 'reversed' flag and flipping RA. Re-apply it, guarded so we
+    // don't loop on our own relayout.
+    const plotEl = node as unknown as {
+      on: (event: string, cb: (data: unknown) => void) => void;
+      removeAllListeners?: (event: string) => void;
+    };
+    let suppressRelayout = false;
+    const onRelayoutWired = (data: unknown) => {
+      if (!hasBounds || suppressRelayout) return;
+      const d = data as Record<string, unknown>;
+      if (d['xaxis.autorange'] === true) {
+        suppressRelayout = true;
+        Plotly.relayout(node, { 'xaxis.autorange': 'reversed' } as unknown as Partial<Plotly.Layout>).finally(() => {
+          suppressRelayout = false;
+        });
+      }
+    };
+    plotEl.on('plotly_relayout', onRelayoutWired);
+
     return () => {
+      node.removeEventListener('mousemove', onMove);
+      node.removeEventListener('mouseleave', onLeave);
+      node.removeEventListener('contextmenu', onCtx);
+      plotEl.removeAllListeners?.('plotly_relayout');
       Plotly.purge(node);
     };
-  }, [image, meta, title, theme]);
+  }, [image, meta, title, theme, onBitmap, boxOverlay]);
+
+  // Refit Plotly when the container resizes — the workspace dividers change the
+  // column width / magnifier box without a window resize, which `responsive`
+  // alone wouldn't catch.
+  useEffect(() => {
+    const node = ref.current;
+    if (!node || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      if (node.getBoundingClientRect().width > 0) {
+        void (Plotly as unknown as { Plots: { resize: (n: HTMLElement) => void } }).Plots.resize(
+          node,
+        );
+      }
+    });
+    ro.observe(node);
+    return () => ro.disconnect();
+  }, []);
 
   return (
     <div
       data-testid={testId ?? 'rgb-image-plot'}
       ref={ref}
-      style={{ width: '100%', height: '100%', minHeight: 420 }}
+      style={
+        square
+          ? {
+              // A square of side `fixedHeight`, capped to the container width
+              // and centered — matches ImagePlot's square magnifier.
+              width: `min(100%, ${fixedHeight ?? 200}px)`,
+              aspectRatio: '1 / 1',
+              margin: '0 auto',
+            }
+          : fixedHeight !== undefined
+            ? { width: '100%', height: fixedHeight }
+            : { width: '100%', height: '100%', minHeight: 420 }
+      }
     />
   );
 }

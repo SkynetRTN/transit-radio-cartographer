@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Plotly from 'plotly.js-dist-min';
 import type { ImageMeta, ImagePixels, PaletteStop } from '../../ipc/client';
 import type { ImageDisplayMode } from '../../state/survey-context';
@@ -33,8 +33,19 @@ interface Props {
   onClick?: (point: ImagePoint) => void;
   onContextMenu?: (point: ImagePoint | null) => void;
   boxOverlay?: BoxOverlay | null;
+  // BUG-020: draws a persistent target marker at the pinned (clicked) cell so
+  // the user can see where the flux readout was sampled after moving the cursor.
+  pinnedMarker?: { ra: number; dec: number } | null;
   showColorBar?: boolean;
   fixedHeight?: number;
+  // Force a 1:1 letterbox regardless of the sky aspect. Used by the magnifier
+  // so the loupe is always a square instead of collapsing to the (often very
+  // wide or very tall) shape of the source image.
+  square?: boolean;
+  // Hide the RA/Dec axis titles, ticks, tick labels, and gridlines. Used by the
+  // magnifier so the loupe is a clean zoomed patch — hover still fires so the
+  // RA/Dec/Flux readout keeps updating.
+  hideAxes?: boolean;
   // FEAT-011: selects how the bounded-mode plot lays out its aspect ratio.
   // - 'sky' (default): cos(dec_center)/240 — true sky shape with cos(dec)
   //   correction at the image center (FEAT-008 v3 formula).
@@ -118,36 +129,141 @@ function formatRaSeconds(ra: number): string {
   return `${pad2(hrs)}:${pad2(mins)}:${pad2(secs)}`;
 }
 
-// Dec is stored as signed decimal degrees. Mirrors vb/survform.frm:5622-5650.
-function formatDecDegrees(dec: number): string {
-  const sign = dec < 0 ? '-' : '';
-  const abs = Math.abs(dec);
-  const deg = Math.floor(abs);
-  const mins = Math.floor((abs - deg) * 60);
-  const secs = Math.floor((abs - deg - mins / 60) * 3600);
-  return `${sign}${pad2(deg)}:${pad2(mins)}:${pad2(secs)}`;
+// Forced grid color: a light gray that reads on both light and dark themes, so
+// the sky grid is never a dark/heavy line regardless of theme.
+const GRID_COLOR = '#e6e6e6';
+
+// One degree of RA in stored units (seconds of time): 360° = 24h = 86400s, so
+// 1° = 240s. The sky grid steps every 10°, i.e. every 2400s of RA.
+const SEC_PER_DEG_RA = 240;
+const GRID_STEP_DEG = 10;
+
+// Dec axis label in plain decimal degrees (e.g. "40°"), not sexagesimal.
+function formatDecDeg(dec: number): string {
+  const rounded = Math.round(dec * 10) / 10;
+  return Number.isInteger(rounded) ? `${rounded}°` : `${rounded.toFixed(1)}°`;
 }
 
-// Roughly evenly-spaced ticks across [lo, hi] with `count` entries. Used to
-// stamp HH:MM:SS / DD:MM:SS labels on the axes — Plotly's `tickformat`
-// doesn't understand sexagesimal, so we feed it the labels directly.
-function sexagesimalTicks(
+// Ticks (and therefore gridlines) on a fixed `interval`, aligned to multiples of
+// it, so the grid lands on whole-degree boundaries. Plotly's `tickformat` can't
+// do sexagesimal, so we feed labels directly. Falls back to the endpoints when
+// the span is smaller than one interval so the axis is never blank.
+function fixedIntervalTicks(
   lo: number,
   hi: number,
-  count: number,
+  interval: number,
   format: (v: number) => string,
 ): { tickvals: number[]; ticktext: string[] } {
-  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo || count < 2) {
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo || interval <= 0) {
     return { tickvals: [lo], ticktext: [format(lo)] };
   }
   const tickvals: number[] = [];
-  const ticktext: string[] = [];
-  for (let i = 0; i < count; i++) {
-    const v = lo + ((hi - lo) * i) / (count - 1);
-    tickvals.push(v);
-    ticktext.push(format(v));
+  const start = Math.ceil(lo / interval) * interval;
+  for (let v = start; v <= hi + 1e-9; v += interval) tickvals.push(v);
+  if (tickvals.length < 2) {
+    return { tickvals: [lo, hi], ticktext: [format(lo), format(hi)] };
   }
-  return { tickvals, ticktext };
+  return { tickvals, ticktext: tickvals.map(format) };
+}
+
+function hasBoundsOf(meta: ImageMeta | null | undefined): boolean {
+  return (
+    !!meta &&
+    Number.isFinite(meta.min_ra) &&
+    Number.isFinite(meta.max_ra) &&
+    Number.isFinite(meta.min_dec) &&
+    Number.isFinite(meta.max_dec) &&
+    meta.max_ra > meta.min_ra &&
+    meta.max_dec > meta.min_dec
+  );
+}
+
+// Overlay shapes drawn on top of the heatmap: the magnifier box and the pinned-
+// cell target ring. Kept in a helper so pin / magnifier changes can be pushed
+// with a shapes-only `Plotly.relayout` — which never touches the axes — instead
+// of a full `Plotly.react`, whose layout re-applies `autorange` and can snap an
+// active zoom back out (BUG-025). The pinned ring is a fixed-pixel-size circle
+// anchored at the data point (`xsizemode/ysizemode: 'pixel'`), so it stays the
+// same size at any zoom, moves with pan/zoom, clips when out of view, and — as
+// a shape, not a trace — never expands the axis autorange. Black halo under a
+// white ring keeps it visible over any palette color.
+function buildShapes(
+  pinnedMarker: { ra: number; dec: number } | null | undefined,
+  boxOverlay: BoxOverlay | null | undefined,
+  hasBounds: boolean,
+): Partial<Plotly.Shape>[] {
+  const shapes: Partial<Plotly.Shape>[] = [];
+  if (boxOverlay && hasBounds) {
+    shapes.push({
+      type: 'rect',
+      xref: 'x',
+      yref: 'y',
+      x0: boxOverlay.raCenter - boxOverlay.raHalfWidth,
+      x1: boxOverlay.raCenter + boxOverlay.raHalfWidth,
+      y0: boxOverlay.decCenter - boxOverlay.decHalfHeight,
+      y1: boxOverlay.decCenter + boxOverlay.decHalfHeight,
+      line: { color: 'white', width: 2 },
+      fillcolor: 'rgba(255, 255, 255, 0.05)',
+    } as Partial<Plotly.Shape>);
+  }
+  if (
+    pinnedMarker &&
+    hasBounds &&
+    Number.isFinite(pinnedMarker.ra) &&
+    Number.isFinite(pinnedMarker.dec)
+  ) {
+    const ring = (px: number, color: string, width: number) =>
+      ({
+        type: 'circle',
+        xref: 'x',
+        yref: 'y',
+        xsizemode: 'pixel',
+        ysizemode: 'pixel',
+        xanchor: pinnedMarker.ra,
+        yanchor: pinnedMarker.dec,
+        x0: -px,
+        x1: px,
+        y0: -px,
+        y1: px,
+        line: { color, width },
+      }) as unknown as Partial<Plotly.Shape>;
+    shapes.push(ring(9, '#000', 4), ring(8, '#fff', 2));
+  }
+  return shapes;
+}
+
+// BUG-025: the plot container is letterboxed to this width:height ratio so the
+// default (un-zoomed) view keeps the correct sky shape WITHOUT an axis
+// `scaleanchor` — which would lock the pixels-per-unit ratio and make free box-
+// zoom impossible. This is the very ratio scaleanchor would have enforced: with
+// `scaleratio` R linking x to y, R x-units share the pixel span of 1 y-unit, so
+// the sky-correct pixel box has W/H = raSpan * R / decSpan. Returns null when
+// the plot should simply fill its container ('stretch', or an unusable span).
+function plotAspect(
+  meta: ImageMeta | null | undefined,
+  w: number,
+  h: number,
+  displayMode: ImageDisplayMode,
+): number | null {
+  const hasBounds = hasBoundsOf(meta);
+  if (!hasBounds) {
+    // Pixel-index view (no RA/Dec bounds): render square pixel cells.
+    return w > 0 && h > 0 ? w / h : null;
+  }
+  if (displayMode === 'stretch') return null;
+  const raSpan = meta!.max_ra - meta!.min_ra;
+  const decSpan = meta!.max_dec - meta!.min_dec;
+  const decCenter = (meta!.min_dec + meta!.max_dec) / 2;
+  // Same R the old scaleanchor used (see FEAT-011): 'raw' = 1/240, 'pixel' =
+  // per-cell-square, 'sky' = cos(dec)/240.
+  const ratio =
+    displayMode === 'raw'
+      ? 1 / 240
+      : displayMode === 'pixel'
+        ? (decSpan * w) / (raSpan * h)
+        : Math.cos((decCenter * Math.PI) / 180) / 240;
+  const aspect = (raSpan * ratio) / decSpan;
+  return Number.isFinite(aspect) && aspect > 0 ? aspect : null;
 }
 
 export function ImagePlot({
@@ -161,15 +277,29 @@ export function ImagePlot({
   onClick,
   onContextMenu,
   boxOverlay,
+  pinnedMarker,
   showColorBar = true,
   fixedHeight,
+  square = false,
+  hideAxes = false,
   displayMode = 'sky',
 }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
+  // Outer wrapper we measure to letterbox the plot to the sky aspect (BUG-025).
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const [box, setBox] = useState<{ w: number; h: number } | null>(null);
   const { theme } = useTheme();
   // Keep the most recent hovered cell so the container's onContextMenu handler
   // can report it without needing Plotly's native (suppressed) right-click.
   const lastHoverRef = useRef<ImagePoint | null>(null);
+  // Latest overlay inputs, read by the main render so it can seed the shapes
+  // without re-running when only the pin / magnifier box changes (BUG-025).
+  const pinnedMarkerRef = useRef(pinnedMarker);
+  const boxOverlayRef = useRef(boxOverlay);
+  const onContextMenuRef = useRef(onContextMenu);
+  pinnedMarkerRef.current = pinnedMarker;
+  boxOverlayRef.current = boxOverlay;
+  onContextMenuRef.current = onContextMenu;
 
   useEffect(() => {
     const node = ref.current;
@@ -198,15 +328,7 @@ export function ImagePlot({
     // labels would print in reverse.
     const w = image.width;
     const h = image.height;
-    const hasBounds =
-      meta !== undefined &&
-      meta !== null &&
-      Number.isFinite(meta.min_ra) &&
-      Number.isFinite(meta.max_ra) &&
-      Number.isFinite(meta.min_dec) &&
-      Number.isFinite(meta.max_dec) &&
-      meta.max_ra > meta.min_ra &&
-      meta.max_dec > meta.min_dec;
+    const hasBounds = hasBoundsOf(meta);
     const xs: number[] = new Array(w);
     const ys: number[] = new Array(h);
     if (hasBounds) {
@@ -247,11 +369,19 @@ export function ImagePlot({
       } as Plotly.Data,
     ];
 
+    // The pinned-cell marker (BUG-020) is drawn as a layout SHAPE below, not a
+    // scatter trace. A trace's data participates in autorange, so adding it
+    // while zoomed pulled the view back out to include the point (BUG-025); a
+    // pixel-sized shape never affects autorange and simply clips when the pinned
+    // cell is off-screen — so the RA/Dec/Flux readout stays but no ring is drawn.
+
+    // Grid on a fixed 10° sky spacing: RA every 2400s (=10°, kept in HH:MM:SS),
+    // Dec every 10° (labeled in plain decimal degrees).
     const raTicks = hasBounds
-      ? sexagesimalTicks(meta!.min_ra, meta!.max_ra, 5, formatRaSeconds)
+      ? fixedIntervalTicks(meta!.min_ra, meta!.max_ra, GRID_STEP_DEG * SEC_PER_DEG_RA, formatRaSeconds)
       : null;
     const decTicks = hasBounds
-      ? sexagesimalTicks(meta!.min_dec, meta!.max_dec, 5, formatDecDegrees)
+      ? fixedIntervalTicks(meta!.min_dec, meta!.max_dec, GRID_STEP_DEG, formatDecDeg)
       : null;
 
     // Legacy convention (vb/survform.frm: Picture4 paint loop): MaxRa on the
@@ -259,90 +389,80 @@ export function ImagePlot({
     // a standard sky image. Reverse the x-axis so xs[0]=max_ra (col 0 of the
     // pixel grid) renders on the left.
     //
-    // Aspect-lock branching: in RA/Dec mode a naive `scaleanchor: 'y'` with
-    // the default `scaleratio: 1` collapses the image to a horizontal line
-    // because RA is stored in sidereal seconds (range ~thousands) and Dec in
-    // degrees (range ~tens). FEAT-011 makes the aspect a 4-way choice:
-    //   - 'sky' (default, FEAT-008 v3): `cos(dec_center) / 240`. `1/240`
-    //     converts RA-seconds to RA-degrees (24h of RA = 360°, so
-    //     1 RA-sec = 15" = 1/240°); `cos(dec_center)` accounts for RA-line
-    //     convergence toward the poles. Rectangular projection accurate at
-    //     the image center, used by DS9 and most FITS viewers.
-    //   - 'raw' (FEAT-008 v2): `1/240` only. Equator-only sky shape; matches
-    //     the legacy VB app (vb/survform.frm:1606-1714) which skips cos.
-    //   - 'pixel' ("Snap to Square"): `(decRange * w) / (raRange * h)`. Each
-    //     pixel cell renders square on screen. Wrong geometrically but
-    //     useful for inspecting very thin / wide surveys.
-    //   - 'stretch': no scaleanchor; axes scale independently to fill the
-    //     workspace container.
-    // In pixel mode (no RA/Dec bounds) the default `scaleratio: 1` already
-    // does the right thing (one data unit = one pixel cell on each axis).
-    const decCenter = hasBounds ? (meta!.min_dec + meta!.max_dec) / 2 : 0;
-    const boundedScaleratio = (() => {
-      if (!hasBounds) return 1;
-      if (displayMode === 'raw') return 1 / 240;
-      if (displayMode === 'pixel') {
-        return ((meta!.max_dec - meta!.min_dec) * w) /
-          ((meta!.max_ra - meta!.min_ra) * h);
-      }
-      // 'sky' default
-      return Math.cos((decCenter * Math.PI) / 180) / 240;
-    })();
-    const lockBounded: Partial<Plotly.LayoutAxis> =
-      hasBounds && displayMode !== 'stretch'
-        ? {
-            scaleanchor: 'y' as const,
-            scaleratio: boundedScaleratio,
-            constrain: 'domain' as const,
-          }
-        : {};
-    const lockPixel: Partial<Plotly.LayoutAxis> =
-      !hasBounds && displayMode !== 'stretch'
-        ? { scaleanchor: 'y' as const, constrain: 'domain' as const }
-        : {};
+    // BUG-025: the true sky shape used to be enforced with `scaleanchor` +
+    // `constrain: 'domain'`, which locks the pixels-per-unit ratio between the
+    // axes. That lock makes box-zoom impossible — dragging a box whose shape
+    // doesn't match the locked ratio just snaps the view back out, so the zoom
+    // "flashes and disappears". We instead leave BOTH axes free (a drawn box
+    // zooms to fit exactly) and preserve the correct default proportions by
+    // letterboxing the plot container to the sky aspect (see `plotAspect` and
+    // the wrapper in the return below). FEAT-011's display modes now feed that
+    // container aspect rather than a Plotly axis constraint.
     const chrome = plotChrome(theme);
-    const xaxis: Partial<Plotly.LayoutAxis> = {
-      title: { text: 'Right Ascension' },
-      gridcolor: chrome.gridColor,
-      linecolor: chrome.axisColor,
-      tickcolor: chrome.axisColor,
-      ...(hasBounds ? { autorange: 'reversed' as const } : {}),
-      ...lockBounded,
-      ...lockPixel,
-      ...(raTicks
-        ? { tickmode: 'array', tickvals: raTicks.tickvals, ticktext: raTicks.ticktext }
-        : {}),
+    // When axes are hidden (magnifier), drop titles/ticks/labels/grid but keep
+    // the reversed x-orientation so RA still increases leftward and hover coords
+    // stay correct.
+    const hiddenAxis: Partial<Plotly.LayoutAxis> = {
+      showticklabels: false,
+      ticks: '',
+      showgrid: false,
+      zeroline: false,
+      showline: false,
+      title: { text: '' },
     };
-    const yaxis: Partial<Plotly.LayoutAxis> = {
-      title: { text: 'Declination' },
-      gridcolor: chrome.gridColor,
-      linecolor: chrome.axisColor,
-      tickcolor: chrome.axisColor,
-      ...(hasBounds ? {} : { autorange: 'reversed' as const }),
-      ...(displayMode !== 'stretch' ? { constrain: 'domain' as const } : {}),
-      ...(decTicks
-        ? { tickmode: 'array', tickvals: decTicks.tickvals, ticktext: decTicks.ticktext }
-        : {}),
-    };
+    const xaxis: Partial<Plotly.LayoutAxis> = hideAxes
+      ? { ...hiddenAxis, ...(hasBounds ? { autorange: 'reversed' as const } : {}) }
+      : {
+          title: { text: 'Right Ascension' },
+          // Forced light-gray grid on 10° boundaries; no dark zeroline or frame.
+          showgrid: true,
+          gridcolor: GRID_COLOR,
+          gridwidth: 1,
+          zeroline: false,
+          linecolor: GRID_COLOR,
+          tickcolor: GRID_COLOR,
+          ...(hasBounds ? { autorange: 'reversed' as const } : {}),
+          ...(raTicks
+            ? { tickmode: 'array', tickvals: raTicks.tickvals, ticktext: raTicks.ticktext }
+            : {}),
+        };
+    const yaxis: Partial<Plotly.LayoutAxis> = hideAxes
+      ? { ...hiddenAxis, ...(hasBounds ? {} : { autorange: 'reversed' as const }) }
+      : {
+          title: { text: 'Declination' },
+          showgrid: true,
+          gridcolor: GRID_COLOR,
+          gridwidth: 1,
+          zeroline: false,
+          linecolor: GRID_COLOR,
+          tickcolor: GRID_COLOR,
+          ...(hasBounds ? {} : { autorange: 'reversed' as const }),
+          ...(decTicks
+            ? { tickmode: 'array', tickvals: decTicks.tickvals, ticktext: decTicks.ticktext }
+            : {}),
+        };
 
-    const shapes: Partial<Plotly.Shape>[] = [];
-    if (boxOverlay && hasBounds) {
-      shapes.push({
-        type: 'rect',
-        xref: 'x',
-        yref: 'y',
-        x0: boxOverlay.raCenter - boxOverlay.raHalfWidth,
-        x1: boxOverlay.raCenter + boxOverlay.raHalfWidth,
-        y0: boxOverlay.decCenter - boxOverlay.decHalfHeight,
-        y1: boxOverlay.decCenter + boxOverlay.decHalfHeight,
-        line: { color: 'white', width: 2 },
-        fillcolor: 'rgba(255, 255, 255, 0.05)',
-      } as Partial<Plotly.Shape>);
-    }
+    // Seed overlays from refs so this effect does NOT list pinnedMarker /
+    // boxOverlay as deps — those changes are pushed via a shapes-only relayout
+    // below, which never disturbs an active zoom (BUG-025).
+    const shapes = buildShapes(pinnedMarkerRef.current, boxOverlayRef.current, hasBounds);
 
+    // BUG-025: keep the user's zoom/pan across Plotly.react calls. This effect
+    // re-runs whenever the pinned marker, magnifier box, palette, flux range or
+    // theme changes — each call passes a layout with `autorange`, which would
+    // otherwise snap the axes back to full and wipe an active zoom (the
+    // "flashes and disappears" symptom). A constant `uirevision` tells Plotly
+    // to preserve interactive axis state; it changes only when the underlying
+    // image (its bounds / size) changes, so a genuinely new image still resets.
+    const uirevision = hasBounds
+      ? `b:${meta!.min_ra}:${meta!.max_ra}:${meta!.min_dec}:${meta!.max_dec}`
+      : `p:${w}x${h}`;
     const layout: Partial<Plotly.Layout> = {
       title: { text: title },
-      margin: { l: 70, r: 20, t: title ? 40 : 12, b: 50 },
+      uirevision,
+      margin: hideAxes
+        ? { l: 6, r: 6, t: title ? 40 : 6, b: 6 }
+        : { l: 70, r: 20, t: title ? 40 : 12, b: 50 },
       paper_bgcolor: chrome.paperBg,
       // BUG-014: no-coverage cells arrive as `null` (engine NaN sentinel,
       // JSON-encoded as null). Plotly's heatmap renders them transparent,
@@ -367,7 +487,9 @@ export function ImagePlot({
     const onHoverWired = (data: unknown) => {
       const d = data as { points?: Array<{ x: number; y: number; z: number; pointIndex?: [number, number] }> };
       if (!d.points || d.points.length === 0) return;
-      const p = d.points[0];
+      // Prefer the heatmap point (it carries `z`) in case the cursor is also
+      // over the pinned-marker scatter trace.
+      const p = d.points.find((pt) => typeof pt.z === 'number') ?? d.points[0];
       const idx = p.pointIndex;
       const point: ImagePoint = {
         ra: p.x,
@@ -387,7 +509,7 @@ export function ImagePlot({
     const onClickWired = (data: unknown) => {
       const d = data as { points?: Array<{ x: number; y: number; z: number; pointIndex?: [number, number] }> };
       if (!d.points || d.points.length === 0 || !onClick) return;
-      const p = d.points[0];
+      const p = d.points.find((pt) => typeof pt.z === 'number') ?? d.points[0];
       const idx = p.pointIndex;
       onClick({
         ra: p.x,
@@ -412,7 +534,11 @@ export function ImagePlot({
     const onRelayoutWired = (data: unknown) => {
       if (!hasBounds || suppressRelayout) return;
       const d = data as Record<string, unknown>;
-      if (d['xaxis.autorange'] === true) {
+      // Only re-apply on a genuine autorange reset (double-click). A box-zoom
+      // sets explicit `xaxis.range[*]` keys; if any are present this is a zoom,
+      // not a reset, and re-applying 'reversed' here would wipe it (BUG-025).
+      const isBoxZoom = Object.keys(d).some((k) => k.startsWith('xaxis.range'));
+      if (d['xaxis.autorange'] === true && !isBoxZoom) {
         suppressRelayout = true;
         // Plotly's TS types say `autorange` is boolean, but the runtime
         // accepts `'reversed'` (see the `xaxis` layout above, which uses
@@ -424,34 +550,103 @@ export function ImagePlot({
     };
     plotEl.on('plotly_relayout', onRelayoutWired);
 
+    // Right-click drives the magnifier from React (BUG-025/020). Intercept it in
+    // the CAPTURE phase so Plotly's own handlers on descendant nodes never see
+    // it — Plotly resets the axes on right-click, which would wipe an active
+    // zoom (BUG-008). This replaces the old React onContextMenu, whose bubble-
+    // phase preventDefault fired too late to stop Plotly. On views without a
+    // magnifier (PreImageView) onContextMenuRef is undefined, so this just
+    // blocks the reset + browser menu.
+    const onContextCapture = (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      onContextMenuRef.current?.(lastHoverRef.current);
+    };
+    node.addEventListener('contextmenu', onContextCapture, true);
+
     return () => {
       plotEl.removeAllListeners?.('plotly_hover');
       plotEl.removeAllListeners?.('plotly_unhover');
       plotEl.removeAllListeners?.('plotly_click');
       plotEl.removeAllListeners?.('plotly_relayout');
+      node.removeEventListener('contextmenu', onContextCapture, true);
       Plotly.purge(node);
     };
-  }, [image, meta, title, palette, fluxRange, boxOverlay, showColorBar, displayMode, onHover, onClick, theme]);
+    // `displayMode` intentionally omitted from deps: it no longer changes the
+    // Plotly layout (it only feeds the container aspect below), so switching
+    // aspect modes must NOT re-run this effect and reset the user's zoom.
+    // `boxOverlay` / `pinnedMarker` are also omitted: they only drive overlay
+    // shapes, which are updated via the shapes-only relayout effect below so an
+    // active zoom is never disturbed (BUG-025).
+  }, [image, meta, title, palette, fluxRange, showColorBar, hideAxes, onHover, onClick, theme]);
 
-  const handleContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
-    // Always suppress the browser context menu on the heatmap. Without this,
-    // right-click on PreImageView (which doesn't wire up onContextMenu) lets
-    // Plotly handle the event and ends up resetting the layout — which drops
-    // `autorange: 'reversed'` on the RA axis and flips it (BUG-008).
-    e.preventDefault();
-    if (onContextMenu) onContextMenu(lastHoverRef.current);
-  };
+  // Push pin / magnifier-box changes as a shapes-only relayout. Unlike
+  // Plotly.react, relayout of `shapes` never re-applies the axis layout, so it
+  // can't snap an active zoom back out (BUG-025). Runs after the main effect on
+  // mount (the plot exists by then) and on every later pin / box change.
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    void Plotly.relayout(node, {
+      shapes: buildShapes(pinnedMarker, boxOverlay, hasBoundsOf(meta)),
+    } as unknown as Partial<Plotly.Layout>);
+  }, [pinnedMarker, boxOverlay, meta]);
+
+  // Measure the wrapper so we can letterbox the plot to the sky aspect (BUG-025).
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    const measure = () => setBox({ w: wrap.clientWidth, h: wrap.clientHeight });
+    measure();
+    if (typeof ResizeObserver === 'undefined') return; // jsdom / older envs
+    const ro = new ResizeObserver(measure);
+    ro.observe(wrap);
+    return () => ro.disconnect();
+  }, []);
+
+  // Fit the largest box with the sky aspect inside the measured wrapper. When
+  // there's no aspect to preserve ('stretch' / pixel span unusable), fill it.
+  // `square` forces 1:1 so the magnifier is a square regardless of sky shape.
+  const aspect = square ? 1 : plotAspect(meta, image.width, image.height, displayMode);
+  let innerW: number | string = '100%';
+  let innerH: number | string = '100%';
+  if (aspect && box && box.w > 0 && box.h > 0) {
+    if (box.w / box.h > aspect) {
+      innerH = box.h;
+      innerW = box.h * aspect;
+    } else {
+      innerW = box.w;
+      innerH = box.w / aspect;
+    }
+  }
+
+  // Re-fit Plotly to the letterboxed inner box. `Plotly.Plots.resize` keeps the
+  // current axis ranges, so this never disturbs an active zoom.
+  useEffect(() => {
+    const node = ref.current;
+    if (node && node.getBoundingClientRect().width > 0) {
+      void (Plotly as unknown as { Plots: { resize: (n: HTMLElement) => void } }).Plots.resize(node);
+    }
+  }, [innerW, innerH]);
 
   return (
     <div
-      data-testid={testId ?? 'image-plot'}
-      ref={ref}
-      onContextMenu={handleContextMenu}
-      style={
-        fixedHeight !== undefined
+      ref={wrapRef}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        overflow: 'hidden',
+        ...(fixedHeight !== undefined
           ? { width: '100%', height: fixedHeight }
-          : { width: '100%', height: '100%', minHeight: 420 }
-      }
-    />
+          : { width: '100%', height: '100%', minHeight: 420 }),
+      }}
+    >
+      <div
+        data-testid={testId ?? 'image-plot'}
+        ref={ref}
+        style={{ width: innerW, height: innerH }}
+      />
+    </div>
   );
 }

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import io
 import json
 import struct
@@ -16,6 +18,7 @@ from numpy.typing import NDArray
 from ._handles import HandleRegistry, UnknownHandleError
 from .flux_calibration import default_known_jy, fit_counts_to_jy, fit_error, read_scn_peak
 from .image import (
+    DEFAULT_PIXEL_DEG,
     GriddedImage,
     RgbGriddedImage,
     WCSMetadata,
@@ -25,9 +28,11 @@ from .image import (
 )
 from .image_compose import (
     append_images,
+    append_images_multi,
     bicolor_compose,
     extend_rgb_compose,
     superimpose_images,
+    superimpose_images_multi,
     tricolor_compose,
 )
 from .io.bmp import write_bmp_from_rgb
@@ -367,6 +372,25 @@ def _flux_range_from_params(params: dict[str, Any], image: GriddedImage) -> tupl
     return 0.0, 1.0
 
 
+def _pixel_deg_param(params: dict[str, Any], default: float | None = None) -> float | None:
+    """Parse the `pix` param as degrees-per-pixel (float).
+
+    The wire key stayed `pix` for continuity, but it now carries the on-sky
+    pixel size in degrees (default 1/20 of the beam), not the old integer
+    coarseness factor. Absent → `default`; non-positive/non-numeric → error.
+    """
+    raw = params.get("pix")
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise RpcError(ERR_INVALID_PARAMS, "pix (pixel size in degrees) must be numeric") from exc
+    if not value > 0.0:
+        raise RpcError(ERR_INVALID_PARAMS, "pix (pixel size in degrees) must be positive")
+    return value
+
+
 def _open_image_path(path: str) -> GriddedImage:
     ext = Path(path).suffix.lower()
     if ext == ".img":
@@ -377,6 +401,21 @@ def _open_image_path(path: str) -> GriddedImage:
         ERR_INVALID_PARAMS,
         f"unsupported image extension {ext!r}; expected .img/.fits/.fit",
     )
+
+
+def _force_calibrated_if_requested(image: GriddedImage, params: dict[str, Any]) -> GriddedImage:
+    """Force a composite to Jy / flux-calibrated when the user attested it.
+
+    `_combined_flux_state` marks a composite calibrated only when every input
+    carries the `.img` "Jy" unit suffix. But legacy `.img` files never wrote
+    that suffix, so a genuinely-calibrated legacy map reads back as
+    uncalibrated. The compose UI therefore asks the user "are all the images
+    flux calibrated?"; when they answer yes it sends `force_calibrated: true`,
+    and their attestation overrides the on-disk inference here.
+    """
+    if not bool(params.get("force_calibrated", False)):
+        return image
+    return replace_dataclass(image, unit="Jy", flux_calibrated=True, flux_slope=None)
 
 
 _REDUCTION_PARAMS: dict[str, tuple[str, str, float]] = {
@@ -481,8 +520,12 @@ class RpcServer:
                 result = self._save_bitmap(params)
             elif method == "append_image":
                 result = self._append_image(params)
+            elif method == "append_image_multi":
+                result = self._append_image_multi(params)
             elif method == "superimpose_image":
                 result = self._superimpose_image(params)
+            elif method == "superimpose_image_multi":
+                result = self._superimpose_image_multi(params)
             elif method == "bicolor_image":
                 result = self._bicolor_image(params)
             elif method == "tricolor_image":
@@ -491,6 +534,8 @@ class RpcServer:
                 result = self._extend_rgb_image(params)
             elif method == "get_rgb_image_pixels":
                 result = self._get_rgb_image_pixels(params)
+            elif method == "save_rgb_png":
+                result = self._save_rgb_png(params)
             elif method == "open_palette":
                 result = self._open_palette(params)
             elif method == "save_palette":
@@ -499,6 +544,8 @@ class RpcServer:
                 result = self._get_workspace_overview(params)
             elif method == "get_source_sweep":
                 result = self._get_source_sweep(params)
+            elif method == "get_sweep_paths":
+                result = self._get_sweep_paths(params)
             elif method == "set_source_sweep_flux":
                 result = self._set_source_sweep_flux(params)
             elif method == "get_calibration_view":
@@ -778,10 +825,7 @@ class RpcServer:
         }
 
     def _make_image(self, params: dict[str, Any]) -> dict[str, Any]:
-        try:
-            pix = int(params.get("pix", 1))
-        except (TypeError, ValueError) as exc:
-            raise RpcError(ERR_INVALID_PARAMS, "pix must be an integer") from exc
+        pixel_deg = _pixel_deg_param(params, default=DEFAULT_PIXEL_DEG)
         ws_handle = params.get("workspace_handle")
         unit: str | None = None
         flux_calibrated = False
@@ -808,7 +852,7 @@ class RpcServer:
         else:
             handle = int(params.get("handle", -1))
             survey = self._resolve_survey(handle)
-        image = make_image(survey, pix=pix)
+        image = make_image(survey, pixel_deg=pixel_deg)
         if unit is not None or flux_calibrated:
             image = replace_dataclass(
                 image,
@@ -915,22 +959,26 @@ class RpcServer:
                 unit = (
                     str(unit_param) if isinstance(unit_param, str) and unit_param else image.unit
                 )
+                # `.img` v2 stores explicit grid dims, so the legacy `pix`
+                # header field no longer drives shape — write a valid nominal 1.
                 legacy = _gridded_to_image(
                     image,
                     palette=palette,
                     flux_min=flux_min,
                     flux_max=flux_max,
                     name=_validate_vb_name(str(params.get("name", "image"))),
-                    pix=int(params.get("pix", 1)),
+                    pix=1,
                     unit=unit,
                 )
                 write_img(legacy, str(path))
             elif ext in (".fits", ".fit"):
+                # FITS carries the true scale in CDELT/NAXIS; RC_PIX is legacy
+                # metadata and the pixel size is no longer an integer, so skip it.
                 write_fits(
                     image,
                     str(path),
                     name=str(params.get("name")) if params.get("name") is not None else None,
-                    pix=int(params["pix"]) if params.get("pix") is not None else None,
+                    pix=None,
                 )
             else:
                 raise RpcError(
@@ -958,6 +1006,30 @@ class RpcServer:
             raise RpcError(ERR_IO, f"failed to save bitmap: {exc}") from exc
         return {"path": str(path), "bytes_written": int(Path(str(path)).stat().st_size)}
 
+    def _save_rgb_png(self, params: dict[str, Any]) -> dict[str, Any]:
+        # Persist a client-rendered PNG (bi/tri-color composite). The webview
+        # composites the 3 channels to a canvas and hands us its data URL /
+        # base64; there is no scalar GriddedImage to route through save_image,
+        # so we just decode and write the bytes verbatim.
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        data = params.get("data")
+        if not isinstance(data, str) or not data:
+            raise RpcError(ERR_INVALID_PARAMS, "data (base64 PNG) is required")
+        # Accept an optional data-URL prefix ("data:image/png;base64,...").
+        if data.startswith("data:"):
+            _, _, data = data.partition(",")
+        try:
+            raw = base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, f"invalid base64 data: {exc}") from exc
+        try:
+            Path(str(path)).write_bytes(raw)
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to save png: {exc}") from exc
+        return {"path": str(path), "bytes_written": len(raw)}
+
     def _append_image(self, params: dict[str, Any]) -> dict[str, Any]:
         primary = self._resolve_image(int(params.get("handle", -1)))
         other_path = params.get("other_path")
@@ -978,6 +1050,26 @@ class RpcServer:
             )
         except ValueError as exc:
             raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        composed = _force_calibrated_if_requested(composed, params)
+        new_handle = self._handles.create(composed)
+        return self._image_meta(composed, new_handle)
+
+    def _append_image_multi(self, params: dict[str, Any]) -> dict[str, Any]:
+        # N-way append: one primary (in-memory handle) + a list of on-disk
+        # images, composed onto a single union grid so each source is resampled
+        # exactly once (no per-step re-snapping of the running accumulator).
+        primary = self._resolve_image(int(params.get("handle", -1)))
+        other_paths = params.get("other_paths")
+        if not isinstance(other_paths, list) or not other_paths:
+            raise RpcError(ERR_INVALID_PARAMS, "other_paths (non-empty list) is required")
+        others = [_open_image_path(str(p)) for p in other_paths]
+        pix = params.get("pix")
+        pix_int = int(pix) if pix is not None else None
+        try:
+            composed = append_images_multi(primary, others, pix=pix_int)
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        composed = _force_calibrated_if_requested(composed, params)
         new_handle = self._handles.create(composed)
         return self._image_meta(composed, new_handle)
 
@@ -1129,6 +1221,26 @@ class RpcServer:
             )
         except ValueError as exc:
             raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        composed = _force_calibrated_if_requested(composed, params)
+        new_handle = self._handles.create(composed)
+        return self._image_meta(composed, new_handle)
+
+    def _superimpose_image_multi(self, params: dict[str, Any]) -> dict[str, Any]:
+        # N-way superimpose: one primary (in-memory handle) + a list of on-disk
+        # images, blended onto a single union grid with every image weighted
+        # equally (no per-image weight — that's only meaningful pairwise).
+        primary = self._resolve_image(int(params.get("handle", -1)))
+        other_paths = params.get("other_paths")
+        if not isinstance(other_paths, list) or not other_paths:
+            raise RpcError(ERR_INVALID_PARAMS, "other_paths (non-empty list) is required")
+        others = [_open_image_path(str(p)) for p in other_paths]
+        pix = params.get("pix")
+        pix_int = int(pix) if pix is not None else None
+        try:
+            composed = superimpose_images_multi(primary, others, pix=pix_int)
+        except ValueError as exc:
+            raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
+        composed = _force_calibrated_if_requested(composed, params)
         new_handle = self._handles.create(composed)
         return self._image_meta(composed, new_handle)
 
@@ -1219,6 +1331,40 @@ class RpcServer:
             "label": f"{ws.name} - Sweep {index + 1}",
             "calibrated": bool(ws.calibrated),
         }
+
+    def _get_sweep_paths(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return a downsampled (dec, ra) polyline for every source sweep.
+
+        Feeds the Pre Image hover readout, which maps the cell under the cursor
+        back to the sweep it came from so the user can jump to that sweep and
+        remove RFI. Uses the same sweeps `make_image` grids from
+        (`_survey_from_workspace_sources`) — reduced dec when the sweeps have
+        been aligned — so the paths line up with what's drawn on screen. RA is
+        never reduced, so it comes straight from the raw sweep. Only ra/dec are
+        sent (no flux) to keep the payload small across ~200-sweep surveys.
+        """
+        ws = self._resolve_workspace(int(params.get("handle", -1)))
+        try:
+            max_points = int(params.get("max_points", 64))
+        except (TypeError, ValueError) as exc:
+            raise RpcError(ERR_INVALID_PARAMS, "max_points must be an integer") from exc
+        survey = _survey_from_workspace_sources(ws)
+        sweeps: list[dict[str, Any]] = []
+        for index, s in enumerate(survey.sweeps):
+            ra = np.asarray(s.ra, dtype=np.float64)
+            dec = np.asarray(s.dec, dtype=np.float64)
+            n = ra.shape[0]
+            if max_points > 0 and n > max_points:
+                # linspace (not stride) so the dec endpoints survive — the
+                # frontend interpolates RA at a hovered dec and clamps to the
+                # ends, so preserving them keeps the near-boundary match honest.
+                idx = np.unique(np.linspace(0, n - 1, max_points).round().astype(int))
+                ra = ra[idx]
+                dec = dec[idx]
+            sweeps.append(
+                {"index": index, "ra": _array_to_jsonable_list(ra), "dec": _array_to_jsonable_list(dec)}
+            )
+        return {"sweeps": sweeps, "source_count": int(ws.source_count)}
 
     def _set_source_sweep_flux(self, params: dict[str, Any]) -> dict[str, Any]:
         ws = self._resolve_workspace(int(params.get("handle", -1)))

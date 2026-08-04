@@ -544,6 +544,63 @@ test('Determine Peak with Max Value fit kind invokes the max RPC and rings the p
   expect(screen.getByTestId('scan-flux-plot').getAttribute('data-highlight-y')).toBe('5.2');
 });
 
+test('Undo restores the model-fit overlay, not just the reverted peak (BUG-022)', async () => {
+  // Two Max-Value fits at different RAs, so the restored highlight is
+  // distinguishable from both the current one and the cleared ("") state.
+  const maxRes = (ra: number) => ({
+    peak_flux: 5.2,
+    peak_ra: ra,
+    fit_ra: [ra],
+    fit_flux: [5.2],
+    overview: { ...overviewCalibrated, peak_flux: 5.2, can_undo: true },
+  });
+  const getView = rpcClient.getScanView as unknown as ReturnType<typeof vi.fn>;
+  // mount uses the shared ref; the undo reload must get a FRESH object so the
+  // `[view]` reset effect actually re-runs (React bails on an identical ref).
+  getView.mockResolvedValueOnce(calibratedView).mockResolvedValueOnce({ ...calibratedView });
+  (rpcClient.determineScanPeakMaxValue as unknown as ReturnType<typeof vi.fn>)
+    .mockResolvedValueOnce(maxRes(6.5))
+    .mockResolvedValueOnce(maxRes(8));
+  (rpcClient.undoScan as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+    undone: true,
+    overview: overviewCalibrated,
+  });
+
+  await act(async () => {
+    render(
+      <ScanProvider>
+        <HydrateScan meta={{ ...baseMeta, overview: overviewCalibrated }} />
+        <FitKindPicker kind="max" />
+        <ScanView />
+      </ScanProvider>,
+    );
+  });
+  await waitFor(() => expect(screen.getByText('Determine Peak')).toBeInTheDocument());
+  const highlightX = () =>
+    screen.getByTestId('scan-flux-plot').getAttribute('data-highlight-x');
+
+  const fit = async () => {
+    fireEvent.click(screen.getByTestId('scan-flux-plot-drag-start'));
+    fireEvent.click(screen.getByTestId('scan-flux-plot-drag-update'));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('scan-flux-plot-drag-end'));
+    });
+  };
+
+  fireEvent.click(screen.getByText('Determine Peak'));
+  await fit();
+  await waitFor(() => expect(highlightX()).toBe('6.5'));
+  await fit();
+  await waitFor(() => expect(highlightX()).toBe('8'));
+
+  // Undo: the fit the reverted peak now reflects (fit A, ra 6.5) reappears —
+  // before the fix the overlay was wiped and never restored.
+  await act(async () => {
+    fireEvent.click(screen.getByText('Undo'));
+  });
+  await waitFor(() => expect(highlightX()).toBe('6.5'));
+});
+
 test('Switching tools deselects the previous one (FEAT-002)', async () => {
   const meta = setupCalibratedScanView();
   await act(async () => {

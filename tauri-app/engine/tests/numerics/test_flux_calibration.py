@@ -48,14 +48,14 @@ def _make_table(pairs: list[tuple[str, float, float]]) -> CalibrationTable:
     )
 
 
-def test_default_known_jy_matches_legacy_table() -> None:
-    # Legacy vb/calform.frm:156-164 maps the first three name characters.
-    assert default_known_jy("VIR A") == 213.0
-    assert default_known_jy("Virgo A") == 213.0  # case-insensitive
-    assert default_known_jy("TAU A") == 942.0
-    assert default_known_jy("CYG A") == 1581.0
-    assert default_known_jy("cyg0a") == 1581.0
-    assert default_known_jy("CAS A") == 0.0  # not in legacy table
+def test_default_known_jy_matches_known_table() -> None:
+    # Maps the first three name characters to the known-Jy table.
+    assert default_known_jy("VIR A") == 230.8
+    assert default_known_jy("Virgo A") == 230.8  # case-insensitive
+    assert default_known_jy("TAU A") == 846.3
+    assert default_known_jy("CYG A") == 1605.9
+    assert default_known_jy("cyg0a") == 1605.9
+    assert default_known_jy("CAS A") == 0.0  # not in the table
     assert default_known_jy("") == 0.0
 
 
