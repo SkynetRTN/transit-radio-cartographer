@@ -704,6 +704,12 @@ export class RpcClient {
       flux1,
     });
   }
+  appendScan(handle: number, path: string) {
+    return this.request<{ added: number; overview: ScanOverview }>('append_scan', {
+      handle,
+      path,
+    });
+  }
   determineScanPeak(handle: number, flux: number) {
     return this.request<{ peak_flux: number; overview: ScanOverview }>('determine_scan_peak', {
       handle,

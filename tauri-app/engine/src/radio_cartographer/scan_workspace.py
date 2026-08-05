@@ -650,12 +650,76 @@ def determine_peak_max_value(
     return peak_flux, ra_grid, flux_grid, peak_ra
 
 
+def append_scan_source(workspace: ScanWorkspace, scan: Scan) -> int:
+    """Append another scan's source samples onto this workspace's source track.
+
+    Faithful to the legacy "Append Scan" gesture
+    (`vb/karaleah.frm:260`, `vb/scanform.frm:1948-2002`), which simply reads a
+    `.scn` and concatenates its Ra/Dec/Flux/Check onto the arrays already on the
+    plot — a plain overlay, not a mosaic regrid. The menu enables Append Scan
+    only after the scan is calibrated, so the appended `.scn` is expected to be
+    gain-calibrated (channel "B"); its flux is concatenated onto every flux
+    array the view can present (raw, calibrated, and reduced) so lengths stay in
+    lock-step with `source_ra`/`source_mask`.
+
+    Returns the number of samples appended. The prior arrays are snapshotted so
+    the append is undoable.
+    """
+    ra = np.asarray(scan.ra, dtype=np.float64)
+    dec = np.asarray(scan.dec, dtype=np.float64)
+    flux = np.asarray(scan.flux, dtype=np.float64)
+    mask = np.asarray(scan.check, dtype=np.int_) == 0
+    added = int(ra.shape[0])
+    if added == 0:
+        return 0
+    workspace.undo_stack.append(
+        {
+            "kind": "append",
+            "source_ra": workspace.source_ra.copy(),
+            "source_dec": workspace.source_dec.copy(),
+            "source_flux": workspace.source_flux.copy(),
+            "source_mask": workspace.source_mask.copy(),
+            "calibrated": (
+                workspace.calibrated_source_flux.copy()
+                if workspace.calibrated_source_flux is not None
+                else None
+            ),
+            "reduced": (
+                workspace.reduced_source_flux.copy()
+                if workspace.reduced_source_flux is not None
+                else None
+            ),
+        }
+    )
+    workspace.source_ra = np.concatenate([workspace.source_ra, ra])
+    workspace.source_dec = np.concatenate([workspace.source_dec, dec])
+    workspace.source_flux = np.concatenate([workspace.source_flux, flux])
+    workspace.source_mask = np.concatenate([workspace.source_mask, mask])
+    if workspace.calibrated_source_flux is not None:
+        workspace.calibrated_source_flux = np.concatenate(
+            [workspace.calibrated_source_flux, flux]
+        )
+    if workspace.reduced_source_flux is not None:
+        workspace.reduced_source_flux = np.concatenate(
+            [workspace.reduced_source_flux, flux]
+        )
+    return added
+
+
 def undo_scan(workspace: ScanWorkspace) -> bool:
     """Revert the most recent cal-side or source-side mutation."""
     if not workspace.undo_stack:
         return False
     snap = workspace.undo_stack.pop()
     kind = snap.get("kind")
+    if kind == "append":
+        workspace.source_ra = snap["source_ra"]  # type: ignore[assignment]
+        workspace.source_dec = snap["source_dec"]  # type: ignore[assignment]
+        workspace.source_flux = snap["source_flux"]  # type: ignore[assignment]
+        workspace.source_mask = snap["source_mask"]  # type: ignore[assignment]
+        workspace.calibrated_source_flux = snap["calibrated"]  # type: ignore[assignment]
+        workspace.reduced_source_flux = snap["reduced"]  # type: ignore[assignment]
+        return True
     if kind == "cal":
         workspace.initial = ScanCalBracket(
             on_flux=workspace.initial.on_flux,

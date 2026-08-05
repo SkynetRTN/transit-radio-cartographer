@@ -167,71 +167,6 @@ test('save scan menu items respect hasScan and savePath state', () => {
   expect(screen.getByRole('menuitem', { name: 'Save Scan As…' })).toBeDisabled();
 });
 
-test('Change Determine Peak Fit menu item opens a dropdown with six options (FEAT-006)', async () => {
-  const dialog = await import('@tauri-apps/plugin-dialog');
-  const client = await import('../ipc/client');
-  (dialog.open as unknown as ReturnType<typeof vi.fn>).mockResolvedValue('/tmp/cyg0a.md1');
-  (client.rpcClient.openScan as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-    handle: 11,
-    metadata: { path: '/tmp/cyg0a.md1', source_count: 200 },
-    overview: {
-      name: 'CYG0A',
-      path: '/tmp/cyg0a.md1',
-      source_count: 200,
-      source_kept: 200,
-      initial_cal_samples: 120,
-      terminal_cal_samples: 120,
-      initial_kept: 120,
-      terminal_kept: 120,
-      cal1: 0.34,
-      cal2: 0.36,
-      calibrated: false,
-      initial_enabled: true,
-      terminal_enabled: true,
-      can_undo: false,
-      peak_flux: null,
-    },
-  });
-  renderApp();
-  // Disabled until a scan is loaded.
-  fireEvent.click(screen.getByText('Scan'));
-  expect(
-    screen.getByRole('menuitem', { name: 'Change Determine Peak Fit…' }),
-  ).toBeDisabled();
-  fireEvent.click(screen.getByRole('menuitem', { name: 'New Scan…' }));
-  await vi.waitFor(() => {
-    expect(client.rpcClient.openScan).toHaveBeenCalledWith('/tmp/cyg0a.md1');
-  });
-  fireEvent.click(screen.getByText('Scan'));
-  await vi.waitFor(() => {
-    expect(
-      screen.getByRole('menuitem', { name: 'Change Determine Peak Fit…' }),
-    ).not.toBeDisabled();
-  });
-  fireEvent.click(screen.getByRole('menuitem', { name: 'Change Determine Peak Fit…' }));
-  // Modern theme renders an MUI Select (a combobox), not a native <select>.
-  const combobox = await screen.findByRole('combobox', { name: 'Fit kind:' });
-  fireEvent.mouseDown(combobox);
-  // Spec order: Gaussian → Squared Cosine → 2/3/4 Polynomial → Max Value.
-  const labels = screen.getAllByRole('option').map((o) => o.textContent);
-  expect(labels).toEqual([
-    'Gaussian',
-    'Squared Cosine',
-    '2nd Degree Polynomial',
-    '3rd Degree Polynomial',
-    '4th Degree Polynomial',
-    'Max Value',
-  ]);
-  // Default selection is Gaussian.
-  expect(combobox).toHaveTextContent('Gaussian');
-  fireEvent.click(screen.getByRole('option', { name: 'Squared Cosine' }));
-  fireEvent.click(screen.getByRole('button', { name: 'OK' }));
-  // Dialog dismisses after submit.
-  await vi.waitFor(() => {
-    expect(screen.queryByRole('combobox', { name: 'Fit kind:' })).not.toBeInTheDocument();
-  });
-});
-
 test('save survey menu items respect hasSurvey and savePath state', () => {
   renderApp();
   fireEvent.click(screen.getByText('Survey'));
@@ -257,7 +192,9 @@ test('save scan as opens save dialog and invokes saveScan rpc', async () => {
       terminal_kept: 120,
       cal1: 0.34,
       cal2: 0.36,
-      calibrated: false,
+      // BUG-003: Save/Save-As are gated on calibration, so this scan must be
+      // calibrated for the save flow to be enabled.
+      calibrated: true,
       initial_enabled: true,
       terminal_enabled: true,
       can_undo: false,

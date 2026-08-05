@@ -10,9 +10,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from radio_cartographer.models import MD1Document, RawSweep
+from radio_cartographer.models import MD1Document, RawSweep, Scan
 from radio_cartographer.scan_workspace import (
     CAL_BLOCK,
+    append_scan_source,
     apply_scan_calibration,
     baseline_scan_source,
     build_scan_workspace,
@@ -185,3 +186,56 @@ def test_apply_scan_calibration_resets_reductions() -> None:
     apply_scan_calibration(ws)  # re-calibrate
     assert ws.reduced_source_flux is None
     assert ws.peak_flux is None
+
+
+def _make_scn(n: int = 5, flux_value: float = 9.0) -> Scan:
+    """A tiny calibrated `.scn` (channel B) for append tests."""
+    ra = np.linspace(2.0, 3.0, n)
+    dec = np.linspace(30.0, 31.0, n)
+    flux = np.full(n, flux_value, dtype=np.float64)
+    return Scan(
+        name="APPENDED",
+        channel="B",
+        peak="",
+        min_dec=float(dec.min()),
+        max_dec=float(dec.max()),
+        min_flux=float(flux.min()),
+        max_flux=float(flux.max()),
+        check=np.zeros(n, dtype=np.int_),
+        ra=ra,
+        dec=dec,
+        flux=flux,
+        raw_bytes=None,
+    )
+
+
+def test_append_scan_source_concatenates_samples() -> None:
+    md1 = _make_md1(source_count=10)
+    ws = build_scan_workspace("/tmp/fake.md1", md1)
+    apply_scan_calibration(ws)
+    before = ws.source_count
+    added = append_scan_source(ws, _make_scn(n=5, flux_value=9.0))
+    assert added == 5
+    assert ws.source_count == before + 5
+    # All flux arrays stay length-aligned with the coordinate/mask arrays.
+    assert ws.source_dec.shape[0] == ws.source_count
+    assert ws.source_mask.shape[0] == ws.source_count
+    assert ws.calibrated_source_flux is not None
+    assert ws.calibrated_source_flux.shape[0] == ws.source_count
+    # The appended calibrated flux shows through on the current-flux view.
+    from radio_cartographer.scan_workspace import current_source_flux
+
+    assert current_source_flux(ws)[-1] == pytest.approx(9.0)
+
+
+def test_append_scan_source_is_undoable() -> None:
+    md1 = _make_md1(source_count=8)
+    ws = build_scan_workspace("/tmp/fake.md1", md1)
+    apply_scan_calibration(ws)
+    before = ws.source_count
+    append_scan_source(ws, _make_scn(n=3))
+    assert ws.source_count == before + 3
+    assert undo_scan(ws) is True
+    assert ws.source_count == before
+    assert ws.calibrated_source_flux is not None
+    assert ws.calibrated_source_flux.shape[0] == before

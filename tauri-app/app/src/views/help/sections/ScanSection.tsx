@@ -92,8 +92,10 @@ export function ScanSection() {
 
       <h3>4. Clean the source samples</h3>
       <p>
-        Back in the main scan view, four sticky tools become available. Each
-        button toggles a mode and stays armed until you click it again or
+        Back in the main scan view the source-reduction tools sit in the side
+        panel. They stay visible but <strong>grayed out until the scan is
+        calibrated</strong> (hover a grayed button to see why). Once calibrated,
+        each button toggles a mode and stays armed until you click it again or
         switch tools.
       </p>
 
@@ -128,9 +130,11 @@ export function ScanSection() {
       <h4>4c. Baseline Source</h4>
       <p>
         <strong>Click</strong> <code>Baseline Source</code>, then{' '}
-        <strong>click two points</strong> on the Flux plot. A live rubber-band
-        line follows your cursor between the first click and the second; the
-        line between the two clicks is subtracted from the source, removing a
+        <strong>click two points anywhere</strong> on the Flux plot — the
+        endpoints are free-floating and are <em>not</em> limited to data points,
+        so you can place the line above the samples. A live rubber-band line
+        follows your cursor between the first click and the second; the line
+        between the two clicks is subtracted from the source, removing a
         background flux.
       </p>
       <figure className="help-figure">
@@ -144,10 +148,13 @@ export function ScanSection() {
       <h4>4d. Determine Peak</h4>
       <p>
         <strong>Click</strong> <code>Determine Peak</code>, then{' '}
-        <strong>drag a horizontal range</strong> across the peak on the Flux
-        plot. A Gaussian fit is overlaid in blue, and the peak flux appears
-        in the side panel. Adjusting <code>Peak Fit Degree</code> underneath the scan menu allows for a 2nd, 3rd or 4th 
-        degree polynomial fit instead.
+        <strong>drag a horizontal range over the peak only</strong> on the Flux
+        plot. By default a <strong>2nd-degree polynomial</strong> is fit and its
+        maximum becomes the peak flux (shown in the side panel). Keep the drag
+        tight around the peak so the fit isn't pulled by the wings. To change the
+        model, click <code>Change Peak Fit…</code> in the side panel — you can
+        pick a 2nd/3rd/4th-degree polynomial, a Gaussian, a squared cosine, or
+        the raw max value.
       </p>
       <figure className="help-figure">
         <img src={determinePeakShot} alt="Blue Gaussian fit curve over a source peak on the Flux plot" />
@@ -156,6 +163,16 @@ export function ScanSection() {
           fit (blue) and read the peak flux in the side panel.
         </figcaption>
       </figure>
+
+      <h4>4e. Append Scan</h4>
+      <p>
+        Once the scan is calibrated you can <code>Scan → Append Scan…</code> to
+        pull another <code>.scn</code>'s samples straight onto the current plot.
+        This is a plain overlay — the appended points are added to the track as-is
+        (no regridding) — so you can build up coverage of the same source from
+        several scans before determining the peak. <strong>Undo</strong> removes
+        the most recent append.
+      </p>
 
       <h3>5. Hover and pin</h3>
       <p>
@@ -166,9 +183,12 @@ export function ScanSection() {
 
       <h3>6. Save your work</h3>
       <p>
-        <strong>Click</strong> <code>File → Save As…</code> to write a{' '}
-        <code>.scn</code> file. If you found a peak flux, it will be stored in the file header, so
-        Flux Calibration can pick it up later without re-opening the scan. 
+        <strong>Click</strong> <code>Scan → Save Scan As…</code> to write a{' '}
+        <code>.scn</code> file. Saving is only enabled once the scan is
+        calibrated (the Save items stay grayed with a "must calibrate before
+        saving" note until then). If you found a peak flux, it is stored in the
+        file header, so Flux Calibration can pick it up later without re-opening
+        the scan.
       </p>
 
     </section>

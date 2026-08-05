@@ -48,6 +48,7 @@ from .models import CalibrationEntry, CalibrationTable, Image, Palette, PaletteS
 from .palette import apply_palette
 from .scan_workspace import (
     ScanWorkspace,
+    append_scan_source,
     apply_flux_calibration_scan,
     apply_scan_calibration,
     baseline_scan_source,
@@ -552,6 +553,8 @@ class RpcServer:
                 result = self._cut_scan_segment(params)
             elif method == "baseline_scan_source":
                 result = self._baseline_scan_source(params)
+            elif method == "append_scan":
+                result = self._append_scan(params)
             elif method == "determine_scan_peak":
                 result = self._determine_scan_peak(params)
             elif method == "determine_scan_peak_fit":
@@ -1740,6 +1743,22 @@ class RpcServer:
         except ValueError as exc:
             raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
         return {"overview": self._scan_overview(ws)}
+
+    def _append_scan(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        if not ws.calibrated:
+            raise RpcError(
+                ERR_INVALID_PARAMS, "scan must be calibrated before appending scans"
+            )
+        try:
+            scan = read_scn(Path(str(path)))
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to open scan: {exc}") from exc
+        added = append_scan_source(ws, scan)
+        return {"added": int(added), "overview": self._scan_overview(ws)}
 
     def _determine_scan_peak(self, params: dict[str, Any]) -> dict[str, Any]:
         ws = self._resolve_scan_workspace(int(params.get("handle", -1)))

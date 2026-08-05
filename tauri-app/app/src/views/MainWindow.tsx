@@ -13,7 +13,6 @@ import { AboutBox } from './AboutBox';
 import { PreImageView } from './PreImageView';
 import { ImageView } from './ImageView';
 import { NumericInputDialog, type NumericPrompt } from './dialogs/NumericInputDialog';
-import { SelectInputDialog, type SelectPrompt } from './dialogs/SelectInputDialog';
 import { TextInputDialog, type TextPrompt } from './dialogs/TextInputDialog';
 import { YesNoCancelDialog } from './dialogs/YesNoCancelDialog';
 import { ColorPickDialog } from './dialogs/ColorPickDialog';
@@ -23,7 +22,7 @@ import { useImageSave } from '../lib/useImageSave';
 import { MenuBarShell, MenuTrigger } from './chrome/MenuBar';
 import { StatusBar } from './chrome/StatusBar';
 import { useSurvey } from '../state/survey-context';
-import { useScan, type PeakFitKind } from '../state/scan-context';
+import { useScan } from '../state/scan-context';
 import { useFluxCal } from '../state/flux-cal-context';
 import { useTheme, type Theme } from '../state/theme-context';
 import { rpcClient, type ChannelColor, type ImageMeta, type RgbImageMeta } from '../ipc/client';
@@ -86,8 +85,7 @@ export function MainWindow() {
     dirty: scanDirty,
     save: saveScan,
     setScanName,
-    peakFitKind,
-    setPeakFitKind,
+    appendScan,
     resetForEngineRestart: resetScanForEngineRestart,
   } = useScan();
   const fluxCal = useFluxCal();
@@ -202,7 +200,6 @@ export function MainWindow() {
   } | null>(null);
 
   const [numericPrompt, setNumericPrompt] = useState<NumericPrompt | null>(null);
-  const [selectPrompt, setSelectPrompt] = useState<SelectPrompt | null>(null);
   const [textPrompt, setTextPrompt] = useState<TextPrompt | null>(null);
   const [yesNoPrompt, setYesNoPrompt] = useState<{
     title: string;
@@ -446,6 +443,30 @@ export function MainWindow() {
     setAuxView(null);
     await openScan(path);
   }, [openScan]);
+
+  // BUG-006 (dan): append another `.scn`'s samples onto the current scan plot.
+  const handleAppendScan = useCallback(async () => {
+    setOpenMenu(null);
+    if (!hasScan) return;
+    let path: string | null = null;
+    try {
+      const selected = await openDialog({
+        multiple: false,
+        directory: false,
+        title: 'Append Scan',
+        filters: [
+          { name: 'Scan (.scn)', extensions: ['scn'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      });
+      path = typeof selected === 'string' ? selected : null;
+    } catch (err) {
+      console.error('file dialog failed', err);
+      return;
+    }
+    if (!path) return;
+    await appendScan(path);
+  }, [hasScan, appendScan]);
 
   const pickAndLoadCal = useCallback(async () => {
     setOpenMenu(null);
@@ -1619,14 +1640,24 @@ export function MainWindow() {
               </button>
               <button
                 role="menuitem"
-                disabled={!hasSurvey || !hasSurveySavePath}
+                disabled={!hasSurvey || !workspace?.calibrated || !hasSurveySavePath}
+                title={
+                  hasSurvey && !workspace?.calibrated
+                    ? 'Must calibrate before saving as .srv'
+                    : undefined
+                }
                 onClick={() => void handleSaveSurvey()}
               >
                 Save Survey
               </button>
               <button
                 role="menuitem"
-                disabled={!hasSurvey}
+                disabled={!hasSurvey || !workspace?.calibrated}
+                title={
+                  hasSurvey && !workspace?.calibrated
+                    ? 'Must calibrate before saving as .srv'
+                    : undefined
+                }
                 onClick={() => void handleSaveSurveyAs()}
               >
                 Save Survey As…
@@ -1665,20 +1696,39 @@ export function MainWindow() {
               </button>
               <button
                 role="menuitem"
-                disabled={!hasScan || !hasScanSavePath}
+                disabled={!hasScan || !scanOverview?.calibrated || !hasScanSavePath}
+                title={
+                  hasScan && !scanOverview?.calibrated
+                    ? 'Must calibrate before saving as .scn'
+                    : undefined
+                }
                 onClick={() => void handleSaveScan()}
               >
                 Save Scan
               </button>
               <button
                 role="menuitem"
-                disabled={!hasScan}
+                disabled={!hasScan || !scanOverview?.calibrated}
+                title={
+                  hasScan && !scanOverview?.calibrated
+                    ? 'Must calibrate before saving as .scn'
+                    : undefined
+                }
                 onClick={() => void handleSaveScanAs()}
               >
                 Save Scan As…
               </button>
               <div className="menu-sep" />
-              <button role="menuitem" disabled={!hasScan}>
+              <button
+                role="menuitem"
+                disabled={!hasScan || !scanOverview?.calibrated}
+                title={
+                  hasScan && !scanOverview?.calibrated
+                    ? 'Calibrate the scan before appending scans'
+                    : 'Add another .scn’s samples onto the current scan plot'
+                }
+                onClick={() => void handleAppendScan()}
+              >
                 Append Scan…
               </button>
               <div className="menu-sep" />
@@ -1688,33 +1738,6 @@ export function MainWindow() {
                 onClick={handleChangeScanName}
               >
                 Change Scan Name…
-              </button>
-              <div className="menu-sep" />
-              <button
-                role="menuitem"
-                disabled={!hasScan}
-                onClick={() => {
-                  setOpenMenu(null);
-                  setSelectPrompt({
-                    title: 'Change Determine Peak Fit',
-                    label: 'Fit kind:',
-                    defaultValue: peakFitKind,
-                    options: [
-                      { value: 'gaussian', label: 'Gaussian' },
-                      { value: 'cos2', label: 'Squared Cosine' },
-                      { value: 'poly2', label: '2nd Degree Polynomial' },
-                      { value: 'poly3', label: '3rd Degree Polynomial' },
-                      { value: 'poly4', label: '4th Degree Polynomial' },
-                      { value: 'max', label: 'Max Value' },
-                    ],
-                    onSubmit: (value) => {
-                      setSelectPrompt(null);
-                      setPeakFitKind(value as PeakFitKind);
-                    },
-                  });
-                }}
-              >
-                Change Determine Peak Fit…
               </button>
             </div>
           )}
@@ -1873,12 +1896,6 @@ export function MainWindow() {
             cancelCompose();
             cancelColorCompose();
           }}
-        />
-      )}
-      {selectPrompt && (
-        <SelectInputDialog
-          prompt={selectPrompt}
-          onCancel={() => setSelectPrompt(null)}
         />
       )}
       {textPrompt && (
