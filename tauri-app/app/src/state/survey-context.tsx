@@ -344,10 +344,10 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     const next = new Set(acceptedSweeps);
     next.add(currentSweepIndex);
     setAcceptedSweeps(next);
-    if (next.size >= sourceCount) {
-      setViewMode('pre-image');
-      return;
-    }
+    // BUG-010 (dan): accepting the final sweep no longer jumps to the pre-image.
+    // Stay on the last sweep — the "Create Pre-Image" button becomes enabled and
+    // is the only way into the pre-image, so it isn't rebuilt until asked for.
+    if (next.size >= sourceCount) return;
     // Advance to the next un-accepted sweep, wrapping if needed.
     for (let i = 1; i <= sourceCount; i++) {
       const candidate = (currentSweepIndex + i) % sourceCount;
@@ -361,13 +361,14 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   // Bulk-accept every sweep at once (bound to a keyboard shortcut, not an
   // exposed button — the one-by-one review is the intended default). Callers
   // in SurveyView commit any pending RFI edits on the current sweep first.
+  // BUG-010 (dan): like acceptCurrentSweep, this stays on the current sweep and
+  // just enables "Create Pre-Image" rather than navigating there itself.
   const acceptAll = useCallback(() => {
     const sourceCount = workspace?.source_count ?? 0;
     if (sourceCount <= 0) return;
     const next = new Set<number>();
     for (let i = 0; i < sourceCount; i++) next.add(i);
     setAcceptedSweeps(next);
-    setViewMode('pre-image');
   }, [workspace?.source_count]);
 
   const resetSweepReview = useCallback(() => {

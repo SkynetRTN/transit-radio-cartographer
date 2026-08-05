@@ -60,17 +60,23 @@ vi.mock('../lib/plots/PointScatter', () => ({
     const id = props.testId ?? 'plot';
     return (
       <div data-testid={id}>
+        {/* A real Plotly point click also produces a DOM click, so the mock
+            fires BOTH onPointClick (pins the readout) and onCursorClick (the
+            free-cursor endpoint the top-plot Remove RFI now uses, BUG-007). The
+            cursor coords match the point's (dec, flux). */}
         <button
           data-testid={`${id}-click-first`}
-          onClick={() =>
-            props.onPointClick?.({ x: 10, y: 0.1, ra: 1, dec: 10, flux: 0.1, sampleIndex: 0 })
-          }
+          onClick={() => {
+            props.onPointClick?.({ x: 10, y: 0.1, ra: 1, dec: 10, flux: 0.1, sampleIndex: 0 });
+            props.onCursorClick?.(10, 0.1);
+          }}
         />
         <button
           data-testid={`${id}-click-second`}
-          onClick={() =>
-            props.onPointClick?.({ x: 12, y: 0.5, ra: 3, dec: 12, flux: 0.5, sampleIndex: 2 })
-          }
+          onClick={() => {
+            props.onPointClick?.({ x: 12, y: 0.5, ra: 3, dec: 12, flux: 0.5, sampleIndex: 2 });
+            props.onCursorClick?.(12, 0.5);
+          }}
         />
         {/* Free recovery-line endpoints drawn at removed≈0 across the full
             dec span [9, 13], which fully recovers every removed sample. */}
@@ -440,7 +446,7 @@ test('ArrowRight accepts the current sweep and advances when calibrated', async 
   );
 });
 
-test('Ctrl+Shift+A accepts every sweep and moves to pre-image', async () => {
+test('Ctrl+Shift+A accepts every sweep and stays on the survey (BUG-010)', async () => {
   const calibrated: WorkspaceOverview = { ...workspaceOverview, calibrated: true };
   let currentMode = '';
   const onMode = (m: string) => {
@@ -464,7 +470,13 @@ test('Ctrl+Shift+A accepts every sweep and moves to pre-image', async () => {
   });
   await waitFor(() => expect(currentMode).toBe('survey'));
   fireEvent.keyDown(document.body, { key: 'A', ctrlKey: true, shiftKey: true });
-  await waitFor(() => expect(currentMode).toBe('pre-image'));
+  // BUG-010: accepting all no longer jumps to the pre-image — it stays on the
+  // survey and enables "Create Pre-Image".
+  await waitFor(() =>
+    expect(screen.getByText(/5 \/ 5 sweeps accepted/)).toBeInTheDocument(),
+  );
+  expect(currentMode).toBe('survey');
+  expect(screen.getByText('Create Pre-Image')).not.toBeDisabled();
 });
 
 test('Prev/Next sweep nav advances the source sweep index', async () => {

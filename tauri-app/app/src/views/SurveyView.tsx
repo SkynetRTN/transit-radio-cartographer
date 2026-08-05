@@ -5,6 +5,7 @@ import { useTheme } from '../state/theme-context';
 import { PointScatter, type Point } from '../lib/plots/PointScatter';
 import { dataColors } from '../lib/plots/plot-theme';
 import { WorkspaceBody } from './WorkspaceBody';
+import { YesNoCancelDialog } from './dialogs/YesNoCancelDialog';
 
 function formatRa(volts: number): string {
   // RA in the .md2 fixtures is given in arc-time seconds.  Format as HH:MM:SS.
@@ -56,7 +57,6 @@ export function SurveyView() {
     workspace,
     workspaceHandle,
     setViewMode,
-    close,
     currentSweepIndex,
     setCurrentSweepIndex,
     acceptedSweeps,
@@ -76,6 +76,16 @@ export function SurveyView() {
   const [pendingBaselinePoint, setPendingBaselinePoint] = useState<
     { dec: number; flux: number } | null
   >(null);
+  // BUG-007 (dan): the top-plot Remove RFI line tracks the FREE cursor (raw
+  // (dec, flux) coords), not the nearest sample — matching the bottom "Removed"
+  // plot's recovery line. Endpoints come from onCursorClick on the top plot.
+  const [baselineCursor, setBaselineCursor] = useState<{ dec: number; flux: number } | null>(null);
+  // BUG-014 (dan): sweep indices with RFI edits not yet committed to the engine
+  // (via Accept Sweep / Apply Edits). Used to prompt before navigating away from
+  // an accepted sweep that has unapplied edits.
+  const [dirtySweeps, setDirtySweeps] = useState<Set<number>>(() => new Set());
+  // Target sweep index for a navigation blocked by the unapplied-edits prompt.
+  const [pendingNav, setPendingNav] = useState<number | null>(null);
   // Per-sweep, per-sample "removed" amount from Remove RFI edits, measured
   // against `originalBySweep` (NOT the engine's current flux). Kept across
   // Accept Sweep so revisiting an accepted sweep still shows the Removed plot
@@ -118,6 +128,7 @@ export function SurveyView() {
     setStickyPoint(null);
     setBaselineMode(false);
     setPendingBaselinePoint(null);
+    setBaselineCursor(null);
     setPendingRecoverPoint(null);
     setRecoverCursor(null);
   }, [workspaceHandle, workspace?.calibrated, workspace?.flux_calibrated, sweepIndex]);
@@ -128,6 +139,7 @@ export function SurveyView() {
     setRemovedBySweep({});
     setHistoryBySweep({});
     setOriginalBySweep({});
+    setDirtySweeps(new Set());
   }, [workspaceHandle]);
 
   useEffect(() => {
@@ -219,21 +231,18 @@ export function SurveyView() {
 
   const baselineOverlays = useMemo(() => {
     const lines: { points: { x: number; y: number }[]; color: string; width: number }[] = [];
-    if (pendingBaselinePoint) {
-      const target = hoverPoint ?? stickyPoint;
-      if (target) {
-        lines.push({
-          points: [
-            { x: pendingBaselinePoint.dec, y: pendingBaselinePoint.flux },
-            { x: target.dec, y: target.flux },
-          ],
-          color: dc.baseline,
-          width: 1,
-        });
-      }
+    if (pendingBaselinePoint && baselineCursor) {
+      lines.push({
+        points: [
+          { x: pendingBaselinePoint.dec, y: pendingBaselinePoint.flux },
+          { x: baselineCursor.dec, y: baselineCursor.flux },
+        ],
+        color: dc.baseline,
+        width: 1,
+      });
     }
     return lines;
-  }, [pendingBaselinePoint, hoverPoint, stickyPoint, dc]);
+  }, [pendingBaselinePoint, baselineCursor, dc]);
 
   // Rubber-band preview for the recovery line on the bottom "Removed" plot,
   // drawn from the first endpoint to the free cursor (un-snapped).
@@ -278,45 +287,65 @@ export function SurveyView() {
         return { ...h, [sweepIndex]: [...stack, prevMap] };
       });
       setRemovedBySweep((prev) => ({ ...prev, [sweepIndex]: next }));
+      // Any RFI edit marks this sweep as having changes not yet committed to
+      // the engine (BUG-014); Accept Sweep / Apply Edits clears the flag.
+      setDirtySweeps((prev) => {
+        const nextSet = new Set(prev);
+        nextSet.add(sweepIndex);
+        return nextSet;
+      });
     },
     [removedBySweep, sweepIndex, sweep],
   );
 
-  const handleClick = useCallback(
-    (p: Point) => {
-      if (baselineMode) {
-        if (!sweep) return;
-        // Keep the RA/Dec/Flux readout live while removing RFI: clicking a
-        // point should still update the side readout even though the click is
-        // also being consumed as a baseline endpoint.
-        setStickyPoint(p);
-        if (!pendingBaselinePoint) {
-          setPendingBaselinePoint({ dec: p.dec, flux: p.flux });
-        } else {
-          const dec0 = pendingBaselinePoint.dec;
-          const flux0 = pendingBaselinePoint.flux;
-          const dec1 = p.dec;
-          const flux1 = p.flux;
-          const lo = Math.min(dec0, dec1);
-          const hi = Math.max(dec0, dec1);
-          const slope = dec1 === dec0 ? 0 : (flux1 - flux0) / (dec1 - dec0);
-          // Removals are measured against the pristine base so they stay valid
-          // even after Accept Sweep rewrites the engine's flux to the corrected
-          // values (base falls back to the current flux on the first edit).
-          const base = originalBySweep[sweepIndex] ?? sweep.flux;
-          const next: RemovedMap = { ...(removedBySweep[sweepIndex] ?? {}) };
-          for (let i = 0; i < sweep.dec.length; i++) {
-            const d = sweep.dec[i];
-            if (d < lo || d > hi) continue;
-            const lineFlux = flux0 + slope * (d - dec0);
-            next[i] = base[i] - lineFlux;
-          }
-          commitRemoved(next);
-          setPendingBaselinePoint(null);
-        }
+  // A point click only pins the RA/Dec/Flux readout now — Remove RFI endpoints
+  // come from the FREE cursor (handleTopCursorClick), so the line can be drawn
+  // above the samples and isn't limited to real data points (BUG-007).
+  const handleClick = useCallback((p: Point) => {
+    setStickyPoint(p);
+  }, []);
+
+  // BUG-007 (dan): free-cursor Remove RFI on the top plot. The x axis is Dec and
+  // the y axis is flux. First click sets the anchor endpoint; the second draws
+  // the straight line between the two free-cursor positions and replaces every
+  // sample whose Dec falls in the span with that line (the removed amount is
+  // measured against the pristine base flux).
+  const handleTopCursorMove = useCallback(
+    (x: number, _y: number) => {
+      // `_y` is flux; the rubber-band uses the live cursor via baselineCursor.
+      if (baselineMode) setBaselineCursor({ dec: x, flux: _y });
+    },
+    [baselineMode],
+  );
+
+  const handleTopCursorClick = useCallback(
+    (x: number, y: number) => {
+      if (!baselineMode || !sweep) return;
+      if (!pendingBaselinePoint) {
+        setPendingBaselinePoint({ dec: x, flux: y });
         return;
       }
-      setStickyPoint(p);
+      const dec0 = pendingBaselinePoint.dec;
+      const flux0 = pendingBaselinePoint.flux;
+      const dec1 = x;
+      const flux1 = y;
+      const lo = Math.min(dec0, dec1);
+      const hi = Math.max(dec0, dec1);
+      const slope = dec1 === dec0 ? 0 : (flux1 - flux0) / (dec1 - dec0);
+      // Removals are measured against the pristine base so they stay valid even
+      // after Accept Sweep rewrites the engine's flux to the corrected values
+      // (base falls back to the current flux on the first edit).
+      const base = originalBySweep[sweepIndex] ?? sweep.flux;
+      const next: RemovedMap = { ...(removedBySweep[sweepIndex] ?? {}) };
+      for (let i = 0; i < sweep.dec.length; i++) {
+        const d = sweep.dec[i];
+        if (d < lo || d > hi) continue;
+        const lineFlux = flux0 + slope * (d - dec0);
+        next[i] = base[i] - lineFlux;
+      }
+      commitRemoved(next);
+      setPendingBaselinePoint(null);
+      setBaselineCursor(null);
     },
     [
       baselineMode,
@@ -396,18 +425,16 @@ export function SurveyView() {
   }, [historyBySweep, sweepIndex]);
 
   const handleEmptyClick = useCallback(() => {
-    if (baselineMode) {
-      // Empty-space click in baseline mode cancels a pending first endpoint
-      // (matches the legacy "right-click cancels" gesture).
-      setPendingBaselinePoint(null);
-      return;
-    }
+    // In Remove RFI mode, empty-space clicks are real endpoints (handled by
+    // handleTopCursorClick) — don't treat them as an unpin.
+    if (baselineMode) return;
     setStickyPoint(null);
   }, [baselineMode]);
 
   const toggleBaselineMode = useCallback(() => {
     setBaselineMode((m) => !m);
     setPendingBaselinePoint(null);
+    setBaselineCursor(null);
     setPendingRecoverPoint(null);
     setRecoverCursor(null);
   }, []);
@@ -438,6 +465,14 @@ export function SurveyView() {
       setCommitting(false);
       return false;
     }
+    // Edits are now committed to the engine — this sweep is no longer "unapplied"
+    // (BUG-014).
+    setDirtySweeps((prev) => {
+      if (!prev.has(sweepIndex)) return prev;
+      const nextSet = new Set(prev);
+      nextSet.delete(sweepIndex);
+      return nextSet;
+    });
     setCommitting(false);
     return true;
   }, [sweep, workspaceHandle, originalBySweep, removedBySweep, sweepIndex, markDirty]);
@@ -451,6 +486,25 @@ export function SurveyView() {
     if (!(await commitPendingEdits())) return;
     acceptAll();
   }, [commitPendingEdits, acceptAll]);
+
+  // BUG-014 (dan): navigating away from an ACCEPTED sweep that has RFI edits not
+  // yet applied should stop and ask whether to save them, instead of silently
+  // leaving them uncommitted. Non-accepted sweeps (still under review) and
+  // sweeps with no unapplied edits navigate immediately.
+  const navigateTo = useCallback(
+    (index: number) => {
+      const count = workspace?.source_count ?? 0;
+      const clamped = Math.max(0, Math.min(count - 1, index));
+      if (clamped === currentSweepIndex) return;
+      const leavingAccepted = acceptedSweeps.has(currentSweepIndex);
+      if (leavingAccepted && dirtySweeps.has(currentSweepIndex)) {
+        setPendingNav(clamped);
+        return;
+      }
+      setCurrentSweepIndex(clamped);
+    },
+    [workspace?.source_count, currentSweepIndex, acceptedSweeps, dirtySweeps, setCurrentSweepIndex],
+  );
 
   // Keyboard navigation over sweeps (ignored while typing in a field such as
   // the sweep-number input):
@@ -481,11 +535,11 @@ export function SurveyView() {
       if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
       if (e.key === 'ArrowLeft') {
         e.preventDefault();
-        setCurrentSweepIndex(Math.max(0, currentSweepIndex - 1));
+        navigateTo(currentSweepIndex - 1);
       } else if (e.key === 'ArrowRight') {
         e.preventDefault();
         if (workspace?.calibrated) void handleAcceptSweep();
-        else setCurrentSweepIndex(Math.min(count - 1, currentSweepIndex + 1));
+        else navigateTo(currentSweepIndex + 1);
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -496,7 +550,7 @@ export function SurveyView() {
     workspace?.calibrated,
     handleAcceptSweep,
     handleAcceptAll,
-    setCurrentSweepIndex,
+    navigateTo,
   ]);
 
   const readoutPoint = stickyPoint ?? hoverPoint;
@@ -516,8 +570,8 @@ export function SurveyView() {
   const allAccepted = acceptedSweeps.size >= sweepCount && sweepCount > 0;
   const baselineHint = baselineMode
     ? pendingBaselinePoint
-      ? 'Remove RFI: click endpoint…'
-      : 'Remove RFI: click first point…'
+      ? 'Remove RFI: click the second point (the line follows your cursor)…'
+      : 'Remove RFI: click anywhere for the first point…'
     : null;
   const canUndo = (historyBySweep[sweepIndex]?.length ?? 0) > 0;
 
@@ -547,6 +601,8 @@ export function SurveyView() {
                     onHover={handleHover}
                     onPointClick={handleClick}
                     onEmptyClick={handleEmptyClick}
+                    onCursorMove={baselineMode ? handleTopCursorMove : undefined}
+                    onCursorClick={baselineMode ? handleTopCursorClick : undefined}
                     pinnedPoint={
                       pendingBaselinePoint
                         ? { x: pendingBaselinePoint.dec, y: pendingBaselinePoint.flux }
@@ -638,12 +694,13 @@ export function SurveyView() {
                     ? 'Apply Edits'
                     : 'Accept Sweep'}
               </button>
+              {/* BUG-008 (dan): the gain calibration stays available so you can
+                  go back and re-calibrate at any time, not just once. */}
               <button
                 onClick={() => setViewMode('calibrate-survey')}
-                disabled={workspace.calibrated}
-                title="Run gain calibration using the noise-injection brackets"
+                title="Run (or re-run) gain calibration using the noise-injection brackets"
               >
-                Calibrate Survey
+                {workspace.calibrated ? 'Re-Calibrate Survey' : 'Calibrate Survey'}
               </button>
               <div className="button-gap" />
               <button
@@ -673,7 +730,6 @@ export function SurveyView() {
               >
                 Create Pre-Image
               </button>
-              <button onClick={() => void close()}>Cancel</button>
             </div>
 
             <div className="readout">
@@ -692,18 +748,19 @@ export function SurveyView() {
             <div className="sweep-nav">
               <button
                 disabled={sweepIndex <= 0 || loading}
-                onClick={() => setCurrentSweepIndex(Math.max(0, sweepIndex - 1))}
+                onClick={() => navigateTo(sweepIndex - 1)}
               >
                 ‹ Prev
               </button>
+              {/* BUG-013 (dan): a plain text input (no spinner arrows) — the only
+                  way to change the number is to type it and commit on Enter/blur. */}
               <input
-                type="number"
+                type="text"
+                inputMode="numeric"
                 className="sweep-nav-input"
-                min={1}
-                max={Math.max(1, sweepCount)}
                 value={sweepInput}
                 aria-label="Sweep number"
-                onChange={(e) => setSweepInput(e.target.value)}
+                onChange={(e) => setSweepInput(e.target.value.replace(/[^0-9]/g, ''))}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
                 }}
@@ -711,7 +768,7 @@ export function SurveyView() {
                   const parsed = parseInt(sweepInput, 10);
                   if (Number.isFinite(parsed)) {
                     const clamped = Math.max(1, Math.min(sweepCount, parsed));
-                    setCurrentSweepIndex(clamped - 1);
+                    if (clamped - 1 !== sweepIndex) navigateTo(clamped - 1);
                     setSweepInput(String(clamped));
                   } else {
                     setSweepInput(String(sweepIndex + 1));
@@ -721,9 +778,7 @@ export function SurveyView() {
               <span>/ {sweepCount}</span>
               <button
                 disabled={sweepIndex >= sweepCount - 1 || loading}
-                onClick={() =>
-                  setCurrentSweepIndex(Math.min(sweepCount - 1, sweepIndex + 1))
-                }
+                onClick={() => navigateTo(sweepIndex + 1)}
               >
                 Next ›
               </button>
@@ -736,6 +791,29 @@ export function SurveyView() {
           }
         />
       </div>
+
+      {/* BUG-014 (dan): prompt before leaving an accepted sweep with unapplied
+          RFI edits. Yes saves the edits then navigates; No navigates without
+          saving; Cancel stays on the sweep. */}
+      {pendingNav !== null && (
+        <YesNoCancelDialog
+          title="Unsaved sweep edits"
+          message="You have edits on this accepted sweep that haven't been applied. Save them before moving on?"
+          onYes={() => {
+            const target = pendingNav;
+            setPendingNav(null);
+            void (async () => {
+              if (await commitPendingEdits()) setCurrentSweepIndex(target);
+            })();
+          }}
+          onNo={() => {
+            const target = pendingNav;
+            setPendingNav(null);
+            setCurrentSweepIndex(target);
+          }}
+          onCancel={() => setPendingNav(null)}
+        />
+      )}
     </div>
   );
 }
