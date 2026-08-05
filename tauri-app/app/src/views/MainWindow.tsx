@@ -532,9 +532,12 @@ export function MainWindow() {
     await fluxCal.saveAs(target);
   }, [fluxCal]);
 
-  const handleNewCalibration = useCallback(() => {
+  // BUG-004 (dan): "Open Flux Calibration Tool" — open the editor. If a
+  // calibration is already loaded/selected, show it populated; otherwise start a
+  // fresh blank table. (Merges the old "New Calibration" + "Open Calibration".)
+  const handleOpenFluxCalTool = useCallback(() => {
     setOpenMenu(null);
-    fluxCal.newCalibration();
+    if (!fluxCal.table) fluxCal.newCalibration();
     setAuxView('flux-cal');
   }, [fluxCal]);
 
@@ -1258,20 +1261,6 @@ export function MainWindow() {
     }
   }, [colorCompose, image, rgbImage, setRgbImage]);
 
-  const handleChangeCalibrationName = useCallback(() => {
-    setOpenMenu(null);
-    if (!fluxCal.table) return;
-    setTextPrompt({
-      title: 'Change Calibration Name',
-      label: 'Calibration name:',
-      defaultValue: fluxCal.table.caption,
-      onSubmit: (value) => {
-        setTextPrompt(null);
-        fluxCal.setCaption(value);
-      },
-    });
-  }, [fluxCal]);
-
   const handleChangeImageName = useCallback(() => {
     setOpenMenu(null);
     if (!image) return;
@@ -1754,20 +1743,10 @@ export function MainWindow() {
               <button role="menuitem" onClick={() => void pickAndLoadCal()}>
                 Select Calibration…
               </button>
+              <button role="menuitem" onClick={handleOpenFluxCalTool}>
+                Open Flux Calibration Tool
+              </button>
               <div className="menu-sep" />
-              <button role="menuitem" onClick={handleNewCalibration}>
-                New Calibration…
-              </button>
-              <button
-                role="menuitem"
-                onClick={() => {
-                  setOpenMenu(null);
-                  if (fluxCal.table) setAuxView('flux-cal');
-                  else void pickAndLoadCal();
-                }}
-              >
-                Open Calibration…
-              </button>
               <button
                 role="menuitem"
                 disabled={!fluxCal.table || !fluxCal.filePath || !fluxCal.dirty}
@@ -1781,14 +1760,6 @@ export function MainWindow() {
                 onClick={() => void handleSaveCalAs()}
               >
                 Save Calibration As…
-              </button>
-              <div className="menu-sep" />
-              <button
-                role="menuitem"
-                disabled={!fluxCal.table}
-                onClick={handleChangeCalibrationName}
-              >
-                Change Calibration Name…
               </button>
             </div>
           )}

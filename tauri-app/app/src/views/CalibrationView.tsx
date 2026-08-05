@@ -19,6 +19,7 @@ export function FluxCalibrationView() {
   const {
     table,
     slope,
+    appliedSlope,
     error,
     filePath,
     dirty,
@@ -30,6 +31,7 @@ export function FluxCalibrationView() {
     removeEntry,
     refit,
     setCaption,
+    applyToWorkspace,
   } = useFluxCal();
   const { overview: scanOverview, handle: scanHandle } = useScan();
   const { theme } = useTheme();
@@ -118,9 +120,10 @@ export function FluxCalibrationView() {
       <div className="aux-view flux-cal-view" style={{ padding: 16 }}>
         <h2 style={{ marginTop: 0 }}>Flux Calibration</h2>
         <p>
-          No calibration is loaded. Use <strong>Flux Calibration → New Calibration…</strong>{' '}
-          to start a fresh table, or <strong>Select Calibration…</strong> to open an existing
-          <code>.cal</code> file.
+          No calibration is loaded. Start a fresh table below, or use{' '}
+          <strong>Flux Calibration → Select Calibration…</strong> to open an
+          existing <code>.cal</code> file (which applies to your workspace
+          right away).
         </p>
         <button onClick={newCalibration}>New Calibration</button>
         {rpcError && <p style={{ color: 'crimson' }}>Error: {rpcError}</p>}
@@ -174,6 +177,21 @@ export function FluxCalibrationView() {
               disabled={table.entries.length < 1}
             >
               Fit Calibration
+            </button>
+            {/* BUG-004 (dan): fitting alone doesn't touch the workspace — this
+                button is what pushes the current fit into it. */}
+            <button
+              onClick={() => void applyToWorkspace()}
+              disabled={slope === null || slope === 0}
+              title={
+                slope === null || slope === 0
+                  ? 'Fit a calibration line first'
+                  : 'Apply this calibration to the open survey / scan / image'
+              }
+            >
+              {appliedSlope !== null && appliedSlope === slope
+                ? 'Applied to Workspace ✓'
+                : 'Apply to Workspace'}
             </button>
           </div>
           <table
