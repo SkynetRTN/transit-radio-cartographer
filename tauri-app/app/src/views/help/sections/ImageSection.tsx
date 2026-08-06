@@ -12,7 +12,6 @@
 
 import imageShot from '../images/image.png?url';
 import paletteShot from '../images/image-palette.png?url';
-import saveShot from '../images/image-save.png?url';
 
 export function ImageSection() {
   return (
@@ -64,13 +63,16 @@ export function ImageSection() {
 
       <h4>1c. Magnifier</h4>
       <p>
-        <strong>Right-click</strong> a pixel to open the{' '}
-        <strong>magnifier</strong> — a zoomed inset of the region around that
-        spot, shown in the side panel. Use the <strong>arrow keys</strong> to
-        nudge the magnified area (hold <code>Shift</code> for ×5 steps), and{' '}
-        <code>Close Magnifier</code> to dismiss it. Change how many cells it
-        covers with <code>Image → Change Magnifier Size…</code>. Right-clicking
-        only opens the magnifier — it never disturbs your current zoom.
+        Click <strong>Open Magnifier</strong> in the side panel to open the{' '}
+        <strong>magnifier</strong> — a zoomed inset of the sky, shown right below
+        the button. (<strong>Right-clicking</strong> a pixel also opens it,
+        centered on that cell; neither way pins a point.) Use the{' '}
+        <strong>arrow keys</strong> to nudge the magnified area (hold{' '}
+        <code>Shift</code> for ×5 steps), and <strong>Close Magnifier</strong>{' '}
+        (same button) to dismiss it. The loupe is always square on the
+        dec-corrected sky; set its half-width in <strong>degrees</strong> with{' '}
+        <code>Image → Change Magnifier Size…</code>. Right-clicking only opens
+        the magnifier — it never disturbs your current zoom.
       </p>
       <p>
         While the magnifier is open, three buttons below the RA/Dec/Flux readout
@@ -173,10 +175,8 @@ export function ImageSection() {
 
       <h3>4. Save the image</h3>
       <p>
-        The scalar Image view has in-view buttons on the right —{' '}
-        <code>Save Image</code>, <code>Save Image As…</code>, and{' '}
-        <code>Save Bitmap As…</code> — so you can save without opening a menu.
-        The same actions are also on the <code>Image</code> menu:
+        Saving lives on the <code>Image</code> menu (the Image view itself has no
+        save buttons):
       </p>
       <ul>
         <li>
@@ -184,20 +184,14 @@ export function ImageSection() {
           the current path.
         </li>
         <li>
-          <code>Save Image As…</code> — Saves to a new path.
+          <code>Save Image As…</code> — Saves to a new path (<code>.img</code> or{' '}
+          <code>.fits</code>).
         </li>
         <li>
-          <code>Save Bitmap As…</code> — Exports a <code>.png</code> /{' '}
-          <code>.bmp</code> for use in papers / slides.
+          <code>Save as PNG…</code> — Exports a full-resolution <code>.png</code>
+          {' '}for use in papers / slides.
         </li>
       </ul>
-      <figure className="help-figure">
-        <img src={saveShot} alt="In-view Save Image, Save Image As, and Save Bitmap As buttons" />
-        <figcaption>
-          The in-view Save buttons on the right of the Image view: Save Image,
-          Save Image As…, and Save Bitmap As….
-        </figcaption>
-      </figure>
 
       <h3>5. Compose multiple images</h3>
       <ul>

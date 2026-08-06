@@ -7,8 +7,8 @@ import { useSurvey } from '../state/survey-context';
  * (MainWindow) and the in-view Save buttons (ImageView) so there is a single
  * save path. Each action opens the Tauri save dialog (except the quick-save
  * fast path, which reuses the last saved path) and delegates the actual write
- * to the survey context's `saveImage` — which routes `.bmp` to the bitmap
- * writer and `.img` / `.fits` to the image writer.
+ * to the survey context's `saveImage` — which routes `.png` to the PNG writer
+ * and `.img` / `.fits` to the image writer.
  *
  * The dialog itself is wrapped so a cancelled/failed picker is a no-op; the
  * underlying `saveImage` call may still throw, so callers should try/catch and
@@ -65,16 +65,17 @@ export function useImageSave() {
     await saveImage(target);
   }, [image, imageSavePath, imageName, saveImage, pickPath]);
 
-  const saveBitmapAs = useCallback(async () => {
+  // BUG-005 (dan): raster export is now PNG (replaces the old .bmp).
+  const savePngAs = useCallback(async () => {
     if (!image) return;
     const target = await pickPath({
-      title: 'Save Bitmap As',
-      defaultPath: `${imageName || 'image'}.bmp`,
-      filters: [{ name: 'Bitmap (.bmp)', extensions: ['bmp'] }],
+      title: 'Save as PNG',
+      defaultPath: `${imageName || 'image'}.png`,
+      filters: [{ name: 'PNG Image (.png)', extensions: ['png'] }],
     });
     if (!target) return;
     await saveImage(target);
   }, [image, imageName, saveImage, pickPath]);
 
-  return { saveImageQuick, saveImageAs, saveBitmapAs };
+  return { saveImageQuick, saveImageAs, savePngAs };
 }

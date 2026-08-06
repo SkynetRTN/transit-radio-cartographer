@@ -89,7 +89,7 @@ export function MainWindow() {
     resetForEngineRestart: resetScanForEngineRestart,
   } = useScan();
   const fluxCal = useFluxCal();
-  const { saveImageQuick, saveImageAs, saveBitmapAs } = useImageSave();
+  const { saveImageQuick, saveImageAs, savePngAs } = useImageSave();
   const { theme, setTheme } = useTheme();
   const hasSurvey = survey !== null;
   // Image-menu items act on a built image, so they enable as soon as one
@@ -606,14 +606,14 @@ export function MainWindow() {
     }
   }, [saveImageAs]);
 
-  const handleSaveBitmapAs = useCallback(async () => {
+  const handleSavePngAs = useCallback(async () => {
     setOpenMenu(null);
     try {
-      await saveBitmapAs();
+      await savePngAs();
     } catch (e) {
       setWarning((e as Error).message);
     }
-  }, [saveBitmapAs]);
+  }, [savePngAs]);
 
   const startCompose = useCallback(
     async (mode: ComposeMode) => {
@@ -1453,10 +1453,10 @@ export function MainWindow() {
               <button
                 role="menuitem"
                 disabled={!hasImage}
-                onClick={() => void handleSaveBitmapAs()}
+                onClick={() => void handleSavePngAs()}
                 title={hasImage ? undefined : 'Available after you build or upload an image'}
               >
-                Save Bitmap As…
+                Save as PNG…
               </button>
               <div className="menu-sep" />
               <button
@@ -1527,7 +1527,7 @@ export function MainWindow() {
                   if (!image) return;
                   setNumericPrompt({
                     title: 'Change Magnifier Size',
-                    label: 'Magnifier half-width (cells, 1–200):',
+                    label: 'Magnifier half-width (degrees):',
                     defaultValue: magnifierHalfSize,
                     onSubmit: (value) => {
                       setNumericPrompt(null);

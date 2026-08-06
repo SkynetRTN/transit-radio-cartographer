@@ -103,7 +103,7 @@ test('image submenu items are disabled before an image exists', () => {
   renderApp();
   fireEvent.click(screen.getByText('Image'));
   expect(screen.getByRole('menuitem', { name: 'Save Image As…' })).toBeDisabled();
-  expect(screen.getByRole('menuitem', { name: 'Save Bitmap As…' })).toBeDisabled();
+  expect(screen.getByRole('menuitem', { name: 'Save as PNG…' })).toBeDisabled();
   expect(screen.getByRole('menuitem', { name: 'Show Palette…' })).toBeDisabled();
 });
 

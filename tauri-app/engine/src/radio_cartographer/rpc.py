@@ -36,6 +36,7 @@ from .image_compose import (
     tricolor_compose,
 )
 from .io.bmp import write_bmp_from_rgb
+from .io.png import write_png_from_rgb
 from .io.cal import read_cal, write_cal
 from .io.fits import read_fits, write_fits
 from .io.img import read_img, write_img
@@ -485,6 +486,8 @@ class RpcServer:
                 result = self._save_image(params)
             elif method == "save_bitmap":
                 result = self._save_bitmap(params)
+            elif method == "save_png":
+                result = self._save_png(params)
             elif method == "append_image":
                 result = self._append_image(params)
             elif method == "append_image_multi":
@@ -973,6 +976,24 @@ class RpcServer:
             write_bmp_from_rgb(rgb, str(path))
         except Exception as exc:  # noqa: BLE001
             raise RpcError(ERR_IO, f"failed to save bitmap: {exc}") from exc
+        return {"path": str(path), "bytes_written": int(Path(str(path)).stat().st_size)}
+
+    def _save_png(self, params: dict[str, Any]) -> dict[str, Any]:
+        # BUG-005 (dan): the scalar-image raster export is a full-resolution PNG
+        # (replacing the old .bmp). Same palette/flux-range application as the
+        # bitmap path — only the encoder differs.
+        handle = int(params.get("handle", -1))
+        image = self._resolve_image(handle)
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        palette = _palette_from_stops(params.get("palette")) or _default_palette()
+        flux_min, flux_max = _flux_range_from_params(params, image)
+        rgb = apply_palette(image.pixels, palette, flux_min, flux_max)
+        try:
+            write_png_from_rgb(rgb, str(path))
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to save png: {exc}") from exc
         return {"path": str(path), "bytes_written": int(Path(str(path)).stat().st_size)}
 
     def _save_rgb_png(self, params: dict[str, Any]) -> dict[str, Any]:

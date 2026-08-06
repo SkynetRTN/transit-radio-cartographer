@@ -484,6 +484,19 @@ export class RpcClient {
     if (options?.flux_max !== undefined) params.flux_max = options.flux_max;
     return this.request<{ path: string; bytes_written: number }>('save_bitmap', params);
   }
+  // BUG-005 (dan): full-resolution PNG export of the scalar image (replaces the
+  // old .bmp path). Same palette/flux-range options as saveBitmap.
+  savePng(
+    handle: number,
+    path: string,
+    options?: { palette?: PaletteStop[]; flux_min?: number; flux_max?: number },
+  ) {
+    const params: Record<string, unknown> = { handle, path };
+    if (options?.palette !== undefined) params.palette = options.palette;
+    if (options?.flux_min !== undefined) params.flux_min = options.flux_min;
+    if (options?.flux_max !== undefined) params.flux_max = options.flux_max;
+    return this.request<{ path: string; bytes_written: number }>('save_png', params);
+  }
   // Write a client-rendered PNG (bi/tri-color composite) to disk. `data` is the
   // canvas data URL / base64 PNG; the engine decodes and writes the bytes. Used
   // for RGB export, which has no scalar image and so can't go through saveImage.

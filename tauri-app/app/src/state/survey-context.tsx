@@ -145,7 +145,8 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     pixels: ImagePixels;
     savePath: string | null;
   } | null>(null);
-  const [magnifierHalfSize, setMagnifierHalfSizeState] = useState<number>(15);
+  // BUG-025 (dan): magnifier half-window in DEGREES (was cells). ~1° default.
+  const [magnifierHalfSize, setMagnifierHalfSizeState] = useState<number>(1.0);
   const [imageDisplay, setImageDisplayState] = useState<ImageDisplayMode>('sky');
   const [loading, setLoading] = useState(false);
   const [reducing, setReducing] = useState(false);
@@ -584,10 +585,11 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setMagnifierHalfSizeAction = useCallback((n: number) => {
-    // Clamp to a sane range so the magnifier always has at least a 3×3
-    // window and never asks for more cells than the image actually contains.
-    if (!Number.isFinite(n)) return;
-    setMagnifierHalfSizeState(Math.max(1, Math.min(200, Math.round(n))));
+    // BUG-025 (dan): the half-window is in DEGREES now. Clamp to a sane angular
+    // range so the loupe is neither a single cell nor larger than a typical
+    // survey field.
+    if (!Number.isFinite(n) || n <= 0) return;
+    setMagnifierHalfSizeState(Math.max(0.05, Math.min(20, n)));
   }, []);
 
   const saveImageAction = useCallback(async (path: string): Promise<string | null> => {
@@ -615,14 +617,19 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     // saved image is at least gain-calibrated, so default to GCU.
     opts.unit = current.unit ?? 'GCU';
     try {
-      if (ext === '.bmp') {
-        const bmpOpts: { palette?: PaletteStop[]; flux_min?: number; flux_max?: number } = {};
-        if (palette) bmpOpts.palette = palette;
+      if (ext === '.bmp' || ext === '.png') {
+        const rasterOpts: { palette?: PaletteStop[]; flux_min?: number; flux_max?: number } = {};
+        if (palette) rasterOpts.palette = palette;
         if (flux) {
-          bmpOpts.flux_min = flux.min;
-          bmpOpts.flux_max = flux.max;
+          rasterOpts.flux_min = flux.min;
+          rasterOpts.flux_max = flux.max;
         }
-        const r = await rpcClient.saveBitmap(current.handle, path, bmpOpts);
+        // BUG-005 (dan): .png is the new raster export; .bmp still works if the
+        // user types it.
+        const r =
+          ext === '.png'
+            ? await rpcClient.savePng(current.handle, path, rasterOpts)
+            : await rpcClient.saveBitmap(current.handle, path, rasterOpts);
         return r.path;
       }
       const r = await rpcClient.saveImage(current.handle, path, opts);
