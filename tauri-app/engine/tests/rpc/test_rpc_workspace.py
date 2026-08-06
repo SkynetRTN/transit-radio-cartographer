@@ -293,3 +293,28 @@ def test_set_source_sweep_flux_rejects_uncalibrated_workspace() -> None:
     )
     assert "error" in resp
     assert resp["error"]["code"] == -32602
+
+
+def test_get_source_sweep_returns_processed_flux_after_reduction() -> None:
+    # BUG-015 (dan): a Pre Image reduction (smooth) processes the workspace
+    # sweeps into `reduced_source_flux`; get_source_sweep must return that
+    # processed layer so "Back to Sweeps" shows the reduced data rather than the
+    # pre-reduction calibrated values.
+    server = RpcServer()
+    ws_handle = _open_calibrated(server)
+    ws = server._handles.get(ws_handle)
+
+    before = call(server, "get_source_sweep", {"handle": ws_handle, "index": 0, "max_points": 0})
+    before_flux = np.array(before["result"]["flux"])
+    assert ws.calibrated_source_flux is not None
+    assert np.allclose(before_flux, ws.calibrated_source_flux[0])
+
+    smoothed = call(
+        server, "smooth", {"handle": ws_handle, "width": 5, "workspace_handle": ws_handle}
+    )
+    assert "error" not in smoothed, smoothed
+
+    after = call(server, "get_source_sweep", {"handle": ws_handle, "index": 0, "max_points": 0})
+    after_flux = np.array(after["result"]["flux"])
+    assert ws.reduced_source_flux is not None
+    assert np.allclose(after_flux, ws.reduced_source_flux[0])

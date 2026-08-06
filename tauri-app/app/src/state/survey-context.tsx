@@ -69,6 +69,13 @@ export interface SurveyState {
   // mode flips to 'pre-image' so the user can render the gridded image.
   currentSweepIndex: number;
   acceptedSweeps: Set<number>;
+  // BUG-010 (dan): persisted pre-image pipeline progress (see the state comment
+  // in the provider). PreImageView reads these instead of local state so the
+  // Make Image gating and pixel size survive leaving/re-entering the view.
+  preImagePix: number;
+  preImageReductions: { smooth: boolean; baseline: boolean; align: boolean };
+  setPreImagePix: (pix: number) => void;
+  markPreImageReduction: (kind: 'smooth' | 'baseline' | 'align') => void;
   open: (path: string) => Promise<void>;
   close: () => Promise<void>;
   setViewMode: (mode: WorkspaceViewMode) => void;
@@ -148,6 +155,16 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   const [savePath, setSavePath] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  // BUG-010 (dan): the pre-image reduction pipeline (Smooth / Baseline / Align)
+  // and its pixel size persist across pre-image ↔ survey navigation, so
+  // re-entering the pre-image (via Create Pre-Image) doesn't reset the progress
+  // and re-stack the reductions. Reset on open / close / resetSweepReview.
+  const [preImagePix, setPreImagePix] = useState<number>(0.06);
+  const [preImageReductions, setPreImageReductions] = useState<{
+    smooth: boolean;
+    baseline: boolean;
+    align: boolean;
+  }>({ smooth: false, baseline: false, align: false });
 
   const surveyRef = useRef<SurveyMeta | null>(survey);
   const workspaceHandleRef = useRef<number | null>(workspaceHandle);
@@ -270,6 +287,9 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       setImageFluxRangeState(null);
       setImageSavePath(null);
       setImageNameState(meta.workspace?.name ?? 'image');
+      // Fresh survey → reset the pre-image pipeline progress (BUG-010).
+      setPreImagePix(0.06);
+      setPreImageReductions({ smooth: false, baseline: false, align: false });
       if (isSaved) {
         const sweepCount = meta.workspace?.source_count ?? 0;
         const acceptedList =
@@ -334,6 +354,8 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     setViewMode('survey');
     setCurrentSweepIndex(0);
     setAcceptedSweeps(new Set());
+    setPreImagePix(0.06);
+    setPreImageReductions({ smooth: false, baseline: false, align: false });
     setSavePath(null);
     setDirty(false);
   }, []);
@@ -374,7 +396,16 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   const resetSweepReview = useCallback(() => {
     setAcceptedSweeps(new Set());
     setCurrentSweepIndex(0);
+    setPreImagePix(0.06);
+    setPreImageReductions({ smooth: false, baseline: false, align: false });
   }, []);
+
+  const markPreImageReduction = useCallback(
+    (kind: 'smooth' | 'baseline' | 'align') => {
+      setPreImageReductions((prev) => ({ ...prev, [kind]: true }));
+    },
+    [],
+  );
 
   const refreshWorkspace = useCallback(async () => {
     const h = workspaceHandleRef.current;
@@ -705,6 +736,10 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       saving,
       currentSweepIndex,
       acceptedSweeps,
+      preImagePix,
+      preImageReductions,
+      setPreImagePix,
+      markPreImageReduction,
       open,
       close,
       setViewMode,
@@ -756,6 +791,9 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       saving,
       currentSweepIndex,
       acceptedSweeps,
+      preImagePix,
+      preImageReductions,
+      markPreImageReduction,
       open,
       close,
       acceptCurrentSweep,

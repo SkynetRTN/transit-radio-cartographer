@@ -10,10 +10,10 @@ import { ImagePlot, type ImagePoint } from '../lib/plots/ImagePlot';
 import { NumericInputDialog, type NumericPrompt } from './dialogs/NumericInputDialog';
 import { WorkspaceBody } from './WorkspaceBody';
 
-// Default on-sky pixel size in DEGREES for the auto-generated pre-image and
-// the Make Image dialog: 1/20 of the 40 ft beam (1.2°) = 0.06° per pixel.
-// Smaller = finer. (Legacy VB used a unitless integer coarseness factor.)
-const DEFAULT_PIX = 0.06;
+// The default on-sky pixel size (0.06° = 1/20 of the 40 ft beam) now lives on
+// the survey context as `preImagePix`, so it persists across pre-image ↔ survey
+// navigation (BUG-010). Smaller = finer. (Legacy VB used a unitless integer
+// coarseness factor.)
 
 function pad2(n: number): string {
   return n < 10 ? `0${n}` : `${n}`;
@@ -127,6 +127,10 @@ export function PreImageView() {
     setViewMode,
     makeImage,
     imageDisplay,
+    preImagePix,
+    preImageReductions,
+    setPreImagePix,
+    markPreImageReduction,
   } = useSurvey();
   const [imagePixels, setImagePixels] = useState<ImagePixels | null>(null);
   const [imageMeta, setImageMeta] = useState<ImageMeta | null>(null);
@@ -135,18 +139,16 @@ export function PreImageView() {
   // shifts dec) keeps the readout accurate.
   const [sweepPaths, setSweepPaths] = useState<SweepPath[]>([]);
   const [hoverPoint, setHoverPoint] = useState<ImagePoint | null>(null);
-  const [pix, setPix] = useState<number>(DEFAULT_PIX);
+  // BUG-010 (dan): pixel size and the Smooth/Baseline/Align pipeline progress
+  // now live in the survey context so they persist across pre-image ↔ survey
+  // navigation (re-entering the pre-image no longer resets the flags and
+  // re-stacks the reductions).
+  const pix = preImagePix;
+  const { smooth: didSmooth, baseline: didBaseline, align: didAlign } = preImageReductions;
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState<NumericPrompt | null>(null);
-  // Track whether each reduction has been run at least once in this Pre Image
-  // session. The Make Image button only enables after all three have fired —
-  // returning to the per-sweep view unmounts this component, so the flags
-  // implicitly reset on re-entry.
-  const [didSmooth, setDidSmooth] = useState(false);
-  const [didBaseline, setDidBaseline] = useState(false);
-  const [didAlign, setDidAlign] = useState(false);
 
   const generateImage = useCallback(
     async (pixValue: number) => {
@@ -187,10 +189,14 @@ export function PreImageView() {
   );
 
   useEffect(() => {
-    void generateImage(DEFAULT_PIX);
-    // Rebuild the preview when flux calibration flips, so loading a `.cal`
-    // while sitting on the Pre Image refreshes the gridded image in Jy
-    // instead of leaving the GCU preview on screen.
+    // Build the pre-image on entry (this view is only reached via the
+    // "Create Pre-Image" button, BUG-010) at the persisted pixel size. Rebuild
+    // when flux calibration flips, so loading a `.cal` while sitting on the Pre
+    // Image refreshes the gridded image in Jy instead of leaving the GCU
+    // preview on screen. `pix` is intentionally not a dep — changing it happens
+    // via the Make Image prompt, which navigates away.
+    void generateImage(pix);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [generateImage, workspace?.flux_calibrated]);
 
   const openMakeImagePrompt = useCallback(() => {
@@ -207,7 +213,7 @@ export function PreImageView() {
           return;
         }
         setPrompt(null);
-        setPix(value);
+        setPreImagePix(value);
         // Commit: build the final gridded image and switch to the Image view.
         // `makeImage` on the survey context stores meta+pixels and flips
         // `viewMode` to 'image' so MainWindow unmounts PreImageView.
@@ -234,7 +240,7 @@ export function PreImageView() {
     try {
       await rpcClient.smooth(survey.handle, 5, workspaceHandle);
       await generateImage(pix);
-      setDidSmooth(true);
+      markPreImageReduction('smooth');
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -257,7 +263,7 @@ export function PreImageView() {
         try {
           await rpcClient.baseline(survey.handle, value, workspaceHandle);
           await generateImage(pix);
-          setDidBaseline(true);
+          markPreImageReduction('baseline');
         } catch (e) {
           setError((e as Error).message);
         } finally {
@@ -282,7 +288,7 @@ export function PreImageView() {
         try {
           await rpcClient.align(survey.handle, value, workspaceHandle);
           await generateImage(pix);
-          setDidAlign(true);
+          markPreImageReduction('align');
         } catch (e) {
           setError((e as Error).message);
         } finally {
@@ -323,6 +329,24 @@ export function PreImageView() {
   // calibration state (an image always implies at least gain calibration).
   const fluxUnit = imageMeta?.unit ?? (workspace?.flux_calibrated ? 'Jy' : 'GCU');
 
+  // BUG-012 (dan): scale the pre-image color ramp to the data's actual
+  // min→max (not the default 0→max), so faint structure isn't crushed against
+  // the palette's black end.
+  const fluxRange = useMemo<{ min: number; max: number } | null>(() => {
+    if (!imagePixels) return null;
+    let min = Infinity;
+    let max = -Infinity;
+    for (const row of imagePixels.pixels) {
+      for (const v of row) {
+        if (v === null || v === undefined || !Number.isFinite(v)) continue;
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+    }
+    if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return null;
+    return { min, max };
+  }, [imagePixels]);
+
   if (!workspace) {
     return (
       <div className="survey-view empty">
@@ -347,6 +371,8 @@ export function PreImageView() {
                 title=""
                 testId="pre-image-plot"
                 displayMode={imageDisplay}
+                fluxRange={fluxRange}
+                showGrid={false}
                 onHover={setHoverPoint}
               />
             ) : (

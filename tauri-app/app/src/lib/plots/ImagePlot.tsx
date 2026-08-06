@@ -46,6 +46,9 @@ interface Props {
   // magnifier so the loupe is a clean zoomed patch — hover still fires so the
   // RA/Dec/Flux readout keeps updating.
   hideAxes?: boolean;
+  // BUG-016 (dan): draw the sky grid. The pre-image passes false so it renders
+  // clean (no gridlines); the final Image view keeps the grid on by default.
+  showGrid?: boolean;
   // FEAT-011: selects how the bounded-mode plot lays out its aspect ratio.
   // - 'sky' (default): cos(dec_center)/240 — true sky shape with cos(dec)
   //   correction at the image center (FEAT-008 v3 formula).
@@ -282,6 +285,7 @@ export function ImagePlot({
   fixedHeight,
   square = false,
   hideAxes = false,
+  showGrid = true,
   displayMode = 'sky',
 }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -415,7 +419,8 @@ export function ImagePlot({
       : {
           title: { text: 'Right Ascension' },
           // Forced light-gray grid on 10° boundaries; no dark zeroline or frame.
-          showgrid: true,
+          // BUG-016: the pre-image turns the grid off via showGrid={false}.
+          showgrid: showGrid,
           gridcolor: GRID_COLOR,
           gridwidth: 1,
           zeroline: false,
@@ -430,7 +435,7 @@ export function ImagePlot({
       ? { ...hiddenAxis, ...(hasBounds ? {} : { autorange: 'reversed' as const }) }
       : {
           title: { text: 'Declination' },
-          showgrid: true,
+          showgrid: showGrid,
           gridcolor: GRID_COLOR,
           gridwidth: 1,
           zeroline: false,
@@ -578,7 +583,7 @@ export function ImagePlot({
     // `boxOverlay` / `pinnedMarker` are also omitted: they only drive overlay
     // shapes, which are updated via the shapes-only relayout effect below so an
     // active zoom is never disturbed (BUG-025).
-  }, [image, meta, title, palette, fluxRange, showColorBar, hideAxes, onHover, onClick, theme]);
+  }, [image, meta, title, palette, fluxRange, showColorBar, hideAxes, showGrid, onHover, onClick, theme]);
 
   // Push pin / magnifier-box changes as a shapes-only relayout. Unlike
   // Plotly.react, relayout of `shapes` never re-applies the axis layout, so it
@@ -645,7 +650,14 @@ export function ImagePlot({
       <div
         data-testid={testId ?? 'image-plot'}
         ref={ref}
-        style={{ width: innerW, height: innerH }}
+        style={{
+          width: innerW,
+          height: innerH,
+          // BUG-011 (dan): hide the plot until the wrapper has been measured and
+          // the letterbox size is known, so the first frame is already correctly
+          // scaled instead of briefly flashing an unscaled/full-bleed image.
+          visibility: box ? 'visible' : 'hidden',
+        }}
       />
     </div>
   );

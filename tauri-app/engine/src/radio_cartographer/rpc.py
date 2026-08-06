@@ -76,6 +76,8 @@ from .workspace import (
     apply_gain_calibration,
     apply_workspace_reduction,
     build_workspace,
+    current_source_dec,
+    current_source_flux,
     cut_calibration_segment,
     revert_flux_calibration,
     select_calibration_declination,
@@ -1272,7 +1274,13 @@ class RpcServer:
             )
         raw = ws.source_sweeps[index]
         if ws.calibrated and ws.calibrated_source_flux is not None:
-            flux = ws.calibrated_source_flux[index]
+            # BUG-015 (dan): return the most-recent PROCESSED flux/dec (reduced
+            # by smooth/baseline/align on the Pre Image screen) when present, so
+            # "Back to Sweeps" shows the processed data rather than the pre-
+            # reduction calibrated values. `current_source_*` fall back to the
+            # calibrated flux / raw dec when no reduction has run.
+            flux = current_source_flux(ws)[index]
+            dec = current_source_dec(ws)[index]
             # After noise-injection bracket gain calibration the values are
             # raw_volts / cal_volts — dimensionless. The legacy app didn't
             # label this state; we call it "gain calibration units" until a
@@ -1280,9 +1288,10 @@ class RpcServer:
             unit = "jy" if ws.flux_calibrated else "gain"
         else:
             flux = raw.flux
+            dec = raw.dec
             unit = "volts"
         max_points = int(params.get("max_points", 4000))
-        ra, dec, flux_d = _maybe_downsample(raw.ra, raw.dec, flux, max_points)
+        ra, dec, flux_d = _maybe_downsample(raw.ra, dec, flux, max_points)
         return {
             "ra": ra.tolist(),
             "dec": dec.tolist(),
