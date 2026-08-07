@@ -247,6 +247,9 @@ function plotAspect(
   w: number,
   h: number,
   displayMode: ImageDisplayMode,
+  // BUG-019: when zoomed, the visible RA/Dec region drives the letterbox so the
+  // zoomed view keeps correct sky proportions instead of the full-image shape.
+  region?: { minRa: number; maxRa: number; minDec: number; maxDec: number } | null,
 ): number | null {
   const hasBounds = hasBoundsOf(meta);
   if (!hasBounds) {
@@ -254,9 +257,13 @@ function plotAspect(
     return w > 0 && h > 0 ? w / h : null;
   }
   if (displayMode === 'stretch') return null;
-  const raSpan = meta!.max_ra - meta!.min_ra;
-  const decSpan = meta!.max_dec - meta!.min_dec;
-  const decCenter = (meta!.min_dec + meta!.max_dec) / 2;
+  const minRa = region ? Math.min(region.minRa, region.maxRa) : meta!.min_ra;
+  const maxRa = region ? Math.max(region.minRa, region.maxRa) : meta!.max_ra;
+  const minDec = region ? Math.min(region.minDec, region.maxDec) : meta!.min_dec;
+  const maxDec = region ? Math.max(region.minDec, region.maxDec) : meta!.max_dec;
+  const raSpan = maxRa - minRa;
+  const decSpan = maxDec - minDec;
+  const decCenter = (minDec + maxDec) / 2;
   // Same R the old scaleanchor used (see FEAT-011): 'raw' = 1/240, 'pixel' =
   // per-cell-square, 'sky' = cos(dec)/240.
   const ratio =
@@ -292,6 +299,16 @@ export function ImagePlot({
   // Outer wrapper we measure to letterbox the plot to the sky aspect (BUG-025).
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [box, setBox] = useState<{ w: number; h: number } | null>(null);
+  // BUG-019/020 (dan): the currently zoomed-into RA/Dec region (data coords).
+  // When set, the container is letterboxed to THIS region's dec-corrected shape
+  // so the zoomed view keeps correct sky proportions; cleared on zoom-out so the
+  // letterbox reverts to the full image.
+  const [zoomRange, setZoomRange] = useState<{
+    minRa: number;
+    maxRa: number;
+    minDec: number;
+    maxDec: number;
+  } | null>(null);
   const { theme } = useTheme();
   // Keep the most recent hovered cell so the container's onContextMenu handler
   // can report it without needing Plotly's native (suppressed) right-click.
@@ -536,21 +553,47 @@ export function ImagePlot({
     // x-axis. Guarded by a flag so we don't loop on the relayout we
     // ourselves trigger.
     let suppressRelayout = false;
+    const readRanges = ():
+      | { minRa: number; maxRa: number; minDec: number; maxDec: number }
+      | null => {
+      const fl = (node as unknown as {
+        _fullLayout?: { xaxis?: { range?: number[] }; yaxis?: { range?: number[] } };
+      })._fullLayout;
+      const xr = fl?.xaxis?.range;
+      const yr = fl?.yaxis?.range;
+      if (!xr || !yr || xr.length < 2 || yr.length < 2) return null;
+      return {
+        minRa: Math.min(xr[0], xr[1]),
+        maxRa: Math.max(xr[0], xr[1]),
+        minDec: Math.min(yr[0], yr[1]),
+        maxDec: Math.max(yr[0], yr[1]),
+      };
+    };
     const onRelayoutWired = (data: unknown) => {
       if (!hasBounds || suppressRelayout) return;
       const d = data as Record<string, unknown>;
-      // Only re-apply on a genuine autorange reset (double-click). A box-zoom
-      // sets explicit `xaxis.range[*]` keys; if any are present this is a zoom,
-      // not a reset, and re-applying 'reversed' here would wipe it (BUG-025).
-      const isBoxZoom = Object.keys(d).some((k) => k.startsWith('xaxis.range'));
-      if (d['xaxis.autorange'] === true && !isBoxZoom) {
+      // A box-zoom / pan / ctrl-zoom sets explicit `x/yaxis.range[*]` keys; a
+      // double-click reset sets `xaxis.autorange: true`.
+      const isRangeChange = Object.keys(d).some(
+        (k) => k.startsWith('xaxis.range') || k.startsWith('yaxis.range'),
+      );
+      if (d['xaxis.autorange'] === true && !isRangeChange) {
+        // BUG-020: zoom-out reverts the letterbox to the full-image aspect and
+        // re-applies the reversed RA orientation (BUG-008).
+        setZoomRange(null);
         suppressRelayout = true;
         // Plotly's TS types say `autorange` is boolean, but the runtime
-        // accepts `'reversed'` (see the `xaxis` layout above, which uses
-        // the same value with an `as const` cast). Mirror that here.
+        // accepts `'reversed'` (see the `xaxis` layout above).
         Plotly.relayout(node, { 'xaxis.autorange': 'reversed' } as unknown as Partial<Plotly.Layout>).finally(() => {
           suppressRelayout = false;
         });
+        return;
+      }
+      if (isRangeChange) {
+        // BUG-019: letterbox the container to the visible region so the zoomed
+        // view keeps correct (dec-corrected) sky proportions.
+        const region = readRanges();
+        if (region) setZoomRange(region);
       }
     };
     plotEl.on('plotly_relayout', onRelayoutWired);
@@ -569,12 +612,57 @@ export function ImagePlot({
     };
     node.addEventListener('contextmenu', onContextCapture, true);
 
+    // BUG-022 (dan): the right mouse button must never start a Plotly drag
+    // (pan/zoom). Swallow right-button mousedown in the capture phase so Plotly's
+    // drag layer never sees it; the contextmenu handler above still opens the
+    // magnifier.
+    const onMouseDownCapture = (e: MouseEvent) => {
+      if (e.button === 2) e.stopPropagation();
+    };
+    node.addEventListener('mousedown', onMouseDownCapture, true);
+
+    // BUG-021 (dan): Ctrl/Cmd + '+' / '-' zoom the main image about its center.
+    // Only the main plot (axes visible) responds — not the magnifier loupe.
+    const onKeyZoom = (e: KeyboardEvent) => {
+      if (hideAxes || !hasBounds) return;
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      const zoomIn = e.key === '=' || e.key === '+' || e.key === 'Add';
+      const zoomOut = e.key === '-' || e.key === '_' || e.key === 'Subtract';
+      if (!zoomIn && !zoomOut) return;
+      e.preventDefault();
+      const region = readRanges();
+      if (!region) return;
+      const factor = zoomIn ? 0.8 : 1.25;
+      const fl = (node as unknown as {
+        _fullLayout?: { xaxis?: { range?: number[] }; yaxis?: { range?: number[] } };
+      })._fullLayout;
+      const xr = fl?.xaxis?.range;
+      const yr = fl?.yaxis?.range;
+      if (!xr || !yr) return;
+      // Scale each axis about its center, preserving axis direction (RA is
+      // reversed, so xr may be descending).
+      const scale = (r: number[]): [number, number] => {
+        const c = (r[0] + r[1]) / 2;
+        const half = ((r[0] - r[1]) / 2) * factor;
+        return [c + half, c - half];
+      };
+      void Plotly.relayout(node, {
+        'xaxis.range': scale(xr),
+        'yaxis.range': scale(yr),
+      } as unknown as Partial<Plotly.Layout>);
+    };
+    window.addEventListener('keydown', onKeyZoom);
+
     return () => {
       plotEl.removeAllListeners?.('plotly_hover');
       plotEl.removeAllListeners?.('plotly_unhover');
       plotEl.removeAllListeners?.('plotly_click');
       plotEl.removeAllListeners?.('plotly_relayout');
       node.removeEventListener('contextmenu', onContextCapture, true);
+      node.removeEventListener('mousedown', onMouseDownCapture, true);
+      window.removeEventListener('keydown', onKeyZoom);
       Plotly.purge(node);
     };
     // `displayMode` intentionally omitted from deps: it no longer changes the
@@ -597,6 +685,13 @@ export function ImagePlot({
     } as unknown as Partial<Plotly.Layout>);
   }, [pinnedMarker, boxOverlay, meta]);
 
+  // BUG-019/020: a genuinely new image (its bounds/size changed) resets Plotly's
+  // zoom via `uirevision`, so clear our tracked zoom region too — otherwise the
+  // letterbox would keep the previous image's zoomed aspect.
+  useEffect(() => {
+    setZoomRange(null);
+  }, [meta?.min_ra, meta?.max_ra, meta?.min_dec, meta?.max_dec, image.width, image.height]);
+
   // Measure the wrapper so we can letterbox the plot to the sky aspect (BUG-025).
   useEffect(() => {
     const wrap = wrapRef.current;
@@ -612,7 +707,9 @@ export function ImagePlot({
   // Fit the largest box with the sky aspect inside the measured wrapper. When
   // there's no aspect to preserve ('stretch' / pixel span unusable), fill it.
   // `square` forces 1:1 so the magnifier is a square regardless of sky shape.
-  const aspect = square ? 1 : plotAspect(meta, image.width, image.height, displayMode);
+  const aspect = square
+    ? 1
+    : plotAspect(meta, image.width, image.height, displayMode, zoomRange);
   let innerW: number | string = '100%';
   let innerH: number | string = '100%';
   if (aspect && box && box.w > 0 && box.h > 0) {

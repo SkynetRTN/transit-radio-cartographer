@@ -44,10 +44,13 @@ export function ImageSection() {
       <h4>1a. Zoom and pan</h4>
       <p>
         <strong>Drag a box</strong> anywhere on the image to zoom the axes to
-        that region — any shape works, the view fits exactly what you draw.{' '}
-        <strong>Double-click</strong> to reset to the full map. The default view
-        preserves the true sky shape; because zooming is free, a zoomed-in
-        region may look stretched, which is expected.
+        that region — any shape works, the view fits exactly what you draw and
+        keeps the correct (dec-corrected) sky proportions of the zoomed region.
+        You can also zoom with <strong>Ctrl</strong> <code>+</code> /{' '}
+        <strong>Ctrl</strong> <code>-</code> (⌘ on macOS).{' '}
+        <strong>Double-click</strong> to reset to the full map — which restores
+        the full-image shape. The <strong>right mouse button</strong> never
+        zooms; it only opens the magnifier.
       </p>
 
       <h4>1b. Pin a pixel</h4>
