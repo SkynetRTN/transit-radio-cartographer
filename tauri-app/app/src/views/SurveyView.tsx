@@ -695,9 +695,12 @@ export function SurveyView() {
                     : 'Accept Sweep'}
               </button>
               {/* BUG-008 (dan): the gain calibration stays available so you can
-                  go back and re-calibrate at any time, not just once. */}
+                  go back and re-calibrate at any time, not just once. Blue
+                  (primary) until the first calibration — matching the scan
+                  screen — then gray like the other buttons. */}
               <button
                 onClick={() => setViewMode('calibrate-survey')}
+                className={workspace.calibrated ? undefined : 'primary'}
                 title="Run (or re-run) gain calibration using the noise-injection brackets"
               >
                 {workspace.calibrated ? 'Re-Calibrate Survey' : 'Calibrate Survey'}
