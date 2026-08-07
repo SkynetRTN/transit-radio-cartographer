@@ -23,10 +23,13 @@ def test_makeimage_uses_fixed_angular_pixel(intermediates_dir) -> None:
     assert abs(grid.wcs.cdelt2) == pytest.approx(cell_dec, rel=0.05)
     assert abs(grid.wcs.cdelt1) == pytest.approx(cell_ra, rel=0.05)
 
-    assert np.all(np.isfinite(grid.pixels))
+    # BUG-016 (dan): cells outside the swept region are NaN ("no coverage"),
+    # not 0 — but the covered interior must still be finite and carry flux.
+    finite = np.isfinite(grid.pixels)
+    assert finite.any() and not finite.all()
     # Andromeda is a real source — the grid must carry non-trivial flux.
-    assert float(np.max(grid.pixels)) > 0.0
-    assert int(np.count_nonzero(grid.pixels)) > 100
+    assert float(np.nanmax(grid.pixels)) > 0.0
+    assert int(np.count_nonzero(grid.pixels[finite])) > 100
 
 
 def test_makeimage_pixel_size_controls_shape(intermediates_dir) -> None:
@@ -63,7 +66,8 @@ def test_makeimage_pixel_scale_inverts_correctly(intermediates_dir) -> None:
     px = w.crpix1 + (ras[peak] - w.crval1) / w.cdelt1
     py = w.crpix2 + (decs[peak] - w.crval2) / w.cdelt2
 
-    brow, bcol = np.unravel_index(int(np.argmax(grid.pixels)), grid.pixels.shape)
+    # nanargmax: no-coverage cells are NaN (BUG-016) and would poison argmax.
+    brow, bcol = np.unravel_index(int(np.nanargmax(grid.pixels)), grid.pixels.shape)
     distance_px = float(np.hypot(bcol - (px - 1), brow - (py - 1)))
     assert distance_px <= 1.0
 

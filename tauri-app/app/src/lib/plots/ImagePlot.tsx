@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import Plotly from 'plotly.js-dist-min';
 import type { ImageMeta, ImagePixels, PaletteStop } from '../../ipc/client';
 import type { ImageDisplayMode } from '../../state/survey-context';
@@ -693,10 +693,21 @@ export function ImagePlot({
   }, [meta?.min_ra, meta?.max_ra, meta?.min_dec, meta?.max_dec, image.width, image.height]);
 
   // Measure the wrapper so we can letterbox the plot to the sky aspect (BUG-025).
-  useEffect(() => {
+  // BUG-011 (dan): a layout effect, not a passive one — the measurement lands
+  // before the browser paints and before the (passive) Plotly render effect
+  // runs, so the very first `Plotly.react` already draws into the final
+  // letterboxed div. With the old post-paint measure, the plot was drawn at
+  // 100% size and only re-fit ~100ms later (`Plots.resize` debounces
+  // internally), flashing an unscaled frame when the pre-image opened.
+  useLayoutEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
-    const measure = () => setBox({ w: wrap.clientWidth, h: wrap.clientHeight });
+    const measure = () =>
+      setBox((prev) => {
+        const w = wrap.clientWidth;
+        const h = wrap.clientHeight;
+        return prev && prev.w === w && prev.h === h ? prev : { w, h };
+      });
     measure();
     if (typeof ResizeObserver === 'undefined') return; // jsdom / older envs
     const ro = new ResizeObserver(measure);

@@ -329,9 +329,10 @@ export function PreImageView() {
   // calibration state (an image always implies at least gain calibration).
   const fluxUnit = imageMeta?.unit ?? (workspace?.flux_calibrated ? 'Jy' : 'GCU');
 
-  // BUG-012 (dan): scale the pre-image color ramp to the data's actual
-  // min→max (not the default 0→max), so faint structure isn't crushed against
-  // the palette's black end.
+  // BUG-012 (dan): before the baseline runs, scale the pre-image color ramp to
+  // the data's actual min→max (NaN cells excluded), so faint structure isn't
+  // crushed against the palette's black end. Once the survey has been
+  // baselined the fluxes are zero-referenced, so the ramp anchors at 0→max.
   const fluxRange = useMemo<{ min: number; max: number } | null>(() => {
     if (!imagePixels) return null;
     let min = Infinity;
@@ -344,8 +345,8 @@ export function PreImageView() {
       }
     }
     if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return null;
-    return { min, max };
-  }, [imagePixels]);
+    return { min: didBaseline ? 0 : min, max };
+  }, [imagePixels, didBaseline]);
 
   if (!workspace) {
     return (

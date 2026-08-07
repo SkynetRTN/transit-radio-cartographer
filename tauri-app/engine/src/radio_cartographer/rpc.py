@@ -1294,19 +1294,23 @@ class RpcServer:
                 f"source sweep index out of range: {index} (0..{ws.source_count - 1})",
             )
         raw = ws.source_sweeps[index]
-        if ws.calibrated and ws.calibrated_source_flux is not None:
-            # BUG-015 (dan): return the most-recent PROCESSED flux/dec (reduced
-            # by smooth/baseline/align on the Pre Image screen) when present, so
-            # "Back to Sweeps" shows the processed data rather than the pre-
-            # reduction calibrated values. `current_source_*` fall back to the
-            # calibrated flux / raw dec when no reduction has run.
+        # BUG-015 (dan): return the most-recent PROCESSED flux/dec (reduced by
+        # smooth/baseline/align on the Pre Image screen) whenever a reduction
+        # has run — even on a workspace that was never gain-calibrated — so
+        # "Back to Sweeps" always shows the processed data. `current_source_*`
+        # fall back to the calibrated flux / raw dec when no reduction has run.
+        has_reduction = (
+            ws.reduced_source_flux is not None or ws.reduced_source_dec is not None
+        )
+        if has_reduction or (ws.calibrated and ws.calibrated_source_flux is not None):
             flux = current_source_flux(ws)[index]
             dec = current_source_dec(ws)[index]
             # After noise-injection bracket gain calibration the values are
             # raw_volts / cal_volts — dimensionless. The legacy app didn't
             # label this state; we call it "gain calibration units" until a
             # `.cal` file (flux calibration) converts the survey to janskies.
-            unit = "jy" if ws.flux_calibrated else "gain"
+            # Reductions on a never-calibrated workspace are still in volts.
+            unit = "jy" if ws.flux_calibrated else ("gain" if ws.calibrated else "volts")
         else:
             flux = raw.flux
             dec = raw.dec

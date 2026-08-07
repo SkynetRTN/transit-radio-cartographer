@@ -172,14 +172,19 @@ def make_image(
        between the two sweeps' RA columns with linearly-interpolated flux.
     3. Average where multiple strip-fills cover the same cell.
 
-    Cells outside any swept region remain 0 and render at the palette's
-    anchor=0 stop (black). The grid is sized so each cell spans a fixed
-    `pixel_deg` on-sky (default 1/20 of the beam) via `grid_dims`; explicit
-    width/height overrides exist for tests and the FITS exporter.
+    Cells outside any swept region are NaN ("no coverage") so they render
+    as the background rather than as zero flux — BUG-016 (dan): the ragged
+    edges of the sweep bars used to sit at 0.0 and painted black at the
+    palette's anchor=0 stop. Downstream consumers already treat NaN as
+    no-data (JSON null → transparent in the plot, white in raster export,
+    Clr=0 sentinel in .img, blank in FITS). The grid is sized so each cell
+    spans a fixed `pixel_deg` on-sky (default 1/20 of the beam) via
+    `grid_dims`; explicit width/height overrides exist for tests and the
+    FITS exporter.
     """
     sweeps = [s for s in survey.sweeps if s.ra.size > 0]
     if not sweeps:
-        pixels = np.zeros((height or 1, width or 1), dtype=np.float64)
+        pixels = np.full((height or 1, width or 1), np.nan, dtype=np.float64)
         width = pixels.shape[1]
         height = pixels.shape[0]
         wcs = WCSMetadata(
@@ -309,6 +314,10 @@ def make_image(
                 counts[row, cols] += 1
 
     np.divide(pixels, counts, out=pixels, where=counts > 0)
+    # BUG-016 (dan): cells no strip-fill ever touched are "no coverage", not
+    # zero flux — mark them NaN so the bar edges render as background instead
+    # of black.
+    pixels[counts == 0] = np.nan
 
     cdelt1 = -ra_range / max(width - 1, 1)
     cdelt2 = dec_range / max(height - 1, 1)
