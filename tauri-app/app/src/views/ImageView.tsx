@@ -367,6 +367,12 @@ export function ImageView() {
     setPinnedPoint(p);
   }, []);
 
+  // BUG-020 (dan): zooming back out (double-click reset) never pins — and it
+  // clears any pin left over from before the zoom.
+  const handleZoomReset = useCallback(() => {
+    setPinnedPoint(null);
+  }, []);
+
   const magnifier = useMemo(() => {
     if (!magnifierCenter || !imagePixels) return null;
     return buildMagnifier(imagePixels, image, magnifierCenter, magnifierHalfSize);
@@ -491,6 +497,7 @@ export function ImageView() {
                 onHover={setHoverPoint}
                 onClick={handleClick}
                 onContextMenu={handleContextMenu}
+                onZoomReset={handleZoomReset}
                 boxOverlay={magnifier?.overlay ?? null}
                 pinnedMarker={pinnedMarker}
                 displayMode={imageDisplay}

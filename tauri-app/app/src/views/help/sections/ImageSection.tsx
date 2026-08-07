@@ -61,7 +61,8 @@ export function ImageSection() {
         mouse or zoom elsewhere. Click <code>Unpin</code> — directly under the
         readout — to release it. If you zoom to a region that doesn't contain
         the pinned pixel, the readout still shows its values even though the ring
-        is off-screen.
+        is off-screen. <strong>Double-clicking</strong> to zoom back out never
+        pins a point — and it releases any pin you had.
       </p>
 
       <h4>1c. Magnifier</h4>

@@ -32,6 +32,10 @@ interface Props {
   onHover?: (point: ImagePoint | null) => void;
   onClick?: (point: ImagePoint) => void;
   onContextMenu?: (point: ImagePoint | null) => void;
+  // BUG-020/023 (dan): fired when the view zooms back out (double-click
+  // reset). The Image view clears its pinned point here so zooming out never
+  // leaves — or creates — a pin.
+  onZoomReset?: () => void;
   boxOverlay?: BoxOverlay | null;
   // BUG-020: draws a persistent target marker at the pinned (clicked) cell so
   // the user can see where the flux readout was sampled after moving the cursor.
@@ -183,9 +187,13 @@ function hasBoundsOf(meta: ImageMeta | null | undefined): boolean {
 
 // Overlay shapes drawn on top of the heatmap: the magnifier box and the pinned-
 // cell target ring. Kept in a helper so pin / magnifier changes can be pushed
-// with a shapes-only `Plotly.relayout` — which never touches the axes — instead
-// of a full `Plotly.react`, whose layout re-applies `autorange` and can snap an
-// active zoom back out (BUG-025). The pinned ring is a fixed-pixel-size circle
+// with a `shapes` `Plotly.relayout` instead of a full `Plotly.react`, whose
+// layout re-applies `autorange` and can snap an active zoom back out (BUG-025).
+// NOTE (BUG-023): a full-array `shapes:` relayout is NOT axes-neutral — Plotly
+// escalates it internally to a full layout replot. The explicit ranges in
+// gd.layout keep an active zoom intact, but Plotly's own double-click reset
+// can die afterwards; the native-dblclick reset in the main effect covers
+// that. The pinned ring is a fixed-pixel-size circle
 // anchored at the data point (`xsizemode/ysizemode: 'pixel'`), so it stays the
 // same size at any zoom, moves with pan/zoom, clips when out of view, and — as
 // a shape, not a trace — never expands the axis autorange. Black halo under a
@@ -286,6 +294,7 @@ export function ImagePlot({
   onHover,
   onClick,
   onContextMenu,
+  onZoomReset,
   boxOverlay,
   pinnedMarker,
   showColorBar = true,
@@ -318,9 +327,11 @@ export function ImagePlot({
   const pinnedMarkerRef = useRef(pinnedMarker);
   const boxOverlayRef = useRef(boxOverlay);
   const onContextMenuRef = useRef(onContextMenu);
+  const onZoomResetRef = useRef(onZoomReset);
   pinnedMarkerRef.current = pinnedMarker;
   boxOverlayRef.current = boxOverlay;
   onContextMenuRef.current = onContextMenu;
+  onZoomResetRef.current = onZoomReset;
 
   useEffect(() => {
     const node = ref.current;
@@ -528,22 +539,51 @@ export function ImagePlot({
       // off a cell should still target the most recent cell.
       if (onHover) onHover(null);
     };
+    // BUG-020 (dan): Plotly fires `plotly_click` for EACH constituent click of
+    // a double-click (order: click #1 → plotly_doubleclick → relayout → click
+    // #2), so double-click-to-zoom-out used to pin the cell under the cursor.
+    // Defer the pin by Plotly's own double-click window; a doubleclick cancels
+    // the pending pin and swallows the trailing click #2.
+    const dblDelay =
+      ((node as unknown as { _context?: { doubleClickDelay?: number } })._context
+        ?.doubleClickDelay as number | undefined) ?? 300;
+    let pendingClick: number | null = null;
+    let suppressNextClick = false;
     const onClickWired = (data: unknown) => {
       const d = data as { points?: Array<{ x: number; y: number; z: number; pointIndex?: [number, number] }> };
       if (!d.points || d.points.length === 0 || !onClick) return;
+      if (suppressNextClick) {
+        // Click #2 of a double-click (fires after plotly_doubleclick).
+        suppressNextClick = false;
+        return;
+      }
       const p = d.points.find((pt) => typeof pt.z === 'number') ?? d.points[0];
       const idx = p.pointIndex;
-      onClick({
+      const point: ImagePoint = {
         ra: p.x,
         dec: p.y,
         flux: p.z,
         col: idx ? idx[1] : 0,
         row: idx ? idx[0] : 0,
-      });
+      };
+      if (pendingClick !== null) clearTimeout(pendingClick);
+      pendingClick = window.setTimeout(() => {
+        pendingClick = null;
+        onClick(point);
+      }, dblDelay);
+    };
+    const onDoubleClickWired = () => {
+      if (pendingClick !== null) {
+        clearTimeout(pendingClick);
+        pendingClick = null;
+      }
+      suppressNextClick = true;
+      onZoomResetRef.current?.();
     };
     plotEl.on('plotly_hover', onHoverWired);
     plotEl.on('plotly_unhover', onUnhoverWired);
     plotEl.on('plotly_click', onClickWired);
+    plotEl.on('plotly_doubleclick', onDoubleClickWired);
 
     // BUG-008: when the user double-clicks (or any other action triggers
     // a zoom-out / autorange reset), Plotly resets `xaxis.autorange` to
@@ -655,14 +695,40 @@ export function ImagePlot({
     };
     window.addEventListener('keydown', onKeyZoom);
 
+    // BUG-023 (dan): after the magnifier closes, the boxOverlay change fires a
+    // `shapes` relayout — which Plotly escalates to a FULL layout replot — and
+    // Plotly's internal double-click reset machinery can die afterwards,
+    // leaving the user stuck zoomed in. Do our own deterministic reset off the
+    // native dblclick (browser-counted, independent of Plotly's click
+    // tracking) so zoom-out always works. Idempotent when Plotly's own reset
+    // also ran: the autorange recompute lands on the same full ranges.
+    const onNativeDblClick = (e: MouseEvent) => {
+      const t = e.target as Element | null;
+      if (!t || !t.closest('.draglayer')) return; // plot area only, like Plotly
+      if (pendingClick !== null) {
+        clearTimeout(pendingClick);
+        pendingClick = null;
+      }
+      setZoomRange(null); // revert the BUG-019 letterbox to the full image
+      onZoomResetRef.current?.(); // clear the pin (main plot only, BUG-020)
+      void Plotly.relayout(node, {
+        'xaxis.autorange': hasBounds ? 'reversed' : true,
+        'yaxis.autorange': hasBounds ? true : 'reversed',
+      } as unknown as Partial<Plotly.Layout>);
+    };
+    node.addEventListener('dblclick', onNativeDblClick);
+
     return () => {
       plotEl.removeAllListeners?.('plotly_hover');
       plotEl.removeAllListeners?.('plotly_unhover');
       plotEl.removeAllListeners?.('plotly_click');
+      plotEl.removeAllListeners?.('plotly_doubleclick');
       plotEl.removeAllListeners?.('plotly_relayout');
       node.removeEventListener('contextmenu', onContextCapture, true);
       node.removeEventListener('mousedown', onMouseDownCapture, true);
+      node.removeEventListener('dblclick', onNativeDblClick);
       window.removeEventListener('keydown', onKeyZoom);
+      if (pendingClick !== null) clearTimeout(pendingClick);
       Plotly.purge(node);
     };
     // `displayMode` intentionally omitted from deps: it no longer changes the
@@ -673,10 +739,12 @@ export function ImagePlot({
     // active zoom is never disturbed (BUG-025).
   }, [image, meta, title, palette, fluxRange, showColorBar, hideAxes, showGrid, onHover, onClick, theme]);
 
-  // Push pin / magnifier-box changes as a shapes-only relayout. Unlike
-  // Plotly.react, relayout of `shapes` never re-applies the axis layout, so it
-  // can't snap an active zoom back out (BUG-025). Runs after the main effect on
-  // mount (the plot exists by then) and on every later pin / box change.
+  // Push pin / magnifier-box changes as a `shapes` relayout. Unlike
+  // Plotly.react, it doesn't re-apply our layout's `autorange`, so it can't
+  // snap an active zoom back out (BUG-025) — but note it is still a full
+  // layout replot internally (see buildShapes note / BUG-023). Runs after the
+  // main effect on mount (the plot exists by then) and on every later pin /
+  // box change.
   useEffect(() => {
     const node = ref.current;
     if (!node) return;
