@@ -261,7 +261,10 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
         setError('Engine handle expired. Please re-open your files.');
         return;
       }
-      handleRpcError(e);
+      // BUG-005 (dan): this used to call itself here — infinite recursion, so
+      // every non-stale RPC error surfaced as "Maximum call stack size
+      // exceeded" instead of its real message. Surface the message instead.
+      setError(e instanceof Error ? e.message : String(e));
     },
     [resetForEngineRestart],
   );
