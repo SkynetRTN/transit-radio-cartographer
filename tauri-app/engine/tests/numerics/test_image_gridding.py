@@ -23,13 +23,10 @@ def test_makeimage_uses_fixed_angular_pixel(intermediates_dir) -> None:
     assert abs(grid.wcs.cdelt2) == pytest.approx(cell_dec, rel=0.05)
     assert abs(grid.wcs.cdelt1) == pytest.approx(cell_ra, rel=0.05)
 
-    # BUG-016 (dan): cells outside the swept region are NaN ("no coverage"),
-    # not 0 — but the covered interior must still be finite and carry flux.
-    finite = np.isfinite(grid.pixels)
-    assert finite.any() and not finite.all()
+    assert np.all(np.isfinite(grid.pixels))
     # Andromeda is a real source — the grid must carry non-trivial flux.
-    assert float(np.nanmax(grid.pixels)) > 0.0
-    assert int(np.count_nonzero(grid.pixels[finite])) > 100
+    assert float(np.max(grid.pixels)) > 0.0
+    assert int(np.count_nonzero(grid.pixels)) > 100
 
 
 def test_makeimage_pixel_size_controls_shape(intermediates_dir) -> None:
@@ -66,8 +63,7 @@ def test_makeimage_pixel_scale_inverts_correctly(intermediates_dir) -> None:
     px = w.crpix1 + (ras[peak] - w.crval1) / w.cdelt1
     py = w.crpix2 + (decs[peak] - w.crval2) / w.cdelt2
 
-    # nanargmax: no-coverage cells are NaN (BUG-016) and would poison argmax.
-    brow, bcol = np.unravel_index(int(np.nanargmax(grid.pixels)), grid.pixels.shape)
+    brow, bcol = np.unravel_index(int(np.argmax(grid.pixels)), grid.pixels.shape)
     distance_px = float(np.hypot(bcol - (px - 1), brow - (py - 1)))
     assert distance_px <= 1.0
 
@@ -167,12 +163,11 @@ def test_makeimage_unwraps_real_cassiopeia_survey(inputs_dir) -> None:
 
 
 def test_makeimage_fills_between_adjacent_sweeps(intermediates_dir) -> None:
-    # vb/survform.frm:1651-1799 — the legacy Pre-Image walks the region
+    # vb/survform.frm:1651-1799 — the legacy Make Image walks the region
     # *between* adjacent sweeps and paints each cell with interpolated flux.
     # A bare-bin grid leaves most cells at 0; the strip-fill must produce a
-    # substantially denser coverage, otherwise the pre-image renders as a
-    # mostly-black sweep map rather than the filled mosaic in
-    # docs/legacy_ui_reference/screenshots/preimagecygnus.png.
+    # substantially denser coverage, otherwise the image renders as a
+    # mostly-black sweep map rather than the filled mosaic.
     survey = read_srv(intermediates_dir / "and0a.srv")
     grid = make_image(survey)
     nonzero = int(np.count_nonzero(grid.pixels))
@@ -181,5 +176,105 @@ def test_makeimage_fills_between_adjacent_sweeps(intermediates_dir) -> None:
     # least ~25% after strip-fill, far above what binning alone would yield.
     assert nonzero / total > 0.25, (
         f"strip-fill only covered {nonzero}/{total} cells "
-        f"(expected >25% — legacy pre-image fills most of the swept region)"
+        f"(expected >25% — legacy Make Image fills most of the swept region)"
     )
+
+
+def test_makeimage_bars_mode_skips_intersweep_interpolation() -> None:
+    # vb/survform.frm:905-979 — the legacy Pre-Image does NOT interpolate
+    # between sweeps: each sample paints a constant-flux horizontal bar
+    # spanning the RA strip between the midpoints with the adjacent sweeps.
+    # Two flat sweeps at flux 1 and 3 must therefore produce a grid of only
+    # {1, 3} (plus the single shared boundary column, where the accumulator
+    # averages) — never a gradient of intermediate values.
+    #
+    # Samples are deliberately SPARSER than the grid rows (25 samples over
+    # 4° ≈ 67 rows at 0.06°/row): each sample must own the whole band of
+    # rows out to the midpoints with its neighbours, the way the legacy's
+    # overlapping fixed-height bars did — not just its own row, which would
+    # leave zero-flux gaps between samples.
+    n_samples = 25
+    dec = np.linspace(30.0, 34.0, n_samples)
+    s1 = Sweep(
+        ra=np.full(n_samples, 10000.0),
+        dec=dec,
+        flux=np.full(n_samples, 1.0),
+    )
+    s2 = Sweep(
+        ra=np.full(n_samples, 12000.0),
+        dec=dec,
+        flux=np.full(n_samples, 3.0),
+    )
+    survey = Survey(
+        label1="test",
+        label2="bars",
+        sweep_count=2,
+        swp=2,
+        sweep0=s1,
+        sweeps=(s1, s2),
+    )
+
+    bars = make_image(survey, fill="bars")
+    interior = (bars.pixels > 1.0 + 1e-9) & (bars.pixels < 3.0 - 1e-9)
+    blend_cols = np.unique(np.nonzero(interior)[1])
+    assert blend_cols.size <= 1, (
+        f"bars mode painted intermediate flux in {blend_cols.size} columns — "
+        f"pre-image must not interpolate between sweeps"
+    )
+    # The bars tile the whole grid: every row is covered edge to edge.
+    assert np.all(np.count_nonzero(bars.pixels, axis=1) == bars.pixels.shape[1])
+
+    # Sanity: the default interpolate mode DOES paint a gradient between the
+    # same two sweeps — many columns carry intermediate flux.
+    interp = make_image(survey)
+    interior_i = (interp.pixels > 1.0 + 1e-9) & (interp.pixels < 3.0 - 1e-9)
+    assert np.unique(np.nonzero(interior_i)[1]).size > 10
+
+
+def test_makeimage_bars_marks_uncovered_cells_as_nan() -> None:
+    # After Align Sweeps shifts sweeps in dec, parts of the grid rectangle
+    # carry no samples. In bars mode those cells must be NaN — "no data",
+    # serialized as null and rendered as blank sky in the pre-image viewer —
+    # not 0, which is a legitimate flux after baseline subtraction and
+    # renders at the palette's black anchor. Two sweeps with offset dec
+    # ranges leave the opposing corners uncovered.
+    n_samples = 50
+    s1 = Sweep(
+        ra=np.full(n_samples, 10000.0),
+        dec=np.linspace(30.0, 33.0, n_samples),
+        flux=np.full(n_samples, 1.0),
+    )
+    s2 = Sweep(
+        ra=np.full(n_samples, 12000.0),
+        dec=np.linspace(31.0, 34.0, n_samples),
+        flux=np.full(n_samples, 3.0),
+    )
+    survey = Survey(
+        label1="test",
+        label2="aligned",
+        sweep_count=2,
+        swp=2,
+        sweep0=s1,
+        sweeps=(s1, s2),
+    )
+
+    bars = make_image(survey, fill="bars")
+    nan_mask = np.isnan(bars.pixels)
+    assert nan_mask.any(), "offset sweeps must leave uncovered (NaN) corners"
+    # Covered cells still hold real flux; the swept interior is intact.
+    assert np.isfinite(bars.pixels[~nan_mask]).all()
+    # The middle dec band (31°–33°) is covered by both sweeps — no holes.
+    height = bars.pixels.shape[0]
+    mid = bars.pixels[height // 2]
+    assert np.isfinite(mid).all()
+
+    # The committed image (interpolate mode) is unchanged: background stays 0
+    # so save/append/palette behavior keeps its existing contract.
+    interp = make_image(survey)
+    assert not np.isnan(interp.pixels).any()
+
+
+def test_makeimage_rejects_unknown_fill() -> None:
+    survey = _make_synthetic_survey([[10000.0, 10001.0]], [[30.0, 31.0]])
+    with pytest.raises(ValueError, match="fill"):
+        make_image(survey, fill="nearest")

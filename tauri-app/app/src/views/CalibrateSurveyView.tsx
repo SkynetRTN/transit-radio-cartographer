@@ -15,7 +15,7 @@ function formatRa(volts: number): string {
 }
 
 function formatDec(deg: number): string {
-  const totalArcSec = deg * 60;
+  const totalArcSec = deg * 3600;
   const sign = totalArcSec < 0 ? '-' : '';
   const abs = Math.abs(totalArcSec);
   const d = Math.floor(abs / 3600);
@@ -106,7 +106,8 @@ function splitKeptCut(points: ScatterPoint[], color: string) {
 }
 
 export function CalibrateSurveyView() {
-  const { workspace, workspaceHandle, setViewMode, refreshWorkspace } = useSurvey();
+  const { workspace, workspaceHandle, setViewMode, refreshWorkspace, resetReductions } =
+    useSurvey();
   const { theme } = useTheme();
   const dc = dataColors(theme);
   const [view, setView] = useState<CalibrationView | null>(null);
@@ -280,6 +281,9 @@ export function CalibrateSurveyView() {
     }
     try {
       await rpcClient.applyGainCalibration(workspaceHandle);
+      // The engine drops any prior pre-image reductions when gain calibration
+      // is applied — the Make Image gating flags must reset to match.
+      resetReductions();
       await refreshWorkspace();
       setViewMode('survey');
     } catch (e) {
@@ -287,24 +291,32 @@ export function CalibrateSurveyView() {
       // instead of the inline snippet that testers missed.
       setWarning((e as Error).message);
     }
-  }, [workspaceHandle, view, refreshWorkspace, setViewMode]);
+  }, [workspaceHandle, view, refreshWorkspace, setViewMode, resetReductions]);
 
-  const toggleInitial = useCallback(
-    async (enabled: boolean) => {
+  const toggleBracket = useCallback(
+    async (bracket: 'initial' | 'terminal', enabled: boolean) => {
       if (workspaceHandle === null) return;
-      await rpcClient.setBracketEnabled(workspaceHandle, 'initial', enabled);
-      await Promise.all([loadView(), refreshWorkspace()]);
+      // Invoked as `void toggle...` from the checkbox onChange — without the
+      // catch, an RPC failure is an unhandled rejection and the checkbox
+      // silently snaps back with no explanation (bug #41).
+      try {
+        await rpcClient.setBracketEnabled(workspaceHandle, bracket, enabled);
+        await Promise.all([loadView(), refreshWorkspace()]);
+      } catch (e) {
+        setError((e as Error).message);
+      }
     },
     [workspaceHandle, loadView, refreshWorkspace],
   );
 
+  const toggleInitial = useCallback(
+    (enabled: boolean) => toggleBracket('initial', enabled),
+    [toggleBracket],
+  );
+
   const toggleTerminal = useCallback(
-    async (enabled: boolean) => {
-      if (workspaceHandle === null) return;
-      await rpcClient.setBracketEnabled(workspaceHandle, 'terminal', enabled);
-      await Promise.all([loadView(), refreshWorkspace()]);
-    },
-    [workspaceHandle, loadView, refreshWorkspace],
+    (enabled: boolean) => toggleBracket('terminal', enabled),
+    [toggleBracket],
   );
 
   if (!workspace || workspaceHandle === null) {

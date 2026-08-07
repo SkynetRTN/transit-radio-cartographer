@@ -55,7 +55,16 @@ export function FluxCalibrationView() {
       return;
     }
     if (!path) return;
-    const peakInfo = await rpcClient.fluxCalReadScnPeak(path);
+    let peakInfo;
+    try {
+      peakInfo = await rpcClient.fluxCalReadScnPeak(path);
+    } catch (err) {
+      // The dialog offers an "All files" filter, so unreadable/corrupt picks
+      // are expected — surface the engine's message instead of silently
+      // dropping an unhandled rejection.
+      window.alert(`Could not read that file as a .scn: ${(err as Error).message}`);
+      return;
+    }
     if (peakInfo.peak_flux === 0) {
       window.alert(
         `${peakInfo.name || 'this .scn'} has no peak flux in its header. ` +
@@ -74,7 +83,13 @@ export function FluxCalibrationView() {
 
   const handleAddCurrentScan = useCallback(async () => {
     if (!scanOverview || scanHandle === null || scanOverview.peak_flux === null) return;
-    const defaults = await rpcClient.fluxCalDefaultKnownJy(scanOverview.name);
+    let defaults;
+    try {
+      defaults = await rpcClient.fluxCalDefaultKnownJy(scanOverview.name);
+    } catch (err) {
+      window.alert(`Could not look up the default known flux: ${(err as Error).message}`);
+      return;
+    }
     const known = promptKnownJy(defaults.default_known_jy, scanOverview.name);
     if (known === null) return;
     await addEntry({

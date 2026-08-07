@@ -439,11 +439,13 @@ def test_bicolor_image_img_pair_via_rpc():
     assert 0.0 <= g_min <= g_max <= 1.0
 
 
-def test_append_fits_with_img_yields_clear_rpc_error():
-    # BUG-009: appending an .img onto a FITS primary used to allocate ~660 GiB
-    # because the formats store RA in different units. The compose layer now
-    # rejects this with ERR_INVALID_PARAMS and a user-readable message before
-    # any large allocation occurs.
+def test_append_fits_with_img_composes_on_common_units():
+    # Historically this pair could not be combined: read_fits kept the RA axis
+    # in header degrees while .img images use seconds of time, so the union
+    # grid exploded (~660 GiB) and a BUG-009 guard rejected the call. Bug #28
+    # fixed the unit boundary — read_fits now converts RA into seconds of
+    # time — so appending an .img onto a FITS primary of the same sky region
+    # must simply work.
     fits_src = Path(
         "C:\\Users\\leesnow\\skynet2\\ogrc\\fixtures\\inputs\\CAS-A_RC_Job_7963_0007654.fits"
     )
@@ -456,18 +458,20 @@ def test_append_fits_with_img_yields_clear_rpc_error():
         "append_image",
         {"handle": primary_h, "other_path": str(img_src)},
     )
-    assert "error" in resp, resp
-    assert resp["error"]["code"] == -32602  # ERR_INVALID_PARAMS
-    assert "combined sky area" in resp["error"]["message"]
-    # The base handle must still be valid — the failure was caught at the
-    # input-validation layer, so the registry was never torn down.
+    assert "result" in resp, resp
+    result = resp["result"]
+    assert result["width"] > 0 and result["height"] > 0
+    # Both fixtures image CAS A, so the union footprint must be a sane sky
+    # region (well under a full day of RA), not a unit-mismatch blowup.
+    assert (result["max_ra"] - result["min_ra"]) < 86400.0
+    # The original handle must remain valid alongside the new composite.
     follow_up = call(server, "save_image", {"handle": primary_h, "path": "ignored.bogus"})
     # save_image will reject the path, but the handle must resolve first.
     assert follow_up["error"]["code"] != 1001, follow_up
 
 
-def test_superimpose_fits_with_img_yields_clear_rpc_error():
-    # Same guard on the superimpose path.
+def test_superimpose_fits_with_img_composes_on_common_units():
+    # Same unit-boundary behavior on the superimpose path.
     fits_src = Path(
         "C:\\Users\\leesnow\\skynet2\\ogrc\\fixtures\\inputs\\CAS-A_RC_Job_7963_0007654.fits"
     )
@@ -479,9 +483,8 @@ def test_superimpose_fits_with_img_yields_clear_rpc_error():
         "superimpose_image",
         {"handle": primary_h, "other_path": str(img_src), "weight": 0.5},
     )
-    assert "error" in resp, resp
-    assert resp["error"]["code"] == -32602
-    assert "combined sky area" in resp["error"]["message"]
+    assert "result" in resp, resp
+    assert resp["result"]["width"] > 0 and resp["result"]["height"] > 0
 
 
 def test_bicolor_rejects_duplicate_channels():

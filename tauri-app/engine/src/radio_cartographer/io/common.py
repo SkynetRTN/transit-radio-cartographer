@@ -4,16 +4,17 @@ from __future__ import annotations
 
 
 def split_crlf_lines(blob: bytes) -> list[str]:
-    """Split bytes into text lines, returning them without their terminators.
+    """Split bytes into text lines, accepting CRLF or LF terminators.
 
-    Files written by the legacy VB app are CRLF-terminated ASCII, but newer
-    Skynet exports terminate lines with bare LF — a strict CRLF split saw
-    those files as one giant line and every codec parsed them as empty
-    (0 sweeps / 0 samples). Accept both terminators on read; the writers
-    still emit byte-exact CRLF for legacy round-trip fidelity.
+    The legacy files are ASCII; we decode strict here so any deviation
+    surfaces as a parser error. Acquisition output is normally CRLF, but
+    LF-only files occur in the wild (newer Skynet exports), so both are
+    accepted — a strict CRLF split saw an LF file as one giant line and
+    every codec parsed it as empty. Writers still emit byte-exact CRLF for
+    legacy round-trip fidelity.
     """
     text = blob.decode("ascii", errors="strict")
-    text = text.replace("\r\n", "\n")
-    if text.endswith("\n"):
-        text = text[:-1]
-    return text.split("\n")
+    lines = [line.removesuffix("\r") for line in text.split("\n")]
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines

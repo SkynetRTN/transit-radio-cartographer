@@ -164,7 +164,11 @@ def _serialize_srv(survey: Survey) -> bytes:
     out += vb_print_number(survey.sweep_count)
     out += vb_print_number(survey.swp)
     out += vb_print_formatted(vb_format_fixed(_must(survey.sweep0.calib), 4))
-    assert survey.sweeps  # documented invariant
+    # Real validation, not an assert — asserts are stripped under `python -O`
+    # (and optimized PyInstaller builds), which would turn this into a bare
+    # IndexError on the next line.
+    if not survey.sweeps:
+        raise ValueError("cannot serialize a survey with no sweeps")
     out += vb_print_formatted(vb_format_fixed(_must(survey.sweeps[-1].calib), 4))
     for i in range(SWEEP0_LENGTH):
         out += vb_print_number(_compact(float(survey.sweep0.ra[i])))

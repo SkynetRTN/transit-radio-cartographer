@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    The engine sidecar is a PyInstaller onefile binary: at launch its bootloader
+    unpacks an embedded libpython3.13.dylib into a temp dir and dlopen()s it.
+    That dylib comes from uv's CPython distribution and is adhoc/linker-signed,
+    so under the hardened runtime (which both PyInstaller and Tauri enable when
+    a signing identity is set) library validation rejects it:
+
+      Failed to load Python shared library '.../_MEIxxxxxx/libpython3.13.dylib'
+      ... (non-platform) have different Team IDs
+
+    The sidecar then dies before writing a byte of JSON-RPC, and the app can
+    only report it as "sidecar closed stdout". Re-signing the extracted dylib
+    is not possible for onefile, so the process must opt out of library
+    validation. This entitlement is permitted under notarization.
+  -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>

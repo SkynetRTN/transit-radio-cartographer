@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   rpcClient,
   type ImageMeta,
@@ -128,9 +128,9 @@ export function PreImageView() {
     makeImage,
     imageDisplay,
     preImagePix,
-    preImageReductions,
     setPreImagePix,
-    markPreImageReduction,
+    reductionsDone,
+    markReductionDone,
   } = useSurvey();
   const [imagePixels, setImagePixels] = useState<ImagePixels | null>(null);
   const [imageMeta, setImageMeta] = useState<ImageMeta | null>(null);
@@ -140,26 +140,53 @@ export function PreImageView() {
   const [sweepPaths, setSweepPaths] = useState<SweepPath[]>([]);
   const [hoverPoint, setHoverPoint] = useState<ImagePoint | null>(null);
   // BUG-010 (dan): pixel size and the Smooth/Baseline/Align pipeline progress
-  // now live in the survey context so they persist across pre-image ↔ survey
-  // navigation (re-entering the pre-image no longer resets the flags and
-  // re-stacks the reductions).
+  // (`reductionsDone`) live in the survey context so they persist across
+  // pre-image ↔ survey navigation (re-entering the pre-image no longer resets
+  // the flags and re-stacks the reductions).
   const pix = preImagePix;
-  const { smooth: didSmooth, baseline: didBaseline, align: didAlign } = preImageReductions;
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState<NumericPrompt | null>(null);
+  // Handle of the preview image currently held by the engine. Each
+  // generateImage call allocates a fresh engine-side image, so the previous
+  // one must be closed or it stays pinned in engine memory for the session.
+  const previewHandleRef = useRef<number | null>(null);
+  // Monotonic run id: generateImage fires from the mount/flux-cal effect AND
+  // the Smooth/Baseline/Align handlers, so overlapping runs are possible. A
+  // superseded run must not display its (stale) preview or clobber the
+  // handle bookkeeping (bug #38).
+  const generationRef = useRef(0);
 
   const generateImage = useCallback(
     async (pixValue: number) => {
       if (!survey) return;
+      const gen = ++generationRef.current;
       setBusy(true);
       setError(null);
       setStatus('Building pre-image…');
       try {
-        const meta = await rpcClient.makeImage(survey.handle, pixValue, workspaceHandle);
-        setImageMeta(meta);
+        // 'bars' = legacy pre-image rendering: each sample paints a
+        // constant-flux horizontal bar with no inter-sweep interpolation.
+        // The interpolated fill only appears after the Make Image commit.
+        const meta = await rpcClient.makeImage(survey.handle, pixValue, workspaceHandle, 'bars');
+        if (gen !== generationRef.current) {
+          // A newer run took over while the engine gridded — release our
+          // image rather than displaying stale data or leaking the handle.
+          void rpcClient.closeHandle(meta.handle).catch(() => {});
+          return;
+        }
+        // Track the new handle BEFORE fetching pixels: if the fetch below
+        // throws, the engine image must still be closed on the next swap or
+        // unmount rather than leak (bug #38).
+        const prev = previewHandleRef.current;
+        previewHandleRef.current = meta.handle;
+        if (prev !== null && prev !== meta.handle) {
+          void rpcClient.closeHandle(prev).catch(() => {});
+        }
         const pixels = await rpcClient.getImagePixels(meta.handle);
+        if (gen !== generationRef.current) return;
+        setImageMeta(meta);
         setImagePixels(pixels);
         // Refresh the sweep tracks alongside the image so the hover readout's
         // sweep numbers stay in step with the (possibly aligned) grid. A
@@ -167,25 +194,38 @@ export function PreImageView() {
         if (workspaceHandle !== null && workspaceHandle !== undefined) {
           try {
             const paths = await rpcClient.getSweepPaths(workspaceHandle);
-            setSweepPaths(paths.sweeps);
+            if (gen === generationRef.current) setSweepPaths(paths.sweeps);
           } catch (e) {
             // Degrade gracefully — the RA/Dec/Flux readout still works without
             // sweep numbers. Log so a stale/missing engine method (e.g. an old
             // bundled sidecar without get_sweep_paths) is diagnosable rather
             // than silently showing "Sweep: —".
             console.warn('getSweepPaths failed; sweep readout disabled:', e);
-            setSweepPaths([]);
+            if (gen === generationRef.current) setSweepPaths([]);
           }
         }
         setStatus(null);
       } catch (e) {
-        setError((e as Error).message);
-        setStatus(null);
+        if (gen === generationRef.current) {
+          setError((e as Error).message);
+          setStatus(null);
+        }
       } finally {
-        setBusy(false);
+        if (gen === generationRef.current) setBusy(false);
       }
     },
     [survey, workspaceHandle],
+  );
+
+  // Release the last preview on unmount. The committed image made via the
+  // context's makeImage is a separate handle, so this never closes it.
+  useEffect(
+    () => () => {
+      const h = previewHandleRef.current;
+      previewHandleRef.current = null;
+      if (h !== null) void rpcClient.closeHandle(h).catch(() => {});
+    },
+    [],
   );
 
   useEffect(() => {
@@ -240,7 +280,7 @@ export function PreImageView() {
     try {
       await rpcClient.smooth(survey.handle, 5, workspaceHandle);
       await generateImage(pix);
-      markPreImageReduction('smooth');
+      markReductionDone('smooth');
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -263,7 +303,7 @@ export function PreImageView() {
         try {
           await rpcClient.baseline(survey.handle, value, workspaceHandle);
           await generateImage(pix);
-          markPreImageReduction('baseline');
+          markReductionDone('baseline');
         } catch (e) {
           setError((e as Error).message);
         } finally {
@@ -288,7 +328,7 @@ export function PreImageView() {
         try {
           await rpcClient.align(survey.handle, value, workspaceHandle);
           await generateImage(pix);
-          markPreImageReduction('align');
+          markReductionDone('align');
         } catch (e) {
           setError((e as Error).message);
         } finally {
@@ -307,11 +347,12 @@ export function PreImageView() {
     setViewMode('survey');
   }, [setViewMode]);
 
-  const canMakeImage = didSmooth && didBaseline && didAlign;
+  const canMakeImage =
+    reductionsDone.smooth && reductionsDone.baseline && reductionsDone.align;
   const remainingSteps: string[] = [];
-  if (!didSmooth) remainingSteps.push('smooth sweeps');
-  if (!didBaseline) remainingSteps.push('apply a baseline');
-  if (!didAlign) remainingSteps.push('align sweeps');
+  if (!reductionsDone.smooth) remainingSteps.push('smooth sweeps');
+  if (!reductionsDone.baseline) remainingSteps.push('apply a baseline');
+  if (!reductionsDone.align) remainingSteps.push('align sweeps');
   const makeImageTitle = canMakeImage
     ? 'Build the gridded image at a chosen pixel size in degrees (default 0.06° = 1/20 of the beam)'
     : `Before making the image you must: smooth sweeps, apply a baseline, align sweeps. Remaining: ${remainingSteps.join(', ')}.`;
@@ -345,8 +386,8 @@ export function PreImageView() {
       }
     }
     if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return null;
-    return { min: didBaseline ? 0 : min, max };
-  }, [imagePixels, didBaseline]);
+    return { min: reductionsDone.baseline ? 0 : min, max };
+  }, [imagePixels, reductionsDone.baseline]);
 
   if (!workspace) {
     return (

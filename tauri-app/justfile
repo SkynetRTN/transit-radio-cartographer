@@ -12,9 +12,17 @@ os_name := os()
 default:
     @just --list
 
-# Python — install workspace deps from uv.lock into .venv/
+# --all-packages is required, not optional. This pyproject.toml is a uv
+# *workspace root* whose own dependencies are just numpy; the engine's real
+# runtime deps (astropy) live in the `engine` member. A plain `uv sync` syncs
+# only the root project plus the dev group, so astropy never lands in .venv/,
+# PyInstaller quietly omits it, and the sidecar dies on startup with
+# `ModuleNotFoundError: No module named 'astropy'` — which the app can only
+# report as the opaque "sidecar closed stdout" toast.
+#
+# Python — install every workspace member's deps from uv.lock into .venv/
 sync:
-    uv sync
+    uv sync --all-packages
 
 # Run every test suite: engine (pytest) and front-end (vitest).
 test: test-engine test-app
@@ -78,15 +86,74 @@ sidecar:
     @ {{ if os_name == "windows" { "just _sidecar-windows" } else { "just _sidecar-unix" } }}
 
 _sidecar-windows:
+    #!/usr/bin/env pwsh
+    $ErrorActionPreference = "Stop"
     uv run pyinstaller engine/sidecar.spec --distpath app/src-tauri/binaries/ --noconfirm
-    pwsh -NoProfile -Command "Move-Item -Force app/src-tauri/binaries/radio-cartographer-engine.exe app/src-tauri/binaries/radio-cartographer-engine-x86_64-pc-windows-msvc.exe"
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    $warn = "build/sidecar/warn-sidecar.txt"
+    if (Test-Path $warn) {
+        $missing = Select-String -Path $warn -Pattern '^missing module named (astropy|numpy) -'
+        if ($missing) {
+            [Console]::Error.WriteLine("error: sidecar is missing a runtime dependency:")
+            $missing | ForEach-Object { [Console]::Error.WriteLine("  " + $_.Line) }
+            [Console]::Error.WriteLine("hint: run 'just sync', then rebuild.")
+            exit 1
+        }
+    }
+
+    $bin = "app/src-tauri/binaries/radio-cartographer-engine-x86_64-pc-windows-msvc.exe"
+    Move-Item -Force app/src-tauri/binaries/radio-cartographer-engine.exe $bin
+
+    $out = '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' | & $bin 2>&1 | Out-String
+    if ($out -notmatch '"pong"') {
+        [Console]::Error.WriteLine("error: sidecar built but did not answer ping:")
+        [Console]::Error.WriteLine($out)
+        exit 1
+    }
+    Write-Host "sidecar ok: $bin"
 
 _sidecar-unix:
     #!/usr/bin/env bash
     set -euo pipefail
     uv run pyinstaller engine/sidecar.spec --distpath app/src-tauri/binaries/ --noconfirm
+
+    # PyInstaller downgrades an unresolvable import to a line in
+    # warn-sidecar.txt and still exits 0, so a venv missing a runtime dep ships
+    # a binary that dies the moment the app spawns it. Most of that file is
+    # benign (conditional numpy._core.* lookups), so match only the engine's
+    # declared third-party deps — keep this list in sync with
+    # engine/pyproject.toml. The trailing " -" anchors on the exact module so
+    # `numpy._core.foo` does not trip the `numpy` pattern.
+    WARN=build/sidecar/warn-sidecar.txt
+    PATTERN='^missing module named (astropy|numpy) -'
+    if [ -f "$WARN" ] && grep -qE "$PATTERN" "$WARN"; then
+        echo "error: sidecar is missing a runtime dependency:" >&2
+        grep -E "$PATTERN" "$WARN" | cut -d' ' -f4 | sort -u | sed 's/^/  /' >&2
+        echo "hint: run 'just sync', then rebuild." >&2
+        exit 1
+    fi
+
     TRIPLE=$(rustc -vV | sed -n 's|host: ||p')
-    mv -f "app/src-tauri/binaries/radio-cartographer-engine" "app/src-tauri/binaries/radio-cartographer-engine-${TRIPLE}"
+    BIN="app/src-tauri/binaries/radio-cartographer-engine-${TRIPLE}"
+    mv -f "app/src-tauri/binaries/radio-cartographer-engine" "$BIN"
+
+    # A frozen binary can still fail at startup for reasons the build never
+    # sees — a missing module, or macOS library validation refusing the
+    # bundled libpython when the exe is signed with the hardened runtime.
+    # Both reach the user only as "sidecar closed stdout", so prove here that
+    # the thing actually answers. serve() loops over stdin, so closing the
+    # pipe ends the process; capture into a variable rather than piping to
+    # grep, whose early exit would SIGPIPE the child under `pipefail`.
+    OUT=$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' | "$BIN" 2>&1 || true)
+    case "$OUT" in
+        *'"pong"'*) echo "sidecar ok: $BIN" ;;
+        *)
+            echo "error: sidecar built but did not answer ping:" >&2
+            echo "$OUT" >&2
+            exit 1
+            ;;
+    esac
 
 # Whole app — build the bundled Tauri artifact (.exe setup / .dmg / .AppImage).
 # Bundling depends on the sidecar binary, so `just sidecar` must succeed first.

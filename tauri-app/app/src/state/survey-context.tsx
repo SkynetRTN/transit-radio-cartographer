@@ -69,13 +69,20 @@ export interface SurveyState {
   // mode flips to 'pre-image' so the user can render the gridded image.
   currentSweepIndex: number;
   acceptedSweeps: Set<number>;
-  // BUG-010 (dan): persisted pre-image pipeline progress (see the state comment
-  // in the provider). PreImageView reads these instead of local state so the
-  // Make Image gating and pixel size survive leaving/re-entering the view.
+  // Which pre-image reductions have been applied to the engine workspace.
+  // Lives here (not in PreImageView) so navigating away (Back to Sweeps, or
+  // "Back to Pre Image" from the Image view) doesn't forget them — the
+  // reductions are already applied engine-side, and re-running them would
+  // apply them a second time (BUG-010 dan).
+  reductionsDone: { smooth: boolean; baseline: boolean; align: boolean };
+  markReductionDone: (op: 'smooth' | 'baseline' | 'align') => void;
+  // The engine drops prior reductions when gain calibration is (re)applied —
+  // callers of apply_gain_calibration must reset the flags to match.
+  resetReductions: () => void;
+  // BUG-010 (dan): the Make Image pixel size also persists across pre-image ↔
+  // survey navigation.
   preImagePix: number;
-  preImageReductions: { smooth: boolean; baseline: boolean; align: boolean };
   setPreImagePix: (pix: number) => void;
-  markPreImageReduction: (kind: 'smooth' | 'baseline' | 'align') => void;
   open: (path: string) => Promise<void>;
   close: () => Promise<void>;
   setViewMode: (mode: WorkspaceViewMode) => void;
@@ -156,16 +163,16 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   const [savePath, setSavePath] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
-  // BUG-010 (dan): the pre-image reduction pipeline (Smooth / Baseline / Align)
-  // and its pixel size persist across pre-image ↔ survey navigation, so
-  // re-entering the pre-image (via Create Pre-Image) doesn't reset the progress
-  // and re-stack the reductions. Reset on open / close / resetSweepReview.
+  // BUG-010 (dan): the pre-image reduction pipeline progress and its pixel
+  // size persist across pre-image ↔ survey navigation, so re-entering the
+  // pre-image (via Create Pre-Image) doesn't reset the progress and re-stack
+  // the reductions. Reset on open / close / resetSweepReview / recalibration.
+  const [reductionsDone, setReductionsDone] = useState({
+    smooth: false,
+    baseline: false,
+    align: false,
+  });
   const [preImagePix, setPreImagePix] = useState<number>(0.06);
-  const [preImageReductions, setPreImageReductions] = useState<{
-    smooth: boolean;
-    baseline: boolean;
-    align: boolean;
-  }>({ smooth: false, baseline: false, align: false });
 
   const surveyRef = useRef<SurveyMeta | null>(survey);
   const workspaceHandleRef = useRef<number | null>(workspaceHandle);
@@ -248,6 +255,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     setReducing(false);
     setSaving(false);
     setError(null);
+    setReductionsDone({ smooth: false, baseline: false, align: false });
     return wasDirty;
   }, []);
 
@@ -293,7 +301,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       setImageNameState(meta.workspace?.name ?? 'image');
       // Fresh survey → reset the pre-image pipeline progress (BUG-010).
       setPreImagePix(0.06);
-      setPreImageReductions({ smooth: false, baseline: false, align: false });
+      setReductionsDone({ smooth: false, baseline: false, align: false });
       if (isSaved) {
         const sweepCount = meta.workspace?.source_count ?? 0;
         const acceptedList =
@@ -359,9 +367,9 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     setCurrentSweepIndex(0);
     setAcceptedSweeps(new Set());
     setPreImagePix(0.06);
-    setPreImageReductions({ smooth: false, baseline: false, align: false });
     setSavePath(null);
     setDirty(false);
+    setReductionsDone({ smooth: false, baseline: false, align: false });
   }, []);
 
   const acceptCurrentSweep = useCallback(() => {
@@ -401,15 +409,16 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     setAcceptedSweeps(new Set());
     setCurrentSweepIndex(0);
     setPreImagePix(0.06);
-    setPreImageReductions({ smooth: false, baseline: false, align: false });
+    setReductionsDone({ smooth: false, baseline: false, align: false });
   }, []);
 
-  const markPreImageReduction = useCallback(
-    (kind: 'smooth' | 'baseline' | 'align') => {
-      setPreImageReductions((prev) => ({ ...prev, [kind]: true }));
-    },
-    [],
-  );
+  const markReductionDone = useCallback((op: 'smooth' | 'baseline' | 'align') => {
+    setReductionsDone((prev) => (prev[op] ? prev : { ...prev, [op]: true }));
+  }, []);
+
+  const resetReductions = useCallback(() => {
+    setReductionsDone({ smooth: false, baseline: false, align: false });
+  }, []);
 
   const refreshWorkspace = useCallback(async () => {
     const h = workspaceHandleRef.current;
@@ -470,10 +479,25 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       );
       const pixels = await rpcClient.getImagePixels(meta.handle);
       const prevImage = imageRef.current;
+      const prevRgb = rgbImageRef.current;
+      const prevPreCompose = preComposeImageRef.current;
       setImage(meta);
       setImagePixels(pixels);
+      // Invariant: only one of image/rgbImage is non-null. Clear any RGB
+      // composite left from a previous bi/tri-color build, or the stale
+      // channel state would misdirect the next Make Tri-Color Image.
+      setRgbImageState(null);
+      setRgbImagePixels(null);
+      // The scalar stashed for "Back to Pre Image" backed the composite we
+      // just discarded — drop it too, or its engine handle leaks and
+      // canRestoreScalar stays stale (bug #40).
+      if (prevPreCompose) {
+        closeInBackground(prevPreCompose.meta.handle);
+        setPreComposeImage(null);
+      }
       setViewMode('image');
       closeInBackground(prevImage?.handle);
+      if (prevRgb) closeInBackground(prevRgb.handle);
       return meta;
     } catch (e) {
       handleRpcError(e);
@@ -746,10 +770,11 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       saving,
       currentSweepIndex,
       acceptedSweeps,
+      reductionsDone,
+      markReductionDone,
+      resetReductions,
       preImagePix,
-      preImageReductions,
       setPreImagePix,
-      markPreImageReduction,
       open,
       close,
       setViewMode,
@@ -801,9 +826,10 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       saving,
       currentSweepIndex,
       acceptedSweeps,
+      reductionsDone,
+      markReductionDone,
+      resetReductions,
       preImagePix,
-      preImageReductions,
-      markPreImageReduction,
       open,
       close,
       acceptCurrentSweep,

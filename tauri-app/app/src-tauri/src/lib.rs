@@ -57,10 +57,27 @@ fn workspace_dir() -> PathBuf {
 }
 
 #[tauri::command]
-fn rpc_request(
-    app: tauri::AppHandle,
-    bridge: tauri::State<'_, SidecarBridge>,
-    payload: serde_json::Value,
-) -> serde_json::Value {
-    bridge.rpc(&app, payload)
+async fn rpc_request(app: tauri::AppHandle, payload: serde_json::Value) -> serde_json::Value {
+    // The bridge call blocks (sidecar spawn + unbounded read_line). A sync
+    // command would run it on the event-loop thread, freezing the window
+    // ("Not Responding") for the duration of every engine call — so hop to
+    // the blocking pool and keep the main thread free.
+    let id = payload.get("id").cloned().unwrap_or(serde_json::Value::Null);
+    match tauri::async_runtime::spawn_blocking(move || {
+        let bridge = app.state::<SidecarBridge>();
+        bridge.rpc(&app, payload)
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(err) => serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": -32000,
+                "message": format!("rpc worker failed: {err}"),
+                "data": {"code": "rpc_worker_failed"}
+            }
+        }),
+    }
 }

@@ -4,6 +4,7 @@ import base64
 import binascii
 import io
 import json
+import math
 import struct
 import sys
 import traceback
@@ -135,6 +136,36 @@ def _survey_from_workspace_sources(ws: "SurveyWorkspace") -> Survey:
     )
 
 
+def _validate_vb_name(name: Any) -> str:
+    """Validate a user-supplied name destined for a legacy line-oriented file.
+
+    The legacy formats are written via VB `Print #1` semantics as strict
+    ASCII, so a non-ASCII name would only fail later — at save time, as an
+    opaque I/O error after the user has finished their whole reduction.
+    Embedded CR/LF would corrupt the line-oriented framing outright. Reject
+    both up front, at rename time, with a message that names the cause.
+    """
+    if not isinstance(name, str):
+        raise RpcError(ERR_INVALID_PARAMS, "name must be a string")
+    if not name.isascii() or "\r" in name or "\n" in name:
+        raise RpcError(
+            ERR_INVALID_PARAMS,
+            "name must contain only plain ASCII characters (no accents or "
+            "line breaks) — the legacy file formats cannot store anything else",
+        )
+    return name
+
+
+def _json_float(x: Any) -> float | None:
+    """A scalar float safe for strict JSON: non-finite becomes None.
+
+    json.dumps emits bareword NaN/Infinity, which serde_json on the Rust
+    bridge rejects — the whole reply would be silently dropped (bug #32).
+    """
+    v = float(x)
+    return v if math.isfinite(v) else None
+
+
 def _array_to_jsonable_list(arr: NDArray) -> list:
     """Convert a numpy float array to a JSON-safe nested Python list.
 
@@ -175,10 +206,15 @@ def _block_downsample(pixels: NDArray, step: int) -> NDArray:
     h, w = pixels.shape
     h_trim = (h // step) * step
     w_trim = (w // step) * step
-    if h_trim == 0 or w_trim == 0:
-        return pixels[:0, :0]
+    # An axis shorter than `step` is kept whole (block only along the other
+    # axis) — trimming it to zero would return a 0x0 grid and render an
+    # extreme-aspect strip (e.g. 1 x 4096) as a blank image (bug #43).
+    row_step = step if h_trim else 1
+    col_step = step if w_trim else 1
+    h_trim = h_trim or h
+    w_trim = w_trim or w
     trimmed = pixels[:h_trim, :w_trim]
-    blocks = trimmed.reshape(h_trim // step, step, w_trim // step, step)
+    blocks = trimmed.reshape(h_trim // row_step, row_step, w_trim // col_step, col_step)
     with np.errstate(invalid="ignore"), warnings.catch_warnings():
         # `nanmax` on a fully-NaN block emits "All-NaN slice encountered"; we
         # *want* NaN out in that case, so swallow the warning.
@@ -377,14 +413,40 @@ def _pixel_deg_param(params: dict[str, Any], default: float | None = None) -> fl
 
 def _open_image_path(path: str) -> GriddedImage:
     ext = Path(path).suffix.lower()
-    if ext == ".img":
-        return _image_to_gridded(read_img(path))
-    if ext in (".fits", ".fit"):
+    if ext not in (".img", ".fits", ".fit"):
+        raise RpcError(
+            ERR_INVALID_PARAMS,
+            f"unsupported image extension {ext!r}; expected .img/.fits/.fit",
+        )
+    # Wrap ordinary file problems (missing, truncated, malformed) in the
+    # structured ERR_IO the protocol promises, instead of letting them reach
+    # the blanket handler as -32603 internal errors (bug #42).
+    try:
+        if ext == ".img":
+            return _image_to_gridded(read_img(path))
         return read_fits(path)
-    raise RpcError(
-        ERR_INVALID_PARAMS,
-        f"unsupported image extension {ext!r}; expected .img/.fits/.fit",
-    )
+    except RpcError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise RpcError(ERR_IO, f"failed to open image {path!r}: {exc}") from exc
+
+
+def _float_param(params: dict[str, Any], key: str, default: float = 0.0) -> float:
+    value = params.get(key, default)
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise RpcError(ERR_INVALID_PARAMS, f"{key} must be a number, got {value!r}") from exc
+
+
+def _optional_int_param(params: dict[str, Any], key: str) -> int | None:
+    value = params.get(key)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise RpcError(ERR_INVALID_PARAMS, f"{key} must be an integer, got {value!r}") from exc
 
 
 def _force_calibrated_if_requested(image: GriddedImage, params: dict[str, Any]) -> GriddedImage:
@@ -418,6 +480,8 @@ class RpcError(Exception):
         self.data = data or {}
 
 
+ERR_PARSE = -32700
+ERR_INVALID_REQUEST = -32600
 ERR_INVALID_PARAMS = -32602
 ERR_INTERNAL = -32603
 ERR_UNKNOWN_METHOD = -32601
@@ -426,9 +490,16 @@ ERR_IO = 1002
 
 
 class BinaryChannel:
+    # No RPC method ever explicitly frees a frame, so the store must bound
+    # itself: without a cap, every get_sweep call would permanently retain
+    # three array copies for the lifetime of the sidecar. Oldest-first
+    # eviction keeps recently issued tokens resolvable.
+    MAX_BYTES = 64 * 1024 * 1024
+
     def __init__(self) -> None:
         self._store: dict[str, bytes] = {}
         self._next = 1
+        self._total_bytes = 0
 
     def put_array(self, arr: np.ndarray) -> dict[str, Any]:
         buf = io.BytesIO()
@@ -436,11 +507,25 @@ class BinaryChannel:
         payload = buf.getvalue()
         token = f"bin-{self._next}"
         self._next += 1
-        self._store[token] = struct.pack("<Q", len(payload)) + payload
+        frame = struct.pack("<Q", len(payload)) + payload
+        self._store[token] = frame
+        self._total_bytes += len(frame)
+        # dict preserves insertion order; evict oldest first, but never the
+        # frame just stored.
+        while self._total_bytes > self.MAX_BYTES and len(self._store) > 1:
+            oldest = next(iter(self._store))
+            self._total_bytes -= len(self._store.pop(oldest))
         return {"token": token, "size": len(payload)}
 
     def get_array(self, token: str) -> np.ndarray:
-        frame = self._store[token]
+        frame = self._store.get(token)
+        if frame is None:
+            # Unknown token, or one legitimately evicted by the MAX_BYTES
+            # bound — a structured error the client can distinguish from an
+            # engine crash, not a bare KeyError -> -32603 (bug #44).
+            raise RpcError(
+                ERR_INVALID_PARAMS, f"unknown or expired binary token: {token}"
+            )
         (size,) = struct.unpack("<Q", frame[:8])
         blob = frame[8 : 8 + size]
         return np.load(io.BytesIO(blob), allow_pickle=False)
@@ -456,6 +541,18 @@ class RpcServer:
         req_id = request.get("id")
         method = request.get("method")
         params = request.get("params") or {}
+        if not isinstance(params, dict):
+            # JSON-RPC defines -32602 for this; without the guard the first
+            # params.get() inside a method raises AttributeError and the
+            # caller's mistake is misreported as -32603 internal (bug #45).
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {
+                    "code": ERR_INVALID_PARAMS,
+                    "message": "params must be a JSON object",
+                },
+            }
         try:
             if method == "ping":
                 result = "pong"
@@ -728,9 +825,9 @@ class RpcServer:
         else:
             ra, dec, flux = sweep.ra, sweep.dec, sweep.flux
         return {
-            "ra": ra.tolist(),
-            "dec": dec.tolist(),
-            "flux": flux.tolist(),
+            "ra": _array_to_jsonable_list(ra),
+            "dec": _array_to_jsonable_list(dec),
+            "flux": _array_to_jsonable_list(flux),
             "sample_count": n,
             "returned_count": int(flux.shape[0]),
         }
@@ -798,6 +895,16 @@ class RpcServer:
 
     def _make_image(self, params: dict[str, Any]) -> dict[str, Any]:
         pixel_deg = _pixel_deg_param(params, default=DEFAULT_PIXEL_DEG)
+        # "bars" reproduces the legacy Pre-Image screen (constant-flux
+        # horizontal bars per sample, no inter-sweep interpolation);
+        # "interpolate" is the legacy Make Image strip-fill. The Pre Image
+        # view requests bars; the Make Image commit omits the param.
+        fill = str(params.get("fill", "interpolate"))
+        if fill not in ("interpolate", "bars"):
+            raise RpcError(
+                ERR_INVALID_PARAMS,
+                f"make_image: fill must be 'interpolate' or 'bars', got {fill!r}",
+            )
         ws_handle = params.get("workspace_handle")
         unit: str | None = None
         flux_calibrated = False
@@ -824,7 +931,7 @@ class RpcServer:
         else:
             handle = int(params.get("handle", -1))
             survey = self._resolve_survey(handle)
-        image = make_image(survey, pixel_deg=pixel_deg)
+        image = make_image(survey, pixel_deg=pixel_deg, fill=fill)
         if unit is not None or flux_calibrated:
             image = replace_dataclass(
                 image,
@@ -938,7 +1045,7 @@ class RpcServer:
                     palette=palette,
                     flux_min=flux_min,
                     flux_max=flux_max,
-                    name=str(params.get("name", "image")),
+                    name=_validate_vb_name(str(params.get("name", "image"))),
                     pix=1,
                     unit=unit,
                 )
@@ -1026,10 +1133,9 @@ class RpcServer:
         if not other_path:
             raise RpcError(ERR_INVALID_PARAMS, "other_path is required")
         secondary = _open_image_path(str(other_path))
-        ra_shift = float(params.get("ra_shift_seconds", 0.0))
-        dec_shift = float(params.get("dec_shift_degrees", 0.0))
-        pix = params.get("pix")
-        pix_int = int(pix) if pix is not None else None
+        ra_shift = _float_param(params, "ra_shift_seconds")
+        dec_shift = _float_param(params, "dec_shift_degrees")
+        pix_int = _optional_int_param(params, "pix")
         try:
             composed = append_images(
                 primary,
@@ -1053,8 +1159,7 @@ class RpcServer:
         if not isinstance(other_paths, list) or not other_paths:
             raise RpcError(ERR_INVALID_PARAMS, "other_paths (non-empty list) is required")
         others = [_open_image_path(str(p)) for p in other_paths]
-        pix = params.get("pix")
-        pix_int = int(pix) if pix is not None else None
+        pix_int = _optional_int_param(params, "pix")
         try:
             composed = append_images_multi(primary, others, pix=pix_int)
         except ValueError as exc:
@@ -1083,6 +1188,9 @@ class RpcServer:
             "max_ra": float(image.max_ra),
             "min_dec": float(image.min_dec),
             "max_dec": float(image.max_dec),
+            # "r"/"g"/"b" for a bi-color result, null once all three channels
+            # are populated. Authoritative — recorded at compose time.
+            "unused_channel": image.unused_channel,
         }
 
     def _bicolor_image(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1093,10 +1201,9 @@ class RpcServer:
         secondary = _open_image_path(str(other_path))
         primary_channel = str(params.get("primary_channel", "r")).lower()
         secondary_channel = str(params.get("secondary_channel", "g")).lower()
-        ra_shift = float(params.get("ra_shift_seconds", 0.0))
-        dec_shift = float(params.get("dec_shift_degrees", 0.0))
-        pix = params.get("pix")
-        pix_int = int(pix) if pix is not None else None
+        ra_shift = _float_param(params, "ra_shift_seconds")
+        dec_shift = _float_param(params, "dec_shift_degrees")
+        pix_int = _optional_int_param(params, "pix")
         try:
             composed = bicolor_compose(
                 primary,
@@ -1120,12 +1227,11 @@ class RpcServer:
             raise RpcError(ERR_INVALID_PARAMS, "second_path and third_path are required")
         secondary = _open_image_path(str(second_path))
         tertiary = _open_image_path(str(third_path))
-        ra_shift = float(params.get("ra_shift_seconds", 0.0))
-        dec_shift = float(params.get("dec_shift_degrees", 0.0))
-        tertiary_ra_shift = float(params.get("tertiary_ra_shift_seconds", 0.0))
-        tertiary_dec_shift = float(params.get("tertiary_dec_shift_degrees", 0.0))
-        pix = params.get("pix")
-        pix_int = int(pix) if pix is not None else None
+        ra_shift = _float_param(params, "ra_shift_seconds")
+        dec_shift = _float_param(params, "dec_shift_degrees")
+        tertiary_ra_shift = _float_param(params, "tertiary_ra_shift_seconds")
+        tertiary_dec_shift = _float_param(params, "tertiary_dec_shift_degrees")
+        pix_int = _optional_int_param(params, "pix")
         try:
             composed = tricolor_compose(
                 primary,
@@ -1148,8 +1254,8 @@ class RpcServer:
         if not other_path:
             raise RpcError(ERR_INVALID_PARAMS, "other_path is required")
         other = _open_image_path(str(other_path))
-        ra_shift = float(params.get("ra_shift_seconds", 0.0))
-        dec_shift = float(params.get("dec_shift_degrees", 0.0))
+        ra_shift = _float_param(params, "ra_shift_seconds")
+        dec_shift = _float_param(params, "dec_shift_degrees")
         try:
             composed = extend_rgb_compose(
                 rgb, other, ra_shift_seconds=ra_shift, dec_shift_degrees=dec_shift
@@ -1192,11 +1298,10 @@ class RpcServer:
         if not other_path:
             raise RpcError(ERR_INVALID_PARAMS, "other_path is required")
         secondary = _open_image_path(str(other_path))
-        ra_shift = float(params.get("ra_shift_seconds", 0.0))
-        dec_shift = float(params.get("dec_shift_degrees", 0.0))
-        weight = float(params.get("weight", 0.5))
-        pix = params.get("pix")
-        pix_int = int(pix) if pix is not None else None
+        ra_shift = _float_param(params, "ra_shift_seconds")
+        dec_shift = _float_param(params, "dec_shift_degrees")
+        weight = _float_param(params, "weight", 0.5)
+        pix_int = _optional_int_param(params, "pix")
         try:
             composed = superimpose_images(
                 primary,
@@ -1221,8 +1326,7 @@ class RpcServer:
         if not isinstance(other_paths, list) or not other_paths:
             raise RpcError(ERR_INVALID_PARAMS, "other_paths (non-empty list) is required")
         others = [_open_image_path(str(p)) for p in other_paths]
-        pix = params.get("pix")
-        pix_int = int(pix) if pix is not None else None
+        pix_int = _optional_int_param(params, "pix")
         try:
             composed = superimpose_images_multi(primary, others, pix=pix_int)
         except ValueError as exc:
@@ -1272,14 +1376,14 @@ class RpcServer:
             "terminal_cal_samples": int(ws.terminal.cal_on.flux.shape[0] + ws.terminal.cal_off.flux.shape[0]),
             "initial_kept": int(int(ws.initial.cal_on_mask.sum()) + int(ws.initial.cal_off_mask.sum())),
             "terminal_kept": int(int(ws.terminal.cal_on_mask.sum()) + int(ws.terminal.cal_off_mask.sum())),
-            "cal1": float(ws.cal1()),
-            "cal2": float(ws.cal2()),
+            "cal1": _json_float(ws.cal1()),
+            "cal2": _json_float(ws.cal2()),
             "calibrated": bool(ws.calibrated),
             "initial_enabled": bool(ws.initial_enabled),
             "terminal_enabled": bool(ws.terminal_enabled),
             "can_undo": bool(ws.undo_stack),
             "flux_calibrated": bool(ws.flux_calibrated),
-            "flux_slope": float(ws.flux_slope) if ws.flux_slope is not None else None,
+            "flux_slope": _json_float(ws.flux_slope) if ws.flux_slope is not None else None,
         }
 
     def _get_workspace_overview(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1318,9 +1422,9 @@ class RpcServer:
         max_points = int(params.get("max_points", 4000))
         ra, dec, flux_d = _maybe_downsample(raw.ra, dec, flux, max_points)
         return {
-            "ra": ra.tolist(),
-            "dec": dec.tolist(),
-            "flux": flux_d.tolist(),
+            "ra": _array_to_jsonable_list(ra),
+            "dec": _array_to_jsonable_list(dec),
+            "flux": _array_to_jsonable_list(flux_d),
             "sample_count": int(raw.flux.shape[0]),
             "returned_count": int(flux_d.shape[0]),
             "index": index,
@@ -1360,7 +1464,7 @@ class RpcServer:
                 ra = ra[idx]
                 dec = dec[idx]
             sweeps.append(
-                {"index": index, "ra": ra.tolist(), "dec": dec.tolist()}
+                {"index": index, "ra": _array_to_jsonable_list(ra), "dec": _array_to_jsonable_list(dec)}
             )
         return {"sweeps": sweeps, "source_count": int(ws.source_count)}
 
@@ -1408,15 +1512,15 @@ class RpcServer:
             return {
                 "label": bracket_label,
                 "on": {
-                    "ra": on.ra.tolist(),
-                    "dec": on.dec.tolist(),
-                    "flux": on.flux.tolist(),
+                    "ra": _array_to_jsonable_list(on.ra),
+                    "dec": _array_to_jsonable_list(on.dec),
+                    "flux": _array_to_jsonable_list(on.flux),
                     "mask": on_mask.astype(bool).tolist(),
                 },
                 "off": {
-                    "ra": off.ra.tolist(),
-                    "dec": off.dec.tolist(),
-                    "flux": off.flux.tolist(),
+                    "ra": _array_to_jsonable_list(off.ra),
+                    "dec": _array_to_jsonable_list(off.dec),
+                    "flux": _array_to_jsonable_list(off.flux),
                     "mask": off_mask.astype(bool).tolist(),
                 },
             }
@@ -1437,8 +1541,8 @@ class RpcServer:
                 ws.terminal.cal_on_mask,
                 ws.terminal.cal_off_mask,
             ),
-            "cal1": float(ws.cal1()),
-            "cal2": float(ws.cal2()),
+            "cal1": _json_float(ws.cal1()),
+            "cal2": _json_float(ws.cal2()),
             "initial_enabled": bool(ws.initial_enabled),
             "terminal_enabled": bool(ws.terminal_enabled),
             "can_undo": bool(ws.undo_stack),
@@ -1499,10 +1603,7 @@ class RpcServer:
         # the .srv `label2` on save, so changing it here is enough to persist
         # across save → close → reopen.
         ws = self._resolve_workspace(int(params.get("handle", -1)))
-        name = params.get("name")
-        if not isinstance(name, str):
-            raise RpcError(ERR_INVALID_PARAMS, "name must be a string")
-        ws.name = name
+        ws.name = _validate_vb_name(params.get("name"))
         return self._workspace_overview(ws)
 
     # ─────────────────────────────────────────────────────────────────────
@@ -1531,15 +1632,15 @@ class RpcServer:
             "terminal_cal_samples": int(ws.terminal.on_flux.shape[0] + ws.terminal.off_flux.shape[0]),
             "initial_kept": int(int(ws.initial.on_mask.sum()) + int(ws.initial.off_mask.sum())),
             "terminal_kept": int(int(ws.terminal.on_mask.sum()) + int(ws.terminal.off_mask.sum())),
-            "cal1": float(ws.cal1()),
-            "cal2": float(ws.cal2()),
+            "cal1": _json_float(ws.cal1()),
+            "cal2": _json_float(ws.cal2()),
             "calibrated": bool(ws.calibrated),
             "initial_enabled": bool(ws.initial_enabled),
             "terminal_enabled": bool(ws.terminal_enabled),
             "can_undo": bool(ws.undo_stack),
-            "peak_flux": float(ws.peak_flux) if ws.peak_flux is not None else None,
+            "peak_flux": _json_float(ws.peak_flux) if ws.peak_flux is not None else None,
             "flux_calibrated": bool(ws.flux_calibrated),
-            "flux_slope": float(ws.flux_slope) if ws.flux_slope is not None else None,
+            "flux_slope": _json_float(ws.flux_slope) if ws.flux_slope is not None else None,
         }
 
     def _open_scan(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1600,12 +1701,12 @@ class RpcServer:
                 "calibrated": True,
                 "unit": "jy" if ws.flux_calibrated else "gain",
                 "source": {
-                    "ra": ws.source_ra.tolist(),
-                    "dec": ws.source_dec.tolist(),
-                    "flux": flux.tolist(),
+                    "ra": _array_to_jsonable_list(ws.source_ra),
+                    "dec": _array_to_jsonable_list(ws.source_dec),
+                    "flux": _array_to_jsonable_list(flux),
                     "mask": ws.source_mask.astype(bool).tolist(),
                 },
-                "peak_flux": float(ws.peak_flux) if ws.peak_flux is not None else None,
+                "peak_flux": _json_float(ws.peak_flux) if ws.peak_flux is not None else None,
             }
         # Pre-cal: serve initial cal, source, terminal cal as three contiguous
         # blocks so the front-end can paint vertical separator lines at the
@@ -1615,33 +1716,33 @@ class RpcServer:
             "calibrated": False,
             "unit": "volts",
             "initial_on": {
-                "ra": ws.initial.on_ra.tolist(),
-                "dec": ws.initial.on_dec.tolist(),
-                "flux": ws.initial.on_flux.tolist(),
+                "ra": _array_to_jsonable_list(ws.initial.on_ra),
+                "dec": _array_to_jsonable_list(ws.initial.on_dec),
+                "flux": _array_to_jsonable_list(ws.initial.on_flux),
                 "mask": ws.initial.on_mask.astype(bool).tolist(),
             },
             "initial_off": {
-                "ra": ws.initial.off_ra.tolist(),
-                "dec": ws.initial.off_dec.tolist(),
-                "flux": ws.initial.off_flux.tolist(),
+                "ra": _array_to_jsonable_list(ws.initial.off_ra),
+                "dec": _array_to_jsonable_list(ws.initial.off_dec),
+                "flux": _array_to_jsonable_list(ws.initial.off_flux),
                 "mask": ws.initial.off_mask.astype(bool).tolist(),
             },
             "source": {
-                "ra": ws.source_ra.tolist(),
-                "dec": ws.source_dec.tolist(),
-                "flux": ws.source_flux.tolist(),
+                "ra": _array_to_jsonable_list(ws.source_ra),
+                "dec": _array_to_jsonable_list(ws.source_dec),
+                "flux": _array_to_jsonable_list(ws.source_flux),
                 "mask": ws.source_mask.astype(bool).tolist(),
             },
             "terminal_on": {
-                "ra": ws.terminal.on_ra.tolist(),
-                "dec": ws.terminal.on_dec.tolist(),
-                "flux": ws.terminal.on_flux.tolist(),
+                "ra": _array_to_jsonable_list(ws.terminal.on_ra),
+                "dec": _array_to_jsonable_list(ws.terminal.on_dec),
+                "flux": _array_to_jsonable_list(ws.terminal.on_flux),
                 "mask": ws.terminal.on_mask.astype(bool).tolist(),
             },
             "terminal_off": {
-                "ra": ws.terminal.off_ra.tolist(),
-                "dec": ws.terminal.off_dec.tolist(),
-                "flux": ws.terminal.off_flux.tolist(),
+                "ra": _array_to_jsonable_list(ws.terminal.off_ra),
+                "dec": _array_to_jsonable_list(ws.terminal.off_dec),
+                "flux": _array_to_jsonable_list(ws.terminal.off_flux),
                 "mask": ws.terminal.off_mask.astype(bool).tolist(),
             },
         }
@@ -1654,15 +1755,15 @@ class RpcServer:
             return {
                 "label": label,
                 "on": {
-                    "ra": br.on_ra.tolist(),
-                    "dec": br.on_dec.tolist(),
-                    "flux": br.on_flux.tolist(),
+                    "ra": _array_to_jsonable_list(br.on_ra),
+                    "dec": _array_to_jsonable_list(br.on_dec),
+                    "flux": _array_to_jsonable_list(br.on_flux),
                     "mask": br.on_mask.astype(bool).tolist(),
                 },
                 "off": {
-                    "ra": br.off_ra.tolist(),
-                    "dec": br.off_dec.tolist(),
-                    "flux": br.off_flux.tolist(),
+                    "ra": _array_to_jsonable_list(br.off_ra),
+                    "dec": _array_to_jsonable_list(br.off_dec),
+                    "flux": _array_to_jsonable_list(br.off_flux),
                     "mask": br.off_mask.astype(bool).tolist(),
                 },
             }
@@ -1671,8 +1772,8 @@ class RpcServer:
             "name": ws.name,
             "initial": bracket("initial", ws.initial),
             "terminal": bracket("terminal", ws.terminal),
-            "cal1": float(ws.cal1()),
-            "cal2": float(ws.cal2()),
+            "cal1": _json_float(ws.cal1()),
+            "cal2": _json_float(ws.cal2()),
             "initial_enabled": bool(ws.initial_enabled),
             "terminal_enabled": bool(ws.terminal_enabled),
             "can_undo": bool(ws.undo_stack),
@@ -1729,10 +1830,7 @@ class RpcServer:
         # serialises this name into the .scn file's `Scan.name`, which is what
         # `scan_from_scn` reads back on reopen.
         ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
-        name = params.get("name")
-        if not isinstance(name, str):
-            raise RpcError(ERR_INVALID_PARAMS, "name must be a string")
-        ws.name = name
+        ws.name = _validate_vb_name(params.get("name"))
         return self._scan_overview(ws)
 
     def _select_scan_declination(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1803,7 +1901,7 @@ class RpcServer:
         if not ws.calibrated:
             raise RpcError(ERR_INVALID_PARAMS, "scan must be calibrated before determining peak")
         peak = determine_peak(ws, flux_y)
-        return {"peak_flux": float(peak), "overview": self._scan_overview(ws)}
+        return {"peak_flux": _json_float(peak), "overview": self._scan_overview(ws)}
 
     def _determine_scan_peak_fit(self, params: dict[str, Any]) -> dict[str, Any]:
         ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
@@ -1825,10 +1923,10 @@ class RpcServer:
         except ValueError as exc:
             raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
         return {
-            "peak_flux": float(peak_flux),
+            "peak_flux": _json_float(peak_flux),
             "peak_ra": float(peak_ra),
-            "fit_ra": [float(x) for x in ra_grid],
-            "fit_flux": [float(x) for x in flux_grid],
+            "fit_ra": [_json_float(x) for x in ra_grid],
+            "fit_flux": [_json_float(x) for x in flux_grid],
             "overview": self._scan_overview(ws),
         }
 
@@ -1850,10 +1948,10 @@ class RpcServer:
         except ValueError as exc:
             raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
         return {
-            "peak_flux": float(peak_flux),
+            "peak_flux": _json_float(peak_flux),
             "peak_ra": float(peak_ra),
-            "fit_ra": [float(x) for x in ra_grid],
-            "fit_flux": [float(x) for x in flux_grid],
+            "fit_ra": [_json_float(x) for x in ra_grid],
+            "fit_flux": [_json_float(x) for x in flux_grid],
             "overview": self._scan_overview(ws),
         }
 
@@ -1875,10 +1973,10 @@ class RpcServer:
         except ValueError as exc:
             raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
         return {
-            "peak_flux": float(peak_flux),
+            "peak_flux": _json_float(peak_flux),
             "peak_ra": float(peak_ra),
-            "fit_ra": [float(x) for x in ra_grid],
-            "fit_flux": [float(x) for x in flux_grid],
+            "fit_ra": [_json_float(x) for x in ra_grid],
+            "fit_flux": [_json_float(x) for x in flux_grid],
             "overview": self._scan_overview(ws),
         }
 
@@ -1900,10 +1998,10 @@ class RpcServer:
         except ValueError as exc:
             raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
         return {
-            "peak_flux": float(peak_flux),
+            "peak_flux": _json_float(peak_flux),
             "peak_ra": float(peak_ra),
-            "fit_ra": [float(x) for x in ra_grid],
-            "fit_flux": [float(x) for x in flux_grid],
+            "fit_ra": [_json_float(x) for x in ra_grid],
+            "fit_flux": [_json_float(x) for x in flux_grid],
             "overview": self._scan_overview(ws),
         }
 
@@ -2031,8 +2129,8 @@ class RpcServer:
         return {
             "path": str(path),
             "table": self._serialize_cal_table(table),
-            "slope": float(fit_counts_to_jy(table)),
-            "error": float(fit_error(table)),
+            "slope": _json_float(fit_counts_to_jy(table)),
+            "error": _json_float(fit_error(table)),
         }
 
     def _flux_cal_write_file(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2052,16 +2150,16 @@ class RpcServer:
             "path": str(path),
             "bytes_written": path.stat().st_size,
             "table": self._serialize_cal_table(table),
-            "slope": float(fit_counts_to_jy(table)),
-            "error": float(fit_error(table)),
+            "slope": _json_float(fit_counts_to_jy(table)),
+            "error": _json_float(fit_error(table)),
         }
 
     def _flux_cal_fit(self, params: dict[str, Any]) -> dict[str, Any]:
         caption = str(params.get("caption", ""))
         table = self._build_cal_table_from_params(caption, params.get("entries", []))
         return {
-            "slope": float(fit_counts_to_jy(table)),
-            "error": float(fit_error(table)),
+            "slope": _json_float(fit_counts_to_jy(table)),
+            "error": _json_float(fit_error(table)),
             "table": self._serialize_cal_table(table),
         }
 
@@ -2075,7 +2173,7 @@ class RpcServer:
             raise RpcError(ERR_IO, f"failed to read scan: {exc}") from exc
         return {
             "name": name,
-            "peak_flux": float(peak),
+            "peak_flux": _json_float(peak),
             "default_known_jy": float(default_known_jy(name)),
         }
 
@@ -2151,8 +2249,28 @@ def serve(stdin: Any = sys.stdin, stdout: Any = sys.stdout) -> int:
     for line in stdin:
         if not line.strip():
             continue
-        req = json.loads(line)
-        resp = server.handle_request(req)
+        # PROTOCOL.md: the sidecar must return structured errors and keep
+        # serving. A garbled line must not take down every open handle.
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError as err:
+            resp = {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": ERR_PARSE, "message": f"parse error: {err}"},
+            }
+        else:
+            if isinstance(req, dict):
+                resp = server.handle_request(req)
+            else:
+                resp = {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {
+                        "code": ERR_INVALID_REQUEST,
+                        "message": "request must be a JSON object",
+                    },
+                }
         stdout.write(json.dumps(resp) + "\n")
         stdout.flush()
         if server._shutdown:

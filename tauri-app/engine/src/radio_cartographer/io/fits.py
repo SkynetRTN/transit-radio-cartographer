@@ -10,6 +10,13 @@ saved survey image can be opened in DS9/aladin/etc. Convention:
   RA decreases with column — matches `make_image`'s grid orientation).
 - Extra `RC_NAME` / `RC_PIX` cards carry the legacy fields so a round-trip via
   FITS preserves the image name and pixel resolution.
+
+Unit boundary: the app stores RA internally in SECONDS OF TIME (240 s/deg —
+see image._SEC_PER_DEG_RA), but the FITS standard defines the RA axis of a
+`RA---TAN` WCS in DEGREES. The RA-axis quantities (CRVAL1, CDELT1, and the
+derived bounds) are therefore divided by 240 on write and multiplied by 240
+on read, so exported files are standard-compliant (DS9/aladin read them
+correctly) and externally-produced FITS land in the internal convention.
 """
 
 from __future__ import annotations
@@ -20,6 +27,9 @@ import numpy as np
 from astropy.io import fits
 
 from ..image import GriddedImage, WCSMetadata
+
+# RA seconds-of-time per degree (15°/hour). Mirrors image._SEC_PER_DEG_RA.
+_SEC_PER_DEG_RA = 240.0
 
 
 def read_fits(path: str | Path) -> GriddedImage:
@@ -95,21 +105,22 @@ def read_fits(path: str | Path) -> GriddedImage:
             f"(expected within [-90, 90])"
         )
 
+    # Header RA is degrees (FITS standard); the app works in seconds of time.
     wcs = WCSMetadata(
         ctype1=ctype1,
         ctype2=ctype2,
-        crval1=crval1,
+        crval1=crval1 * _SEC_PER_DEG_RA,
         crval2=crval2,
         crpix1=crpix1,
         crpix2=crpix2,
-        cdelt1=cdelt1,
+        cdelt1=cdelt1 * _SEC_PER_DEG_RA,
         cdelt2=cdelt2,
     )
     return GriddedImage(
         pixels=data,
         wcs=wcs,
-        min_ra=min_ra,
-        max_ra=max_ra,
+        min_ra=min_ra * _SEC_PER_DEG_RA,
+        max_ra=max_ra * _SEC_PER_DEG_RA,
         min_dec=min_dec,
         max_dec=max_dec,
     )
@@ -120,11 +131,12 @@ def write_fits(image: GriddedImage, path: str | Path, *, name: str | None = None
     h = hdu.header
     h["CTYPE1"] = image.wcs.ctype1
     h["CTYPE2"] = image.wcs.ctype2
-    h["CRVAL1"] = image.wcs.crval1
+    # Internal RA is seconds of time; the FITS RA axis is degrees.
+    h["CRVAL1"] = image.wcs.crval1 / _SEC_PER_DEG_RA
     h["CRVAL2"] = image.wcs.crval2
     h["CRPIX1"] = image.wcs.crpix1
     h["CRPIX2"] = image.wcs.crpix2
-    h["CDELT1"] = image.wcs.cdelt1
+    h["CDELT1"] = image.wcs.cdelt1 / _SEC_PER_DEG_RA
     h["CDELT2"] = image.wcs.cdelt2
     h["BUNIT"] = "FLUX"
     if name is not None:

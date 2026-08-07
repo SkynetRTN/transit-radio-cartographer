@@ -148,6 +148,11 @@ class RgbGriddedImage:
     max_ra: float
     min_dec: float
     max_dec: float
+    # Which channel carries no input ("r"/"g"/"b"), or None when all three are
+    # populated. Recorded at compose time because it cannot be reliably
+    # inferred from pixel values: a populated channel whose input is flat
+    # normalizes to all-zeros, indistinguishable from the bi-color filler.
+    unused_channel: str | None = None
 
 
 def make_image(
@@ -155,36 +160,47 @@ def make_image(
     pixel_deg: float = DEFAULT_PIXEL_DEG,
     width: int | None = None,
     height: int | None = None,
+    fill: str = "interpolate",
 ) -> GriddedImage:
-    """Build a (height, width) flux grid filled between adjacent sweeps.
+    """Build a (height, width) flux grid from a survey's sweeps.
 
-    The legacy app (vb/survform.frm:1651-1799) does not just bin samples — it
-    walks the region *between* adjacent sweeps and paints each cell with a
-    linearly-interpolated flux. That produces the filled "sweep map" seen in
-    the legacy pre-image screenshots, where cells inside the swept region
-    take on a color rather than rendering as black background. We mirror
-    that with three passes:
+    Two fill modes, mirroring the legacy app's two screens:
 
-    1. Paint each sample's cell at the sample's flux.
-    2. For every adjacent pair of sweeps, step finely through the
-       overlapping declination range. At each step interpolate to find each
-       sweep's (RA, flux) at that Dec, then paint a horizontal segment
-       between the two sweeps' RA columns with linearly-interpolated flux.
-    3. Average where multiple strip-fills cover the same cell.
+    - "interpolate" (default) — the legacy Make Image routine
+      (vb/survform.frm:1651-1799). It does not just bin samples — it walks
+      the region *between* adjacent sweeps and paints each cell with a
+      linearly-interpolated flux, producing the smooth filled map. Three
+      passes:
 
-    Cells outside any swept region are NaN ("no coverage") so they render
-    as the background rather than as zero flux — BUG-016 (dan): the ragged
-    edges of the sweep bars used to sit at 0.0 and painted black at the
-    palette's anchor=0 stop. Downstream consumers already treat NaN as
-    no-data (JSON null → transparent in the plot, white in raster export,
-    Clr=0 sentinel in .img, blank in FITS). The grid is sized so each cell
-    spans a fixed `pixel_deg` on-sky (default 1/20 of the beam) via
-    `grid_dims`; explicit width/height overrides exist for tests and the
-    FITS exporter.
+      1. Paint each sample's cell at the sample's flux.
+      2. For every adjacent pair of sweeps, step finely through the
+         overlapping declination range. At each step interpolate to find
+         each sweep's (RA, flux) at that Dec, then paint a horizontal
+         segment between the two sweeps' RA columns with
+         linearly-interpolated flux.
+      3. Average where multiple strip-fills cover the same cell.
+
+    - "bars" — the legacy Pre-Image draw (vb/survform.frm:905-979). No
+      inter-sweep interpolation: each sample paints one constant-flux
+      horizontal bar at its declination, spanning the RA strip between the
+      midpoints with the adjacent sweeps (edge sweeps extend to the survey
+      bounds). This is the banded look of the legacy pre-image screen —
+      interpolation only happens when the user commits Make Image.
+
+    In "interpolate" mode cells outside any swept region remain 0 and render
+    at the palette's anchor=0 stop (black); in "bars" mode they are NaN
+    ("no data" — serialized as null and rendered as blank sky, BUG-016 dan:
+    the pre-image bar edges must read as background, not black), so Align
+    Sweeps visibly exposes the uncovered edges in the pre-image viewer.
+    The grid is sized so each cell spans a fixed
+    `pixel_deg` on-sky (default 1/20 of the beam) via `grid_dims`; explicit
+    width/height overrides exist for tests and the FITS exporter.
     """
+    if fill not in ("interpolate", "bars"):
+        raise ValueError(f"fill must be 'interpolate' or 'bars', got {fill!r}")
     sweeps = [s for s in survey.sweeps if s.ra.size > 0]
     if not sweeps:
-        pixels = np.full((height or 1, width or 1), np.nan, dtype=np.float64)
+        pixels = np.zeros((height or 1, width or 1), dtype=np.float64)
         width = pixels.shape[1]
         height = pixels.shape[0]
         wcs = WCSMetadata(
@@ -258,66 +274,121 @@ def make_image(
         r = ((np.asarray(dec, dtype=np.float64) - min_dec) / dec_range) * (height - 1)
         return np.clip(np.rint(r).astype(np.int64), 0, height - 1)
 
-    # 1) Paint sample cells. Each sample contributes its flux to the cell it
-    # falls in; duplicate samples in the same cell average via the counts
-    # accumulator below.
-    for s in sweeps:
-        rows = to_row(s.dec)
-        cols = to_col(s.ra)
-        np.add.at(pixels, (rows, cols), s.flux)
-        np.add.at(counts, (rows, cols), 1)
-
-    # 2) Strip-fill between adjacent sweeps.
-    for i in range(len(sweeps) - 1):
-        s1, s2 = sweeps[i], sweeps[i + 1]
-        if s1.dec.size < 2 or s2.dec.size < 2:
-            continue
-        o1 = np.argsort(s1.dec)
-        o2 = np.argsort(s2.dec)
-        # Unwrap the per-sweep RA arrays before interp — a single sweep that
-        # crosses the wrap point would otherwise interpolate across the
-        # 86400 → 0 jump and emit garbage.
-        dec1, ra1, f1 = s1.dec[o1], unwrap_ra(s1.ra[o1]), s1.flux[o1]
-        dec2, ra2, f2 = s2.dec[o2], unwrap_ra(s2.ra[o2]), s2.flux[o2]
-        dec_lo = max(float(dec1[0]), float(dec2[0]))
-        dec_hi = min(float(dec1[-1]), float(dec2[-1]))
-        if dec_hi <= dec_lo:
-            continue
-        # ~3 dec-steps per output row keeps the strip dense enough that the
-        # fill is continuous after row rounding. Below the legacy's
-        # per-pixel resolution, but visually equivalent at typical pix
-        # values and orders of magnitude faster.
-        n_steps = max(int(np.ceil((dec_hi - dec_lo) / dec_range * height * 3)), 4)
-        dec_steps = np.linspace(dec_lo, dec_hi, n_steps)
-        ra_at_1 = np.interp(dec_steps, dec1, ra1)
-        ra_at_2 = np.interp(dec_steps, dec2, ra2)
-        flux_at_1 = np.interp(dec_steps, dec1, f1)
-        flux_at_2 = np.interp(dec_steps, dec2, f2)
-        rows_k = to_row(dec_steps)
-        col_a_k = to_col(ra_at_1)
-        col_b_k = to_col(ra_at_2)
-        for k in range(n_steps):
-            row = int(rows_k[k])
-            ca, cb = int(col_a_k[k]), int(col_b_k[k])
-            fa, fb = float(flux_at_1[k]), float(flux_at_2[k])
-            if ca > cb:
-                ca, cb = cb, ca
-                fa, fb = fb, fa
-            span = cb - ca
-            if span == 0:
-                pixels[row, ca] += (fa + fb) / 2.0
-                counts[row, ca] += 1
+    if fill == "bars":
+        # Legacy pre-image (vb/survform.frm:905-979): each sample paints a
+        # constant-flux horizontal bar at its declination, spanning the RA
+        # strip between the midpoints with the adjacent sweeps. Edge sweeps
+        # extend to the survey bounds. The legacy uses per-sweep boundary
+        # RAs from the sweep endpoints; the per-sweep mean is equivalent for
+        # drawing constant vertical strips and is robust to scan direction.
+        means = [float(np.mean(unwrap_ra(s.ra))) for s in sweeps]
+        n = len(sweeps)
+        ascending = n == 1 or means[0] <= means[-1]
+        for i, s in enumerate(sweeps):
+            if i == 0:
+                edge_a = min_ra if ascending else max_ra
             else:
-                cols = np.arange(ca, cb + 1)
-                t = (cols - ca) / span
-                pixels[row, cols] += fa + t * (fb - fa)
-                counts[row, cols] += 1
+                edge_a = (means[i - 1] + means[i]) / 2.0
+            if i == n - 1:
+                edge_b = max_ra if ascending else min_ra
+            else:
+                edge_b = (means[i] + means[i + 1]) / 2.0
+            ca, cb = (int(c) for c in to_col(np.array([edge_a, edge_b])))
+            c_lo, c_hi = (ca, cb) if ca <= cb else (cb, ca)
+            # Each sample owns the band of rows out to the dec midpoints with
+            # its neighbouring samples (nearest-sample fill). The legacy drew
+            # every bar a fixed 30 twips tall on its fixed-size canvas, which
+            # overlapped adjacent samples' bars — painting only the sample's
+            # own row here would leave zero-flux gaps whenever the sweep's
+            # dec spacing is coarser than a grid row.
+            order = np.argsort(s.dec)
+            dec_s = s.dec[order]
+            flux_s = s.flux[order]
+            m = dec_s.size
+            lo_edges = np.empty(m, dtype=np.float64)
+            hi_edges = np.empty(m, dtype=np.float64)
+            lo_edges[0] = dec_s[0]
+            lo_edges[1:] = (dec_s[:-1] + dec_s[1:]) / 2.0
+            hi_edges[:-1] = lo_edges[1:]
+            hi_edges[-1] = dec_s[-1]
+            r_lo = to_row(lo_edges)
+            r_hi = to_row(hi_edges)
+            # Adjacent bands and strips share their boundary row/column; the
+            # accumulator averages there (the legacy let the later draw
+            # overwrite — visually indistinguishable at one cell wide).
+            for j in range(m):
+                a, b = int(r_lo[j]), int(r_hi[j])
+                if a > b:
+                    a, b = b, a
+                pixels[a : b + 1, c_lo : c_hi + 1] += flux_s[j]
+                counts[a : b + 1, c_lo : c_hi + 1] += 1
+    else:
+        # 1) Paint sample cells. Each sample contributes its flux to the cell
+        # it falls in; duplicate samples in the same cell average via the
+        # counts accumulator below.
+        for s in sweeps:
+            rows = to_row(s.dec)
+            cols = to_col(s.ra)
+            np.add.at(pixels, (rows, cols), s.flux)
+            np.add.at(counts, (rows, cols), 1)
+
+        # 2) Strip-fill between adjacent sweeps.
+        for i in range(len(sweeps) - 1):
+            s1, s2 = sweeps[i], sweeps[i + 1]
+            if s1.dec.size < 2 or s2.dec.size < 2:
+                continue
+            o1 = np.argsort(s1.dec)
+            o2 = np.argsort(s2.dec)
+            # Unwrap the per-sweep RA arrays before interp — a single sweep
+            # that crosses the wrap point would otherwise interpolate across
+            # the 86400 → 0 jump and emit garbage.
+            dec1, ra1, f1 = s1.dec[o1], unwrap_ra(s1.ra[o1]), s1.flux[o1]
+            dec2, ra2, f2 = s2.dec[o2], unwrap_ra(s2.ra[o2]), s2.flux[o2]
+            dec_lo = max(float(dec1[0]), float(dec2[0]))
+            dec_hi = min(float(dec1[-1]), float(dec2[-1]))
+            if dec_hi <= dec_lo:
+                continue
+            # ~3 dec-steps per output row keeps the strip dense enough that
+            # the fill is continuous after row rounding. Below the legacy's
+            # per-pixel resolution, but visually equivalent at typical pix
+            # values and orders of magnitude faster.
+            n_steps = max(int(np.ceil((dec_hi - dec_lo) / dec_range * height * 3)), 4)
+            dec_steps = np.linspace(dec_lo, dec_hi, n_steps)
+            ra_at_1 = np.interp(dec_steps, dec1, ra1)
+            ra_at_2 = np.interp(dec_steps, dec2, ra2)
+            flux_at_1 = np.interp(dec_steps, dec1, f1)
+            flux_at_2 = np.interp(dec_steps, dec2, f2)
+            rows_k = to_row(dec_steps)
+            col_a_k = to_col(ra_at_1)
+            col_b_k = to_col(ra_at_2)
+            for k in range(n_steps):
+                row = int(rows_k[k])
+                ca, cb = int(col_a_k[k]), int(col_b_k[k])
+                fa, fb = float(flux_at_1[k]), float(flux_at_2[k])
+                if ca > cb:
+                    ca, cb = cb, ca
+                    fa, fb = fb, fa
+                span = cb - ca
+                if span == 0:
+                    pixels[row, ca] += (fa + fb) / 2.0
+                    counts[row, ca] += 1
+                else:
+                    cols = np.arange(ca, cb + 1)
+                    t = (cols - ca) / span
+                    pixels[row, cols] += fa + t * (fb - fa)
+                    counts[row, cols] += 1
 
     np.divide(pixels, counts, out=pixels, where=counts > 0)
-    # BUG-016 (dan): cells no strip-fill ever touched are "no coverage", not
-    # zero flux — mark them NaN so the bar edges render as background instead
-    # of black.
-    pixels[counts == 0] = np.nan
+
+    if fill == "bars":
+        # Uncovered cells are "no data", not zero flux — zero is a legitimate
+        # value after baseline subtraction. NaN serializes to `null` over RPC
+        # and Plotly leaves those cells transparent, so the pre-image
+        # background reads as blank sky. Visible after Align Sweeps shifts
+        # sweeps in dec and exposes the grid edges. The committed image
+        # (interpolate mode) keeps 0 so save/append/palette behavior is
+        # unchanged.
+        pixels[counts == 0] = np.nan
 
     cdelt1 = -ra_range / max(width - 1, 1)
     cdelt2 = dec_range / max(height - 1, 1)

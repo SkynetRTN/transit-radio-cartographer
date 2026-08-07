@@ -323,6 +323,13 @@ def apply_scan_calibration(workspace: ScanWorkspace) -> None:
         cal1 = cal2
     if not workspace.terminal_enabled:
         cal2 = cal1
+    # See workspace.apply_gain_calibration: opposite-sign endpoints mean the
+    # interpolation crosses zero and some sample divides by ~0.
+    if cal1 * cal2 < 0.0:
+        raise ValueError(
+            "Cal1 and Cal2 have opposite signs — the interpolated cal voltage "
+            "crosses zero mid-scan; re-check the cal bracket cuts"
+        )
     if workspace.source_count == 0:
         raise ValueError("no source samples to calibrate")
     if workspace.source_count == 1:
@@ -333,8 +340,15 @@ def apply_scan_calibration(workspace: ScanWorkspace) -> None:
         if span == 0.0:
             cal = np.full(workspace.source_count, cal1, dtype=np.float64)
         else:
+            # Non-monotonic RA can push t outside [0, 1], where even same-sign
+            # endpoints extrapolate through zero.
             t = (ra - ra[0]) / span
             cal = (1.0 - t) * cal1 + t * cal2
+    if np.any(cal == 0.0):
+        raise ValueError(
+            "interpolated cal voltage is zero at one or more samples — "
+            "re-check the cal bracket cuts"
+        )
     workspace.calibrated_source_flux = workspace.source_flux / cal
     # A fresh calibration drops any prior reductions/peak and any previously-
     # applied flux scaling — the caller can re-apply the slope.
@@ -831,7 +845,11 @@ def workspace_to_scan(workspace: ScanWorkspace) -> Scan:
     )
 
 
-_PEAK_RE = re.compile(r"Peak Flux:\s*(-?\d+(?:\.\d+)?)", re.IGNORECASE)
+# VB's Format$(x, "#.###") omits the leading zero for |x| < 1, so legacy
+# files carry "Peak Flux: .456" / "Peak Flux: -.456" — the integer part must
+# be optional or sub-unity peaks parse to None and get destroyed on the next
+# save (bug #37).
+_PEAK_RE = re.compile(r"Peak Flux:\s*(-?(?:\d+(?:\.\d+)?|\.\d+))", re.IGNORECASE)
 
 
 def _parse_scn_peak(peak: str) -> float | None:
