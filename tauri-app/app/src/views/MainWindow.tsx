@@ -1630,7 +1630,9 @@ export function MainWindow() {
               <button
                 role="menuitem"
                 disabled={!hasSurvey || !workspace?.calibrated || !hasSurveySavePath}
-                title={
+                // BUG-003 (dan): data-tooltip renders via CSS — native `title`
+                // never shows on disabled buttons in the embedded webview.
+                data-tooltip={
                   hasSurvey && !workspace?.calibrated
                     ? 'Must calibrate before saving as .srv'
                     : undefined
@@ -1642,7 +1644,7 @@ export function MainWindow() {
               <button
                 role="menuitem"
                 disabled={!hasSurvey || !workspace?.calibrated}
-                title={
+                data-tooltip={
                   hasSurvey && !workspace?.calibrated
                     ? 'Must calibrate before saving as .srv'
                     : undefined
@@ -1686,7 +1688,7 @@ export function MainWindow() {
               <button
                 role="menuitem"
                 disabled={!hasScan || !scanOverview?.calibrated || !hasScanSavePath}
-                title={
+                data-tooltip={
                   hasScan && !scanOverview?.calibrated
                     ? 'Must calibrate before saving as .scn'
                     : undefined
@@ -1698,7 +1700,7 @@ export function MainWindow() {
               <button
                 role="menuitem"
                 disabled={!hasScan || !scanOverview?.calibrated}
-                title={
+                data-tooltip={
                   hasScan && !scanOverview?.calibrated
                     ? 'Must calibrate before saving as .scn'
                     : undefined
@@ -1711,11 +1713,12 @@ export function MainWindow() {
               <button
                 role="menuitem"
                 disabled={!hasScan || !scanOverview?.calibrated}
-                title={
+                data-tooltip={
                   hasScan && !scanOverview?.calibrated
                     ? 'Calibrate the scan before appending scans'
-                    : 'Add another .scn’s samples onto the current scan plot'
+                    : undefined
                 }
+                title="Add another .scn’s samples onto the current scan plot"
                 onClick={() => void handleAppendScan()}
               >
                 Append Scan…

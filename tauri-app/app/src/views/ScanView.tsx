@@ -628,7 +628,9 @@ export function ScanView() {
             <div className="side-buttons">
               <button
                 onClick={() => setViewMode('calibrate-scan')}
-                className="primary"
+                // BUG-008 (dan): blue (primary) only until the first
+                // calibration — after that it grays like the other buttons.
+                className={calibrated ? undefined : 'primary'}
                 title="Open the cut-segment / select-declination view for the cal brackets"
               >
                 {calibrated ? 'Re-Calibrate Scan' : 'Calibrate Scan'}
