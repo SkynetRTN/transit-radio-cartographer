@@ -135,6 +135,7 @@ const overviewCalibrated: ScanOverview = { ...overviewRaw, calibrated: true };
 vi.mock('../lib/plots/PointScatter', () => ({
   PointScatter: (props: {
     testId?: string;
+    fixedYRange?: [number, number];
     highlightPoint?: { x: number; y: number; color?: string } | null;
     onPointClick?: (p: { x: number; y: number; ra: number; dec: number; flux: number }) => void;
     onEmptyClick?: () => void;
@@ -150,6 +151,7 @@ vi.mock('../lib/plots/PointScatter', () => ({
         data-testid={id}
         data-highlight-x={props.highlightPoint?.x ?? ''}
         data-highlight-y={props.highlightPoint?.y ?? ''}
+        data-y-range={props.fixedYRange ? props.fixedYRange.join(',') : ''}
       >
         <button
           data-testid={`${id}-point-a`}
@@ -633,6 +635,75 @@ test('Switching tools deselects the previous one (FEAT-002)', async () => {
   // Cut Segment label snaps back to its idle form, Select Declination is now armed.
   expect(screen.getByText('Cut Segment')).toBeInTheDocument();
   expect(screen.getByText(/Select Declination \(drag/)).toBeInTheDocument();
+});
+
+test('Rescale fits the flux y-axis to kept samples only and toggles back', async () => {
+  // A cut RFI spike (flux 100, masked out) that would dominate autoscale.
+  const spikedView = {
+    name: 'CAS0A',
+    calibrated: true,
+    unit: 'gain',
+    source: { ra: [5, 6, 7], dec: [10, 11, 12], flux: [3, 4, 100], mask: [true, true, false] },
+    peak_flux: null,
+  };
+  // Reset drops any view responses still queued by earlier tests, then makes
+  // every load (mount + reloads) return the spiked view.
+  const getView = rpcClient.getScanView as unknown as ReturnType<typeof vi.fn>;
+  getView.mockReset();
+  getView.mockResolvedValue(spikedView);
+  (rpcClient.getScanOverview as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+    overviewCalibrated,
+  );
+  await act(async () => {
+    render(
+      <ScanProvider>
+        <HydrateScan meta={{ ...baseMeta, overview: overviewCalibrated }} />
+        <ScanView />
+      </ScanProvider>,
+    );
+  });
+  await waitFor(() => expect(screen.getByText('Rescale')).toBeInTheDocument());
+  const yRange = () => {
+    const attr = screen.getByTestId('scan-flux-plot').getAttribute('data-y-range');
+    return attr ? attr.split(',').map(Number) : null;
+  };
+  // Autoscale (no fixed range) until the toggle is armed.
+  expect(yRange()).toBeNull();
+  fireEvent.click(screen.getByText('Rescale'));
+  // Kept fluxes are [3, 4] → pad = max((4-3)*0.15, 0.001) = 0.15 → [2.85, 4.15].
+  await waitFor(() => {
+    const r = yRange();
+    expect(r).not.toBeNull();
+    expect(r![0]).toBeCloseTo(2.85);
+    expect(r![1]).toBeCloseTo(4.15);
+  });
+  fireEvent.click(screen.getByText('Rescale'));
+  await waitFor(() => expect(yRange()).toBeNull());
+});
+
+test('Rescale is disabled until the scan is calibrated', async () => {
+  const getView = rpcClient.getScanView as unknown as ReturnType<typeof vi.fn>;
+  getView.mockReset();
+  getView.mockResolvedValue({
+    name: 'CAS0A',
+    calibrated: false,
+    unit: 'volts',
+    initial_on: { ra: [1, 2], dec: [10, 10], flux: [2, 2], mask: [true, true] },
+    initial_off: { ra: [3, 4], dec: [10, 10], flux: [1, 1], mask: [true, true] },
+    source: { ra: [5, 6, 7], dec: [10, 11, 12], flux: [3, 4, 5], mask: [true, true, true] },
+    terminal_on: { ra: [8, 9], dec: [10, 10], flux: [4, 4], mask: [true, true] },
+    terminal_off: { ra: [10, 11], dec: [10, 10], flux: [1, 1], mask: [true, true] },
+  });
+  await act(async () => {
+    render(
+      <ScanProvider>
+        <HydrateScan meta={baseMeta} />
+        <ScanView />
+      </ScanProvider>,
+    );
+  });
+  await waitFor(() => expect(screen.getByText('Rescale')).toBeInTheDocument());
+  expect(screen.getByText('Rescale')).toBeDisabled();
 });
 
 test('CalibrateScanView Cut Segment stays sticky after a cut (FEAT-002)', async () => {

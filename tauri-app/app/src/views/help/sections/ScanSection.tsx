@@ -113,7 +113,17 @@ export function ScanSection() {
         </figcaption>
       </figure>
 
-      <h4>4b. Select Declination</h4>
+      <h4>4b. Rescale</h4>
+      <p>
+        Cut samples stay on the plot as faded markers, so a strong RFI spike
+        can keep dominating the flux scale even after you cut it.{' '}
+        <strong>Click</strong> <code>Rescale</code> to fit the flux axis to the{' '}
+        <em>kept</em> samples only — the source pops into view. The button stays
+        lit while active and re-fits automatically after each further cut;{' '}
+        <strong>click it again</strong> to return to the full scale.
+      </p>
+
+      <h4>4c. Select Declination</h4>
       <p>
         <strong>Click</strong> <code>Select Declination</code>, then{' '}
         <strong>drag a vertical range</strong> on the Declination plot. Only
@@ -127,7 +137,7 @@ export function ScanSection() {
         </figcaption>
       </figure>
 
-      <h4>4c. Baseline Source</h4>
+      <h4>4d. Baseline Source</h4>
       <p>
         <strong>Click</strong> <code>Baseline Source</code>, then{' '}
         <strong>click two points anywhere</strong> on the Flux plot — the
@@ -145,7 +155,7 @@ export function ScanSection() {
         </figcaption>
       </figure>
 
-      <h4>4d. Determine Peak</h4>
+      <h4>4e. Determine Peak</h4>
       <p>
         <strong>Click</strong> <code>Determine Peak</code>, then{' '}
         <strong>drag a horizontal range over the peak only</strong> on the Flux
@@ -164,7 +174,7 @@ export function ScanSection() {
         </figcaption>
       </figure>
 
-      <h4>4e. Append Scan</h4>
+      <h4>4f. Append Scan</h4>
       <p>
         Once the scan is calibrated you can <code>Scan → Append Scan…</code> to
         pull another <code>.scn</code>'s samples straight onto the current plot.

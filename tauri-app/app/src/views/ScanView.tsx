@@ -58,6 +58,7 @@ export function ScanView() {
   const [hoverPoint, setHoverPoint] = useState<Point | null>(null);
   const [stickyPoint, setStickyPoint] = useState<Point | null>(null);
   const [mode, setMode] = useState<Mode>({ kind: 'idle' });
+  const [rescaled, setRescaled] = useState(false);
   const [dragRange, setDragRange] = useState<{ x0: number; x1: number } | null>(null);
   const [dragDecRange, setDragDecRange] = useState<{ y0: number; y1: number } | null>(null);
   const [pendingBaselinePoint, setPendingBaselinePoint] = useState<
@@ -159,6 +160,7 @@ export function ScanView() {
   useEffect(() => {
     overlayHistoryRef.current = [];
     overlayRestoreRef.current = null;
+    setRescaled(false);
   }, [handle, overview?.flux_calibrated]);
 
   const unit: 'volts' | 'gain' | 'jy' = view?.unit ?? 'volts';
@@ -237,6 +239,21 @@ export function ScanView() {
       { points: make(view.terminal_off.ra, view.terminal_off.dec, view.terminal_off.flux, view.terminal_off.mask), color: dc.seriesSecondary, name: 'terminal-off' },
     ];
   }, [view, dc]);
+
+  // Rescale: fit the flux y-axis to the KEPT source samples only. Cut samples
+  // stay plotted (faded), so Plotly's autoscale keeps stretching to an RFI
+  // spike even after it's been cut — this range excludes them. Recomputed from
+  // the mask on every view reload, so further cuts re-fit while the toggle is
+  // on. Only meaningful post-cal (pre-cal, masked samples aren't drawn at all).
+  const keptFluxRange = useMemo<[number, number] | undefined>(() => {
+    if (!rescaled || !view || !view.calibrated) return undefined;
+    const kept = view.source.flux.filter((_, i) => view.source.mask[i]);
+    if (kept.length === 0) return undefined;
+    const fmin = Math.min(...kept);
+    const fmax = Math.max(...kept);
+    const pad = Math.max((fmax - fmin) * 0.15, 0.001);
+    return [fmin - pad, fmax + pad];
+  }, [rescaled, view]);
 
   // Pre-cal vertical separator lines (legacy `vb/scanform.frm:1385-1396`):
   // at the midpoint between cal-on/off and at each cal/source boundary.
@@ -555,6 +572,7 @@ export function ScanView() {
                     series={fluxSeries}
                     xAxisLabel=""
                     yAxisLabel=""
+                    fixedYRange={keptFluxRange}
                     verticalLines={verticalLines}
                     overlayLines={fluxOverlays}
                     onHover={handleHover}
@@ -695,6 +713,18 @@ export function ScanView() {
                 }
               >
                 {mode.kind === 'cut' ? 'Cut Segment (drag…)' : 'Cut Segment'}
+              </button>
+              <button
+                onClick={() => setRescaled((r) => !r)}
+                className={rescaled ? 'active' : ''}
+                disabled={!calibrated}
+                title={
+                  calibrated
+                    ? 'Fit the flux scale to the kept data only, ignoring cut samples — use after cutting an RFI spike that dominates the scale. Click again to restore the full scale.'
+                    : 'Calibrate the scan first'
+                }
+              >
+                Rescale
               </button>
               <button
                 onClick={() => void handleUndo()}

@@ -50,6 +50,23 @@ def subtract_baseline_envelope(
     and inject ``flux - 1000`` spikes at uncovered samples), and samples no
     line covers — possible only with duplicated maximum dec — keep their
     flux unchanged instead of having 1000 subtracted.
+
+    For speed the two VB inner loops are evaluated in vectorised form; both
+    reformulations are exact:
+
+    * The forward walk (`While Dec(Number)+BaseDeg > Dec(Num) And Num<Total`)
+      stops at the first index whose dec reaches ``dec[number] + base_deg``,
+      capped at the last index — one ``np.searchsorted`` for every window.
+    * The backward re-anchoring scan replaces the endpoint whenever a sample
+      lies below the current line. Every candidate line pivots on the fixed
+      left anchor ``(d0, f0)``, so "sample below the line" is exactly "sample
+      whose slope from the anchor is smaller than the current endpoint's
+      slope", and scanning right-to-left with strict-inequality updates lands
+      on the rightmost minimum-slope sample. Same-dec samples are excluded
+      just like the VB `Dec(Numb%) <> Dec(Number%)` guard. (Comparing slopes
+      instead of evaluating ``a*d + b`` can differ in the last float ulp for
+      razor-edge ties; the affected lines agree to ~1 ulp over the window, so
+      any divergence from the sequential scan is far below data precision.)
     """
     if base_deg <= 0:
         raise ValueError(f"base_deg must be positive (got {base_deg})")
@@ -70,20 +87,25 @@ def subtract_baseline_envelope(
     d = d[order]
     f = f[order]
     base = np.full(n, np.inf)
+    # Every window's forward-walk endpoint in one shot: first index whose dec
+    # reaches d[i] + base_deg, capped at the last sample. d[i] < d[i]+base_deg
+    # guarantees ends[i] >= i+1.
+    ends = np.minimum(np.searchsorted(d, d + base_deg, side="left"), n - 1)
     number = 0  # Number% (0-based)
     while d[number] < d[n - 1]:
-        num = number + 1  # Num%
-        while d[number] + base_deg > d[num] and num < n - 1:
-            num += 1
-        a = (f[num] - f[number]) / (d[num] - d[number])
+        end = int(ends[number])
+        dd = d[number + 1 : end + 1] - d[number]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            slopes = (f[number + 1 : end + 1] - f[number]) / dd
+        # Same-dec samples can never anchor a line (VB guard); the window
+        # endpoint itself always has dd > 0, so a finite slope exists.
+        slopes[dd == 0.0] = np.inf
+        # Rightmost minimum — np.argmin takes the first occurrence, so scan
+        # the reversed view.
+        k = slopes.size - 1 - int(np.argmin(slopes[::-1]))
+        num = number + 1 + k  # final Num%
+        a = slopes[k]
         b = f[num] - a * d[num]
-        # Numb% counts down from the initial Num%-1 even after Num% is
-        # re-anchored below it, exactly as the VB While loop does.
-        for numb in range(num - 1, number, -1):
-            if f[numb] < a * d[numb] + b and d[numb] != d[number]:
-                num = numb
-                a = (f[num] - f[number]) / (d[num] - d[number])
-                b = f[num] - a * d[num]
         segment = a * d[number : num + 1] + b
         np.minimum(base[number : num + 1], segment, out=base[number : num + 1])
         number += 1
