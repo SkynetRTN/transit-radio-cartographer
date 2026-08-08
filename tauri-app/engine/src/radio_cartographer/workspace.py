@@ -31,7 +31,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .models import MD2Document, RawSweep, Survey, Sweep
-from .scan import align_dec_shifts, smooth_flux, subtract_baseline
+from .scan import align_dec_shifts, smooth_flux, subtract_baseline_envelope
 
 
 @dataclass(frozen=True)
@@ -379,10 +379,10 @@ def apply_workspace_reduction(
             reduced.append(smooth_flux(sweep_flux, window=int(kwargs.get("window", 5))))
         elif op == "baseline":
             reduced.append(
-                subtract_baseline(
+                subtract_baseline_envelope(
                     np.asarray(sweep_dec, dtype=np.float64),
                     sweep_flux,
-                    degree=int(kwargs.get("degree", 1)),
+                    base_deg=float(kwargs.get("base_deg", 5.0)),
                 )
             )
         else:

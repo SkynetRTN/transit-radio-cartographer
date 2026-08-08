@@ -68,6 +68,7 @@ vi.mock('../ipc/client', () => {
       selectScanDeclination: vi.fn().mockResolvedValue({ removed: 1, overview: overviewCalibrated }),
       cutScanSegment: vi.fn().mockResolvedValue({ removed: 1, overview: overviewCalibrated }),
       baselineScanSource: vi.fn().mockResolvedValue({ overview: overviewCalibrated }),
+      appendScan: vi.fn().mockResolvedValue({ added: 1, overview: overviewCalibrated }),
       determineScanPeak: vi
         .fn()
         .mockResolvedValue({ peak_flux: 4.5, overview: { ...overviewCalibrated, peak_flux: 4.5 } }),
@@ -137,6 +138,8 @@ vi.mock('../lib/plots/PointScatter', () => ({
     highlightPoint?: { x: number; y: number; color?: string } | null;
     onPointClick?: (p: { x: number; y: number; ra: number; dec: number; flux: number }) => void;
     onEmptyClick?: () => void;
+    onCursorMove?: (x: number, y: number) => void;
+    onCursorClick?: (x: number, y: number) => void;
     onDragStart?: (v: number) => void;
     onDragUpdate?: (v: number) => void;
     onDragEnd?: () => void;
@@ -155,6 +158,16 @@ vi.mock('../lib/plots/PointScatter', () => ({
         <button
           data-testid={`${id}-point-b`}
           onClick={() => props.onPointClick?.({ x: 7, y: 5, ra: 7, dec: 12, flux: 5 })}
+        />
+        {/* Free-cursor endpoints (BUG-007): raw data-space coords, matching
+            what the flux plot passes to onCursorClick. */}
+        <button
+          data-testid={`${id}-cursor-a`}
+          onClick={() => props.onCursorClick?.(5, 3)}
+        />
+        <button
+          data-testid={`${id}-cursor-b`}
+          onClick={() => props.onCursorClick?.(7, 5)}
         />
         <button
           data-testid={`${id}-empty`}
@@ -203,9 +216,10 @@ test('Pre-calibration ScanView shows Calibrate Scan button', async () => {
     );
   });
   await waitFor(() => expect(screen.getByText('Calibrate Scan')).toBeInTheDocument());
-  // Source-reduction buttons must not appear until the scan is calibrated.
-  expect(screen.queryByText('Baseline Source')).not.toBeInTheDocument();
-  expect(screen.queryByText('Determine Peak')).not.toBeInTheDocument();
+  // BUG-009: source-reduction buttons are present but disabled until the scan
+  // is calibrated (matching the survey screen), not hidden.
+  expect(screen.getByText('Baseline Source')).toBeDisabled();
+  expect(screen.getByText('Determine Peak')).toBeDisabled();
 });
 
 test('Clicking Calibrate Scan switches the scan view mode', async () => {
@@ -438,10 +452,11 @@ test('Baseline Source stays sticky after a two-click baseline (FEAT-002)', async
   });
   await waitFor(() => expect(screen.getByText('Baseline Source')).toBeInTheDocument());
   fireEvent.click(screen.getByText('Baseline Source'));
-  // First click sets the pending endpoint; second click triggers the RPC.
-  fireEvent.click(screen.getByTestId('scan-flux-plot-point-a'));
+  // BUG-007: endpoints come from the FREE cursor, not snapped data points.
+  // First cursor click sets the pending endpoint; second triggers the RPC.
+  fireEvent.click(screen.getByTestId('scan-flux-plot-cursor-a'));
   await act(async () => {
-    fireEvent.click(screen.getByTestId('scan-flux-plot-point-b'));
+    fireEvent.click(screen.getByTestId('scan-flux-plot-cursor-b'));
   });
   await waitFor(() =>
     expect(
@@ -469,11 +484,11 @@ test('Determine Peak stays sticky after a peak fit (FEAT-002)', async () => {
   await act(async () => {
     fireEvent.click(screen.getByTestId('scan-flux-plot-drag-end'));
   });
-  // peakFitKind defaults to 'gaussian' → Gaussian fit RPC.
+  // BUG-001: peakFitKind now defaults to 'poly2' → 2nd-degree polynomial fit.
   await waitFor(() =>
     expect(
-      rpcClient.determineScanPeakGaussian as unknown as ReturnType<typeof vi.fn>,
-    ).toHaveBeenCalledWith(7, 5, 7),
+      rpcClient.determineScanPeakFit as unknown as ReturnType<typeof vi.fn>,
+    ).toHaveBeenCalledWith(7, 5, 7, 2),
   );
   expect(screen.getByText(/Determine Peak \(drag/)).toBeInTheDocument();
 });

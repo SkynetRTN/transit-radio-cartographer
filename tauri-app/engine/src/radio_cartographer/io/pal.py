@@ -21,9 +21,14 @@ def write_pal(palette: Palette, path: str | Path) -> None:
 
 
 def _parse_pal(raw: bytes) -> Palette:
-    if not raw.endswith(b"\r\n"):
-        raise ValueError(".pal file must terminate with CRLF")
-    line = raw[:-2].decode("ascii", errors="strict")
+    # Legacy .pal files terminate with CRLF; newer Skynet exports use bare LF.
+    # Accept both (the writer still emits CRLF).
+    if raw.endswith(b"\r\n"):
+        line = raw[:-2].decode("ascii", errors="strict")
+    elif raw.endswith(b"\n"):
+        line = raw[:-1].decode("ascii", errors="strict")
+    else:
+        raise ValueError(".pal file must terminate with CRLF (or LF)")
     tokens = [t for t in line.split(" ") if t != ""]
     if not tokens:
         raise ValueError(".pal file has no content")

@@ -189,7 +189,8 @@ def make_image(
 
     In "interpolate" mode cells outside any swept region remain 0 and render
     at the palette's anchor=0 stop (black); in "bars" mode they are NaN
-    ("no data" — serialized as null and rendered as blank sky), so Align
+    ("no data" — serialized as null and rendered as blank sky, BUG-016 dan:
+    the pre-image bar edges must read as background, not black), so Align
     Sweeps visibly exposes the uncovered edges in the pre-image viewer.
     The grid is sized so each cell spans a fixed
     `pixel_deg` on-sky (default 1/20 of the beam) via `grid_dims`; explicit

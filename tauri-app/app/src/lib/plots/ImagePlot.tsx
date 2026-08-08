@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import Plotly from 'plotly.js-dist-min';
 import type { ImageMeta, ImagePixels, PaletteStop } from '../../ipc/client';
 import type { ImageDisplayMode } from '../../state/survey-context';
@@ -32,6 +32,10 @@ interface Props {
   onHover?: (point: ImagePoint | null) => void;
   onClick?: (point: ImagePoint) => void;
   onContextMenu?: (point: ImagePoint | null) => void;
+  // BUG-020/023 (dan): fired when the view zooms back out (double-click
+  // reset). The Image view clears its pinned point here so zooming out never
+  // leaves — or creates — a pin.
+  onZoomReset?: () => void;
   boxOverlay?: BoxOverlay | null;
   // BUG-020: draws a persistent target marker at the pinned (clicked) cell so
   // the user can see where the flux readout was sampled after moving the cursor.
@@ -46,6 +50,9 @@ interface Props {
   // magnifier so the loupe is a clean zoomed patch — hover still fires so the
   // RA/Dec/Flux readout keeps updating.
   hideAxes?: boolean;
+  // BUG-016 (dan): draw the sky grid. The pre-image passes false so it renders
+  // clean (no gridlines); the final Image view keeps the grid on by default.
+  showGrid?: boolean;
   // FEAT-011: selects how the bounded-mode plot lays out its aspect ratio.
   // - 'sky' (default): cos(dec_center)/240 — true sky shape with cos(dec)
   //   correction at the image center (FEAT-008 v3 formula).
@@ -180,9 +187,13 @@ function hasBoundsOf(meta: ImageMeta | null | undefined): boolean {
 
 // Overlay shapes drawn on top of the heatmap: the magnifier box and the pinned-
 // cell target ring. Kept in a helper so pin / magnifier changes can be pushed
-// with a shapes-only `Plotly.relayout` — which never touches the axes — instead
-// of a full `Plotly.react`, whose layout re-applies `autorange` and can snap an
-// active zoom back out (BUG-025). The pinned ring is a fixed-pixel-size circle
+// with a `shapes` `Plotly.relayout` instead of a full `Plotly.react`, whose
+// layout re-applies `autorange` and can snap an active zoom back out (BUG-025).
+// NOTE (BUG-023): a full-array `shapes:` relayout is NOT axes-neutral — Plotly
+// escalates it internally to a full layout replot. The explicit ranges in
+// gd.layout keep an active zoom intact, but Plotly's own double-click reset
+// can die afterwards; the native-dblclick reset in the main effect covers
+// that. The pinned ring is a fixed-pixel-size circle
 // anchored at the data point (`xsizemode/ysizemode: 'pixel'`), so it stays the
 // same size at any zoom, moves with pan/zoom, clips when out of view, and — as
 // a shape, not a trace — never expands the axis autorange. Black halo under a
@@ -244,6 +255,9 @@ function plotAspect(
   w: number,
   h: number,
   displayMode: ImageDisplayMode,
+  // BUG-019: when zoomed, the visible RA/Dec region drives the letterbox so the
+  // zoomed view keeps correct sky proportions instead of the full-image shape.
+  region?: { minRa: number; maxRa: number; minDec: number; maxDec: number } | null,
 ): number | null {
   const hasBounds = hasBoundsOf(meta);
   if (!hasBounds) {
@@ -251,9 +265,13 @@ function plotAspect(
     return w > 0 && h > 0 ? w / h : null;
   }
   if (displayMode === 'stretch') return null;
-  const raSpan = meta!.max_ra - meta!.min_ra;
-  const decSpan = meta!.max_dec - meta!.min_dec;
-  const decCenter = (meta!.min_dec + meta!.max_dec) / 2;
+  const minRa = region ? Math.min(region.minRa, region.maxRa) : meta!.min_ra;
+  const maxRa = region ? Math.max(region.minRa, region.maxRa) : meta!.max_ra;
+  const minDec = region ? Math.min(region.minDec, region.maxDec) : meta!.min_dec;
+  const maxDec = region ? Math.max(region.minDec, region.maxDec) : meta!.max_dec;
+  const raSpan = maxRa - minRa;
+  const decSpan = maxDec - minDec;
+  const decCenter = (minDec + maxDec) / 2;
   // Same R the old scaleanchor used (see FEAT-011): 'raw' = 1/240, 'pixel' =
   // per-cell-square, 'sky' = cos(dec)/240.
   const ratio =
@@ -276,18 +294,30 @@ export function ImagePlot({
   onHover,
   onClick,
   onContextMenu,
+  onZoomReset,
   boxOverlay,
   pinnedMarker,
   showColorBar = true,
   fixedHeight,
   square = false,
   hideAxes = false,
+  showGrid = true,
   displayMode = 'sky',
 }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
   // Outer wrapper we measure to letterbox the plot to the sky aspect (BUG-025).
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [box, setBox] = useState<{ w: number; h: number } | null>(null);
+  // BUG-019/020 (dan): the currently zoomed-into RA/Dec region (data coords).
+  // When set, the container is letterboxed to THIS region's dec-corrected shape
+  // so the zoomed view keeps correct sky proportions; cleared on zoom-out so the
+  // letterbox reverts to the full image.
+  const [zoomRange, setZoomRange] = useState<{
+    minRa: number;
+    maxRa: number;
+    minDec: number;
+    maxDec: number;
+  } | null>(null);
   const { theme } = useTheme();
   // Keep the most recent hovered cell so the container's onContextMenu handler
   // can report it without needing Plotly's native (suppressed) right-click.
@@ -297,9 +327,11 @@ export function ImagePlot({
   const pinnedMarkerRef = useRef(pinnedMarker);
   const boxOverlayRef = useRef(boxOverlay);
   const onContextMenuRef = useRef(onContextMenu);
+  const onZoomResetRef = useRef(onZoomReset);
   pinnedMarkerRef.current = pinnedMarker;
   boxOverlayRef.current = boxOverlay;
   onContextMenuRef.current = onContextMenu;
+  onZoomResetRef.current = onZoomReset;
 
   useEffect(() => {
     const node = ref.current;
@@ -415,7 +447,8 @@ export function ImagePlot({
       : {
           title: { text: 'Right Ascension' },
           // Forced light-gray grid on 10° boundaries; no dark zeroline or frame.
-          showgrid: true,
+          // BUG-016: the pre-image turns the grid off via showGrid={false}.
+          showgrid: showGrid,
           gridcolor: GRID_COLOR,
           gridwidth: 1,
           zeroline: false,
@@ -430,7 +463,7 @@ export function ImagePlot({
       ? { ...hiddenAxis, ...(hasBounds ? {} : { autorange: 'reversed' as const }) }
       : {
           title: { text: 'Declination' },
-          showgrid: true,
+          showgrid: showGrid,
           gridcolor: GRID_COLOR,
           gridwidth: 1,
           zeroline: false,
@@ -506,22 +539,51 @@ export function ImagePlot({
       // off a cell should still target the most recent cell.
       if (onHover) onHover(null);
     };
+    // BUG-020 (dan): Plotly fires `plotly_click` for EACH constituent click of
+    // a double-click (order: click #1 → plotly_doubleclick → relayout → click
+    // #2), so double-click-to-zoom-out used to pin the cell under the cursor.
+    // Defer the pin by Plotly's own double-click window; a doubleclick cancels
+    // the pending pin and swallows the trailing click #2.
+    const dblDelay =
+      ((node as unknown as { _context?: { doubleClickDelay?: number } })._context
+        ?.doubleClickDelay as number | undefined) ?? 300;
+    let pendingClick: number | null = null;
+    let suppressNextClick = false;
     const onClickWired = (data: unknown) => {
       const d = data as { points?: Array<{ x: number; y: number; z: number; pointIndex?: [number, number] }> };
       if (!d.points || d.points.length === 0 || !onClick) return;
+      if (suppressNextClick) {
+        // Click #2 of a double-click (fires after plotly_doubleclick).
+        suppressNextClick = false;
+        return;
+      }
       const p = d.points.find((pt) => typeof pt.z === 'number') ?? d.points[0];
       const idx = p.pointIndex;
-      onClick({
+      const point: ImagePoint = {
         ra: p.x,
         dec: p.y,
         flux: p.z,
         col: idx ? idx[1] : 0,
         row: idx ? idx[0] : 0,
-      });
+      };
+      if (pendingClick !== null) clearTimeout(pendingClick);
+      pendingClick = window.setTimeout(() => {
+        pendingClick = null;
+        onClick(point);
+      }, dblDelay);
+    };
+    const onDoubleClickWired = () => {
+      if (pendingClick !== null) {
+        clearTimeout(pendingClick);
+        pendingClick = null;
+      }
+      suppressNextClick = true;
+      onZoomResetRef.current?.();
     };
     plotEl.on('plotly_hover', onHoverWired);
     plotEl.on('plotly_unhover', onUnhoverWired);
     plotEl.on('plotly_click', onClickWired);
+    plotEl.on('plotly_doubleclick', onDoubleClickWired);
 
     // BUG-008: when the user double-clicks (or any other action triggers
     // a zoom-out / autorange reset), Plotly resets `xaxis.autorange` to
@@ -531,21 +593,47 @@ export function ImagePlot({
     // x-axis. Guarded by a flag so we don't loop on the relayout we
     // ourselves trigger.
     let suppressRelayout = false;
+    const readRanges = ():
+      | { minRa: number; maxRa: number; minDec: number; maxDec: number }
+      | null => {
+      const fl = (node as unknown as {
+        _fullLayout?: { xaxis?: { range?: number[] }; yaxis?: { range?: number[] } };
+      })._fullLayout;
+      const xr = fl?.xaxis?.range;
+      const yr = fl?.yaxis?.range;
+      if (!xr || !yr || xr.length < 2 || yr.length < 2) return null;
+      return {
+        minRa: Math.min(xr[0], xr[1]),
+        maxRa: Math.max(xr[0], xr[1]),
+        minDec: Math.min(yr[0], yr[1]),
+        maxDec: Math.max(yr[0], yr[1]),
+      };
+    };
     const onRelayoutWired = (data: unknown) => {
       if (!hasBounds || suppressRelayout) return;
       const d = data as Record<string, unknown>;
-      // Only re-apply on a genuine autorange reset (double-click). A box-zoom
-      // sets explicit `xaxis.range[*]` keys; if any are present this is a zoom,
-      // not a reset, and re-applying 'reversed' here would wipe it (BUG-025).
-      const isBoxZoom = Object.keys(d).some((k) => k.startsWith('xaxis.range'));
-      if (d['xaxis.autorange'] === true && !isBoxZoom) {
+      // A box-zoom / pan / ctrl-zoom sets explicit `x/yaxis.range[*]` keys; a
+      // double-click reset sets `xaxis.autorange: true`.
+      const isRangeChange = Object.keys(d).some(
+        (k) => k.startsWith('xaxis.range') || k.startsWith('yaxis.range'),
+      );
+      if (d['xaxis.autorange'] === true && !isRangeChange) {
+        // BUG-020: zoom-out reverts the letterbox to the full-image aspect and
+        // re-applies the reversed RA orientation (BUG-008).
+        setZoomRange(null);
         suppressRelayout = true;
         // Plotly's TS types say `autorange` is boolean, but the runtime
-        // accepts `'reversed'` (see the `xaxis` layout above, which uses
-        // the same value with an `as const` cast). Mirror that here.
+        // accepts `'reversed'` (see the `xaxis` layout above).
         Plotly.relayout(node, { 'xaxis.autorange': 'reversed' } as unknown as Partial<Plotly.Layout>).finally(() => {
           suppressRelayout = false;
         });
+        return;
+      }
+      if (isRangeChange) {
+        // BUG-019: letterbox the container to the visible region so the zoomed
+        // view keeps correct (dec-corrected) sky proportions.
+        const region = readRanges();
+        if (region) setZoomRange(region);
       }
     };
     plotEl.on('plotly_relayout', onRelayoutWired);
@@ -564,12 +652,85 @@ export function ImagePlot({
     };
     node.addEventListener('contextmenu', onContextCapture, true);
 
+    // BUG-022 (dan): the right mouse button must never start a Plotly drag
+    // (pan/zoom). Swallow right-button mousedown in the capture phase so Plotly's
+    // drag layer never sees it; the contextmenu handler above still opens the
+    // magnifier.
+    const onMouseDownCapture = (e: MouseEvent) => {
+      if (e.button === 2) e.stopPropagation();
+    };
+    node.addEventListener('mousedown', onMouseDownCapture, true);
+
+    // BUG-021 (dan): Ctrl/Cmd + '+' / '-' zoom the main image about its center.
+    // Only the main plot (axes visible) responds — not the magnifier loupe.
+    const onKeyZoom = (e: KeyboardEvent) => {
+      if (hideAxes || !hasBounds) return;
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      const zoomIn = e.key === '=' || e.key === '+' || e.key === 'Add';
+      const zoomOut = e.key === '-' || e.key === '_' || e.key === 'Subtract';
+      if (!zoomIn && !zoomOut) return;
+      e.preventDefault();
+      const region = readRanges();
+      if (!region) return;
+      const factor = zoomIn ? 0.8 : 1.25;
+      const fl = (node as unknown as {
+        _fullLayout?: { xaxis?: { range?: number[] }; yaxis?: { range?: number[] } };
+      })._fullLayout;
+      const xr = fl?.xaxis?.range;
+      const yr = fl?.yaxis?.range;
+      if (!xr || !yr) return;
+      // Scale each axis about its center, preserving axis direction (RA is
+      // reversed, so xr may be descending).
+      const scale = (r: number[]): [number, number] => {
+        const c = (r[0] + r[1]) / 2;
+        const half = ((r[0] - r[1]) / 2) * factor;
+        return [c + half, c - half];
+      };
+      void Plotly.relayout(node, {
+        'xaxis.range': scale(xr),
+        'yaxis.range': scale(yr),
+      } as unknown as Partial<Plotly.Layout>);
+    };
+    window.addEventListener('keydown', onKeyZoom);
+
+    // BUG-023 (dan): after the magnifier closes, the boxOverlay change fires a
+    // `shapes` relayout — which Plotly escalates to a FULL layout replot — and
+    // Plotly's internal double-click reset stops firing afterwards, leaving the
+    // user stuck zoomed in (reopening the magnifier replots again and revives
+    // it, which is the confusing symptom). Do our own deterministic reset off
+    // the native DOM `dblclick`, which the browser dispatches regardless of
+    // Plotly's internal click bookkeeping. Registered in the CAPTURE phase so
+    // Plotly's own drag-layer handler can't swallow it via stopPropagation, and
+    // with no target filter — any double-click on the plot means "reset".
+    // Idempotent when Plotly's own reset also ran (autorange lands on the same
+    // full ranges).
+    const onNativeDblClick = () => {
+      if (pendingClick !== null) {
+        clearTimeout(pendingClick);
+        pendingClick = null;
+      }
+      setZoomRange(null); // revert the BUG-019 letterbox to the full image
+      onZoomResetRef.current?.(); // clear the pin (main plot only, BUG-020)
+      void Plotly.relayout(node, {
+        'xaxis.autorange': hasBounds ? 'reversed' : true,
+        'yaxis.autorange': hasBounds ? true : 'reversed',
+      } as unknown as Partial<Plotly.Layout>);
+    };
+    node.addEventListener('dblclick', onNativeDblClick, true);
+
     return () => {
       plotEl.removeAllListeners?.('plotly_hover');
       plotEl.removeAllListeners?.('plotly_unhover');
       plotEl.removeAllListeners?.('plotly_click');
+      plotEl.removeAllListeners?.('plotly_doubleclick');
       plotEl.removeAllListeners?.('plotly_relayout');
       node.removeEventListener('contextmenu', onContextCapture, true);
+      node.removeEventListener('mousedown', onMouseDownCapture, true);
+      node.removeEventListener('dblclick', onNativeDblClick, true);
+      window.removeEventListener('keydown', onKeyZoom);
+      if (pendingClick !== null) clearTimeout(pendingClick);
       Plotly.purge(node);
     };
     // `displayMode` intentionally omitted from deps: it no longer changes the
@@ -578,12 +739,14 @@ export function ImagePlot({
     // `boxOverlay` / `pinnedMarker` are also omitted: they only drive overlay
     // shapes, which are updated via the shapes-only relayout effect below so an
     // active zoom is never disturbed (BUG-025).
-  }, [image, meta, title, palette, fluxRange, showColorBar, hideAxes, onHover, onClick, theme]);
+  }, [image, meta, title, palette, fluxRange, showColorBar, hideAxes, showGrid, onHover, onClick, theme]);
 
-  // Push pin / magnifier-box changes as a shapes-only relayout. Unlike
-  // Plotly.react, relayout of `shapes` never re-applies the axis layout, so it
-  // can't snap an active zoom back out (BUG-025). Runs after the main effect on
-  // mount (the plot exists by then) and on every later pin / box change.
+  // Push pin / magnifier-box changes as a `shapes` relayout. Unlike
+  // Plotly.react, it doesn't re-apply our layout's `autorange`, so it can't
+  // snap an active zoom back out (BUG-025) — but note it is still a full
+  // layout replot internally (see buildShapes note / BUG-023). Runs after the
+  // main effect on mount (the plot exists by then) and on every later pin /
+  // box change.
   useEffect(() => {
     const node = ref.current;
     if (!node) return;
@@ -592,11 +755,29 @@ export function ImagePlot({
     } as unknown as Partial<Plotly.Layout>);
   }, [pinnedMarker, boxOverlay, meta]);
 
-  // Measure the wrapper so we can letterbox the plot to the sky aspect (BUG-025).
+  // BUG-019/020: a genuinely new image (its bounds/size changed) resets Plotly's
+  // zoom via `uirevision`, so clear our tracked zoom region too — otherwise the
+  // letterbox would keep the previous image's zoomed aspect.
   useEffect(() => {
+    setZoomRange(null);
+  }, [meta?.min_ra, meta?.max_ra, meta?.min_dec, meta?.max_dec, image.width, image.height]);
+
+  // Measure the wrapper so we can letterbox the plot to the sky aspect (BUG-025).
+  // BUG-011 (dan): a layout effect, not a passive one — the measurement lands
+  // before the browser paints and before the (passive) Plotly render effect
+  // runs, so the very first `Plotly.react` already draws into the final
+  // letterboxed div. With the old post-paint measure, the plot was drawn at
+  // 100% size and only re-fit ~100ms later (`Plots.resize` debounces
+  // internally), flashing an unscaled frame when the pre-image opened.
+  useLayoutEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
-    const measure = () => setBox({ w: wrap.clientWidth, h: wrap.clientHeight });
+    const measure = () =>
+      setBox((prev) => {
+        const w = wrap.clientWidth;
+        const h = wrap.clientHeight;
+        return prev && prev.w === w && prev.h === h ? prev : { w, h };
+      });
     measure();
     if (typeof ResizeObserver === 'undefined') return; // jsdom / older envs
     const ro = new ResizeObserver(measure);
@@ -607,7 +788,9 @@ export function ImagePlot({
   // Fit the largest box with the sky aspect inside the measured wrapper. When
   // there's no aspect to preserve ('stretch' / pixel span unusable), fill it.
   // `square` forces 1:1 so the magnifier is a square regardless of sky shape.
-  const aspect = square ? 1 : plotAspect(meta, image.width, image.height, displayMode);
+  const aspect = square
+    ? 1
+    : plotAspect(meta, image.width, image.height, displayMode, zoomRange);
   let innerW: number | string = '100%';
   let innerH: number | string = '100%';
   if (aspect && box && box.w > 0 && box.h > 0) {
@@ -645,7 +828,14 @@ export function ImagePlot({
       <div
         data-testid={testId ?? 'image-plot'}
         ref={ref}
-        style={{ width: innerW, height: innerH }}
+        style={{
+          width: innerW,
+          height: innerH,
+          // BUG-011 (dan): hide the plot until the wrapper has been measured and
+          // the letterbox size is known, so the first frame is already correctly
+          // scaled instead of briefly flashing an unscaled/full-bleed image.
+          visibility: box ? 'visible' : 'hidden',
+        }}
       />
     </div>
   );

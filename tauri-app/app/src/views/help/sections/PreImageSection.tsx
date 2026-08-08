@@ -24,12 +24,13 @@ export function PreImageSection() {
       </p>
 
       <p>
-        A preview at the default pixel size (<code>0.06°</code>) is generated
-        automatically when you arrive, so you can see how
-        the reductions change the result. <strong>Drag a box</strong>{' '}
-        on the preview to zoom into a region (any shape — the axes fit exactly
-        what you draw) and <strong>double-click</strong> to reset to the full
-        view; this is handy for checking whether a reduction cleaned up a
+        The preview is built at the default pixel size (<code>0.06°</code>) when
+        you click <strong>Create Pre-Image</strong>, so you can see how the
+        reductions change the result. It's color-scaled to the data's actual
+        min→max and drawn without gridlines. <strong>Drag a box</strong> on the
+        preview to zoom into a region (the axes fit exactly what you draw, at the
+        correct sky proportions) and <strong>double-click</strong> to reset to the
+        full view; this is handy for checking whether a reduction cleaned up a
         particular patch of sky.
       </p>
 
@@ -95,9 +96,13 @@ export function PreImageSection() {
       <h3>5. Back to Sweeps (if needed)</h3>
       <p>
         If the preview reveals some RFI slipped through, click{' '}
-        <strong>Back to Sweeps</strong>. Your sweep acceptances are
-        preserved, so you can fix it, hit <code>Apply Edits</code>,
-        and come back to redo the reductions.
+        <strong>Back to Sweeps</strong>. Your sweep acceptances are preserved,
+        and the sweeps now show the <em>processed</em> data — if you've already
+        smoothed / baselined / aligned, those reductions are reflected in the
+        per-sweep plots. Fix the sweep, hit <code>Apply Edits</code>, then press{' '}
+        <strong>Create Pre-Image</strong> again to rebuild. The reduction
+        progress persists, so you don't have to re-run the whole pipeline just to
+        get back to <code>Make Image</code>.
       </p>
     </section>
   );

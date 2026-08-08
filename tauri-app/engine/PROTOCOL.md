@@ -20,7 +20,7 @@ Handshake:
 - `close_handle({"handle": int}) -> {"closed": int}`
 - `echo_array({"token": string}) -> {"array": BinaryRef}` (test utility for binary side-channel)
 - `smooth({"handle": int (survey), "width": int (default 5)}) -> {"handle": int, "sweep_count": int, "op": "smooth"}`
-- `baseline({"handle": int (survey), "degree": int (default 1)}) -> {"handle": int, "sweep_count": int, "op": "baseline"}`
+- `baseline({"handle": int (survey), "base_deg": float (default 5, must be > 0)}) -> {"handle": int, "sweep_count": int, "op": "baseline"}` — `base_deg` is the legacy "Baseline Length (Degrees)": the angular width in declination of the sliding lower-envelope window (`vb/survform.frm:2420-2449`), not a polynomial degree.
 - `align({"handle": int (survey), "factor": float (default 0.5)}) -> {"handle": int, "sweep_count": int, "op": "align"}`
 - `make_image({"handle": int (survey), "pix": float (on-sky pixel size in degrees, default 0.06 = 1/20 of the 1.2° 40 ft beam)}) -> {"handle": int (image), "width": int, "height": int, "min_ra": float, "max_ra": float, "min_dec": float, "max_dec": float, "min_flux": float, "max_flux": float}` — the grid is sized so each cell spans `pix` degrees on-sky (RA cell = `pix / cos(dec)` in angle); `width`/`height` follow the survey's extent. NOTE: for the compose calls below, `pix` keeps its legacy meaning — an integer subdivision factor of the primary's native cell (default = native), not degrees.
 - `get_image_pixels({"handle": int (image), "max_dim": int (default 400)}) -> {"pixels": [[float]], "width": int, "height": int}` — inline pixel grid for plotting; `max_dim` is the longest-side ceiling used to downsample with `ceil(longest/max_dim)` stride.

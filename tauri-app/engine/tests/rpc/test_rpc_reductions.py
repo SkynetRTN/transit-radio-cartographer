@@ -49,15 +49,25 @@ def test_baseline_returns_new_handle() -> None:
     h0 = _open_survey(server)
     raw = _flux_inline(server, h0)
 
-    resp = call(server, "baseline", {"handle": h0, "degree": 1})
+    resp = call(server, "baseline", {"handle": h0, "base_deg": 5})
     assert "error" not in resp, resp
     new_handle = int(resp["result"]["handle"])
     assert new_handle != h0
     assert resp["result"]["op"] == "baseline"
 
     flat = _flux_inline(server, new_handle)
-    # A degree-1 baseline subtraction must drive |mean| below the raw mean.
+    # The lower-envelope baseline never lifts above the data, so the
+    # residual is non-negative and its mean drops below the raw mean.
+    assert float(flat.min()) >= -1e-6
     assert abs(float(flat.mean())) < abs(float(raw.mean())) + 1e-6
+
+
+def test_baseline_rejects_nonpositive_length() -> None:
+    server = RpcServer()
+    h0 = _open_survey(server)
+    resp = call(server, "baseline", {"handle": h0, "base_deg": 0})
+    assert "error" in resp
+    assert resp["error"]["code"] == -32602
 
 
 def test_align_zero_offset_is_noop() -> None:
@@ -236,12 +246,12 @@ def test_reductions_with_workspace_handle_change_pre_image() -> None:
     assert not np.allclose(before, after)
 
     # Baseline subtraction stacks on top of the smoothing — the mean of the
-    # gridded image should drop sharply once a per-sweep linear baseline is
-    # removed.
+    # gridded image should drop sharply once the per-sweep lower-envelope
+    # baseline is removed.
     base_resp = call(
         server,
         "baseline",
-        {"handle": survey_handle, "workspace_handle": ws_handle, "degree": 1},
+        {"handle": survey_handle, "workspace_handle": ws_handle, "base_deg": 5},
     )
     assert "error" not in base_resp, base_resp
     baselined_img = call(

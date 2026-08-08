@@ -18,7 +18,13 @@ import { useSurvey } from './survey-context';
 export interface FluxCalState {
   // The in-memory `.cal` table. Null when nothing is loaded or being edited.
   table: FluxCalTable | null;
+  // The working fit slope (from the currently-loaded/fitted table). Shown in
+  // the tool; does NOT affect the workspace on its own (BUG-004 dan).
   slope: number | null;
+  // The slope actually pushed into the open workspaces. "Select Calibration"
+  // sets this immediately; the Flux Calibration tool only sets it when the user
+  // clicks "Apply to Workspace".
+  appliedSlope: number | null;
   error: number | null;
   filePath: string | null;
   dirty: boolean;
@@ -38,6 +44,8 @@ export interface FluxCalState {
   addEntry: (entry: FluxCalEntry) => Promise<void>;
   removeEntry: (index: number) => Promise<void>;
   refit: () => Promise<void>;
+  // Commit the current working slope to the open workspaces (BUG-004 dan).
+  applyToWorkspace: () => Promise<void>;
 }
 
 const FluxCalContext = createContext<FluxCalState | null>(null);
@@ -54,6 +62,8 @@ const EMPTY_TABLE: FluxCalTable = {
 export function FluxCalibrationProvider({ children }: { children: ReactNode }) {
   const [table, setTable] = useState<FluxCalTable | null>(null);
   const [slope, setSlope] = useState<number | null>(null);
+  // The slope that has actually been pushed to the workspaces (BUG-004 dan).
+  const [appliedSlope, setAppliedSlope] = useState<number | null>(null);
   const [error, setError] = useState<number | null>(null);
   const [filePath, setFilePath] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -75,47 +85,47 @@ export function FluxCalibrationProvider({ children }: { children: ReactNode }) {
   //  - User loads `.cal` first, then gain-calibrates the workspace later →
   //    `calibrated` flips to true, effect runs, apply happens.
   useEffect(() => {
-    if (slope === null || slope === 0) return;
+    if (appliedSlope === null || appliedSlope === 0) return;
     const ws = survey.workspace;
     const handle = survey.workspaceHandle;
     if (ws && handle !== null && ws.calibrated && !ws.flux_calibrated) {
       rpcClient
-        .fluxCalApplyToSurvey(handle, slope)
+        .fluxCalApplyToSurvey(handle, appliedSlope)
         .then(() => survey.refreshWorkspace())
         .catch((err) => setRpcError((err as Error).message));
     }
   }, [
-    slope,
+    appliedSlope,
     survey.workspace?.calibrated,
     survey.workspace?.flux_calibrated,
     survey.workspaceHandle,
   ]);
 
   useEffect(() => {
-    if (slope === null || slope === 0) return;
+    if (appliedSlope === null || appliedSlope === 0) return;
     const ov = scan.overview;
     const handle = scan.handle;
     if (ov && handle !== null && ov.calibrated && !ov.flux_calibrated) {
       rpcClient
-        .fluxCalApplyToScan(handle, slope)
+        .fluxCalApplyToScan(handle, appliedSlope)
         .then(() => scan.refreshOverview())
         .catch((err) => setRpcError((err as Error).message));
     }
-  }, [slope, scan.overview?.calibrated, scan.overview?.flux_calibrated, scan.handle]);
+  }, [appliedSlope, scan.overview?.calibrated, scan.overview?.flux_calibrated, scan.handle]);
 
   // Images opened standalone (via Image → Open Image…) carry their own
   // calibration flag — the user-stated convention is that an image always
   // implies at least gain calibration, so any image that isn't already in
-  // Jy is a candidate for the loaded slope.
+  // Jy is a candidate for the applied slope.
   useEffect(() => {
-    if (slope === null || slope === 0) return;
+    if (appliedSlope === null || appliedSlope === 0) return;
     const img = survey.image;
     if (img && !img.flux_calibrated) {
-      survey.applyImageFluxCalibration(slope).catch((err) => {
+      survey.applyImageFluxCalibration(appliedSlope).catch((err) => {
         setRpcError((err as Error).message);
       });
     }
-  }, [slope, survey.image?.handle, survey.image?.flux_calibrated]);
+  }, [appliedSlope, survey.image?.handle, survey.image?.flux_calibrated]);
 
   const newCalibration = useCallback(() => {
     setTable({ ...EMPTY_TABLE, entries: [] });
@@ -126,6 +136,9 @@ export function FluxCalibrationProvider({ children }: { children: ReactNode }) {
     setRpcError(null);
   }, []);
 
+  // "Select Calibration" — load a `.cal` and apply it to the workspace
+  // immediately (unchanged behavior, BUG-004 dan): both the working slope and
+  // the applied slope are set.
   const loadFromFile = useCallback(async (path: string) => {
     setLoading(true);
     setRpcError(null);
@@ -133,6 +146,7 @@ export function FluxCalibrationProvider({ children }: { children: ReactNode }) {
       const result = await rpcClient.fluxCalReadFile(path);
       setTable(result.table);
       setSlope(result.slope);
+      setAppliedSlope(result.slope);
       setError(result.error);
       setFilePath(result.path);
       setDirty(false);
@@ -178,11 +192,45 @@ export function FluxCalibrationProvider({ children }: { children: ReactNode }) {
   const clear = useCallback(() => {
     setTable(null);
     setSlope(null);
+    setAppliedSlope(null);
     setError(null);
     setFilePath(null);
     setDirty(false);
     setRpcError(null);
   }, []);
+
+  // BUG-004 (dan): commit the current working fit to the open workspaces. Any
+  // workspace already in Jy is reverted first so the freshly-fit slope replaces
+  // it; the appliedSlope change then drives the auto-apply effects above.
+  const applyToWorkspace = useCallback(async () => {
+    if (slope === null || slope === 0) {
+      setRpcError('Fit a calibration line before applying it to the workspace.');
+      return;
+    }
+    setRpcError(null);
+    try {
+      const ws = survey.workspace;
+      const wh = survey.workspaceHandle;
+      if (ws && wh !== null && ws.flux_calibrated) {
+        await rpcClient.fluxCalRevertFromSurvey(wh);
+        await survey.refreshWorkspace();
+      }
+      const ov = scan.overview;
+      const sh = scan.handle;
+      if (ov && sh !== null && ov.flux_calibrated) {
+        await rpcClient.fluxCalRevertFromScan(sh);
+        await scan.refreshOverview();
+      }
+      const img = survey.image;
+      if (img && img.flux_calibrated) {
+        await survey.revertImageFluxCalibration();
+      }
+    } catch (e) {
+      setRpcError((e as Error).message);
+      return;
+    }
+    setAppliedSlope(slope);
+  }, [slope, survey, scan]);
 
   const setCaption = useCallback((caption: string) => {
     setTable((prev) => (prev ? { ...prev, caption } : prev));
@@ -251,6 +299,7 @@ export function FluxCalibrationProvider({ children }: { children: ReactNode }) {
     () => ({
       table,
       slope,
+      appliedSlope,
       error,
       filePath,
       dirty,
@@ -266,10 +315,12 @@ export function FluxCalibrationProvider({ children }: { children: ReactNode }) {
       addEntry,
       removeEntry,
       refit,
+      applyToWorkspace,
     }),
     [
       table,
       slope,
+      appliedSlope,
       error,
       filePath,
       dirty,
@@ -285,6 +336,7 @@ export function FluxCalibrationProvider({ children }: { children: ReactNode }) {
       addEntry,
       removeEntry,
       refit,
+      applyToWorkspace,
     ],
   );
 

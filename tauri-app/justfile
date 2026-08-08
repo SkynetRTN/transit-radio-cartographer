@@ -85,33 +85,11 @@ _dev-unix:
 sidecar:
     @ {{ if os_name == "windows" { "just _sidecar-windows" } else { "just _sidecar-unix" } }}
 
+# Not a `#!/usr/bin/env pwsh` shebang recipe: `just` writes those to an
+# extensionless temp file, and `pwsh -File` rejects any script not ending in
+# `.ps1` ("does not have a '.ps1' extension"). Call a real .ps1 file instead.
 _sidecar-windows:
-    #!/usr/bin/env pwsh
-    $ErrorActionPreference = "Stop"
-    uv run pyinstaller engine/sidecar.spec --distpath app/src-tauri/binaries/ --noconfirm
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-    $warn = "build/sidecar/warn-sidecar.txt"
-    if (Test-Path $warn) {
-        $missing = Select-String -Path $warn -Pattern '^missing module named (astropy|numpy) -'
-        if ($missing) {
-            [Console]::Error.WriteLine("error: sidecar is missing a runtime dependency:")
-            $missing | ForEach-Object { [Console]::Error.WriteLine("  " + $_.Line) }
-            [Console]::Error.WriteLine("hint: run 'just sync', then rebuild.")
-            exit 1
-        }
-    }
-
-    $bin = "app/src-tauri/binaries/radio-cartographer-engine-x86_64-pc-windows-msvc.exe"
-    Move-Item -Force app/src-tauri/binaries/radio-cartographer-engine.exe $bin
-
-    $out = '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' | & $bin 2>&1 | Out-String
-    if ($out -notmatch '"pong"') {
-        [Console]::Error.WriteLine("error: sidecar built but did not answer ping:")
-        [Console]::Error.WriteLine($out)
-        exit 1
-    }
-    Write-Host "sidecar ok: $bin"
+    pwsh -NoLogo -NoProfile -File scripts/build-sidecar.ps1
 
 _sidecar-unix:
     #!/usr/bin/env bash

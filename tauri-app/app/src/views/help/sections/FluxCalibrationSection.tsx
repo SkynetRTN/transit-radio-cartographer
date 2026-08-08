@@ -64,15 +64,18 @@ export function FluxCalibrationSection() {
         <em>Scan</em> section).
       </p>
 
-      <h3>2. Open Flux Calibration</h3>
+      <h3>2. Open the Flux Calibration tool</h3>
       <ul>
         <li>
-          To start a fresh table: <code>Flux Calibration → New Calibration…</code>
+          <code>Flux Calibration → Open Flux Calibration Tool</code> opens the
+          editor. If a calibration is already loaded it shows that one on the
+          plot; otherwise it starts a fresh, empty table.
         </li>
         <li>
-          To edit an existing one:{' '}
-          <code>Flux Calibration → Select Calibration…</code> and pick a{' '}
-          <code>.cal</code> file.
+          <code>Flux Calibration → Select Calibration…</code> is different: it
+          loads a <code>.cal</code> file and applies it to your workspace right
+          away (see &ldquo;Applying an existing calibration&rdquo; above). Use the
+          tool when you want to build or adjust a fit before applying it.
         </li>
       </ul>
 
@@ -151,10 +154,22 @@ export function FluxCalibrationSection() {
         </figcaption>
       </figure>
 
-      <h3>6. Save the .cal</h3>
+      <h3>6. Apply it to your workspace</h3>
       <p>
-        <strong>Click</strong> <code>File → Save As…</code> to write the
-        calibration to disk. 
+        Building and fitting a calibration in the tool does <em>not</em> change
+        your data on its own — adding sources and fitting only update the plot.
+        When you're happy with the fit, click <strong>Apply to Workspace</strong>
+        {' '}to convert the open survey / scan / image from GCU into Janskies
+        using the current slope. (If the workspace was already in Jy from an
+        earlier calibration, applying replaces it.) The button reads{' '}
+        <strong>Applied to Workspace ✓</strong> once the current fit is in effect.
+      </p>
+
+      <h3>7. Save the .cal</h3>
+      <p>
+        <strong>Click</strong> <code>Flux Calibration → Save Calibration As…</code>
+        {' '}to write the calibration to disk (or <code>Save Calibration</code>{' '}
+        to overwrite the file you opened).
       </p>
 
     </section>

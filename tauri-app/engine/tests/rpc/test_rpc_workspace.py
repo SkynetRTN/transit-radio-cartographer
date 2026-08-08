@@ -293,3 +293,68 @@ def test_set_source_sweep_flux_rejects_uncalibrated_workspace() -> None:
     )
     assert "error" in resp
     assert resp["error"]["code"] == -32602
+
+
+def test_get_source_sweep_returns_processed_flux_after_reduction() -> None:
+    # BUG-015 (dan): a Pre Image reduction (smooth) processes the workspace
+    # sweeps into `reduced_source_flux`; get_source_sweep must return that
+    # processed layer so "Back to Sweeps" shows the reduced data rather than the
+    # pre-reduction calibrated values.
+    server = RpcServer()
+    ws_handle = _open_calibrated(server)
+    ws = server._handles.get(ws_handle)
+
+    before = call(server, "get_source_sweep", {"handle": ws_handle, "index": 0, "max_points": 0})
+    before_flux = np.array(before["result"]["flux"])
+    assert ws.calibrated_source_flux is not None
+    assert np.allclose(before_flux, ws.calibrated_source_flux[0])
+
+    smoothed = call(
+        server, "smooth", {"handle": ws_handle, "width": 5, "workspace_handle": ws_handle}
+    )
+    assert "error" not in smoothed, smoothed
+
+    after = call(server, "get_source_sweep", {"handle": ws_handle, "index": 0, "max_points": 0})
+    after_flux = np.array(after["result"]["flux"])
+    assert ws.reduced_source_flux is not None
+    assert np.allclose(after_flux, ws.reduced_source_flux[0])
+
+
+def test_get_source_sweep_returns_reduction_without_calibration() -> None:
+    # BUG-015 (dan) round 2: reductions must surface from get_source_sweep even
+    # when the workspace was never gain-calibrated — previously the guard
+    # required `ws.calibrated`, silently dropping the processed layer.
+    server = RpcServer()
+    ws_handle, _ = _open(server)
+    ws = server._handles.get(ws_handle)
+    assert not ws.calibrated
+
+    smoothed = call(
+        server, "smooth", {"handle": ws_handle, "width": 5, "workspace_handle": ws_handle}
+    )
+    assert "error" not in smoothed, smoothed
+
+    resp = call(server, "get_source_sweep", {"handle": ws_handle, "index": 0, "max_points": 0})
+    assert "error" not in resp
+    r = resp["result"]
+    assert r["unit"] == "volts"
+    assert ws.reduced_source_flux is not None
+    assert np.allclose(np.array(r["flux"]), ws.reduced_source_flux[0])
+
+
+def test_get_source_sweep_returns_aligned_dec_after_align() -> None:
+    # BUG-015 (dan) round 2: Align Sweeps shifts the per-sweep declinations
+    # into `reduced_source_dec`; Back to Sweeps must show the shifted decs.
+    server = RpcServer()
+    ws_handle = _open_calibrated(server)
+    ws = server._handles.get(ws_handle)
+
+    aligned = call(
+        server, "align", {"handle": ws_handle, "factor": 0.5, "workspace_handle": ws_handle}
+    )
+    assert "error" not in aligned, aligned
+    assert ws.reduced_source_dec is not None
+
+    resp = call(server, "get_source_sweep", {"handle": ws_handle, "index": 0, "max_points": 0})
+    assert "error" not in resp
+    assert np.allclose(np.array(resp["result"]["dec"]), ws.reduced_source_dec[0])

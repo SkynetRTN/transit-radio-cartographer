@@ -37,6 +37,7 @@ from .image_compose import (
     tricolor_compose,
 )
 from .io.bmp import write_bmp_from_rgb
+from .io.png import write_png_from_rgb
 from .io.cal import read_cal, write_cal
 from .io.fits import read_fits, write_fits
 from .io.img import read_img, write_img
@@ -49,6 +50,7 @@ from .models import CalibrationEntry, CalibrationTable, Image, Palette, PaletteS
 from .palette import apply_palette
 from .scan_workspace import (
     ScanWorkspace,
+    append_scan_source,
     apply_flux_calibration_scan,
     apply_scan_calibration,
     baseline_scan_source,
@@ -76,6 +78,8 @@ from .workspace import (
     apply_gain_calibration,
     apply_workspace_reduction,
     build_workspace,
+    current_source_dec,
+    current_source_flux,
     cut_calibration_segment,
     revert_flux_calibration,
     select_calibration_declination,
@@ -463,7 +467,9 @@ def _force_calibrated_if_requested(image: GriddedImage, params: dict[str, Any]) 
 _REDUCTION_PARAMS: dict[str, tuple[str, str, float]] = {
     # rpc_key -> (front-end param name, apply_to_survey kwarg, default)
     "smooth": ("width", "window", 5.0),
-    "baseline": ("degree", "degree", 1.0),
+    # base_deg is the legacy "Baseline Length (Degrees)" window — angular
+    # degrees of declination, not a polynomial degree.
+    "baseline": ("base_deg", "base_deg", 5.0),
     "align": ("factor", "offset", 0.5),
 }
 
@@ -579,6 +585,8 @@ class RpcServer:
                 result = self._save_image(params)
             elif method == "save_bitmap":
                 result = self._save_bitmap(params)
+            elif method == "save_png":
+                result = self._save_png(params)
             elif method == "append_image":
                 result = self._append_image(params)
             elif method == "append_image_multi":
@@ -649,6 +657,8 @@ class RpcServer:
                 result = self._cut_scan_segment(params)
             elif method == "baseline_scan_source":
                 result = self._baseline_scan_source(params)
+            elif method == "append_scan":
+                result = self._append_scan(params)
             elif method == "determine_scan_peak":
                 result = self._determine_scan_peak(params)
             elif method == "determine_scan_peak_fit":
@@ -859,7 +869,14 @@ class RpcServer:
             raise RpcError(
                 ERR_INVALID_PARAMS, f"{op}: {rpc_key} must be numeric, got {raw_value!r}"
             ) from exc
-        kwargs: dict[str, float | int] = {kwarg_name: int(value) if op != "align" else value}
+        # smooth's window is a sample count; baseline's base_deg and align's
+        # offset are angular degrees and must keep their fractional part.
+        kwargs: dict[str, float | int] = {kwarg_name: int(value) if op == "smooth" else value}
+        if op == "baseline" and value <= 0:
+            raise RpcError(
+                ERR_INVALID_PARAMS,
+                f"baseline: base_deg must be a positive number of degrees, got {raw_value!r}",
+            )
         # Workspace-aware path: when the caller passes `workspace_handle`, the
         # reduction lands on the workspace's source sweeps so the next
         # `make_image(workspace_handle=...)` call grids the reduced flux.
@@ -1075,6 +1092,24 @@ class RpcServer:
             write_bmp_from_rgb(rgb, str(path))
         except Exception as exc:  # noqa: BLE001
             raise RpcError(ERR_IO, f"failed to save bitmap: {exc}") from exc
+        return {"path": str(path), "bytes_written": int(Path(str(path)).stat().st_size)}
+
+    def _save_png(self, params: dict[str, Any]) -> dict[str, Any]:
+        # BUG-005 (dan): the scalar-image raster export is a full-resolution PNG
+        # (replacing the old .bmp). Same palette/flux-range application as the
+        # bitmap path — only the encoder differs.
+        handle = int(params.get("handle", -1))
+        image = self._resolve_image(handle)
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        palette = _palette_from_stops(params.get("palette")) or _default_palette()
+        flux_min, flux_max = _flux_range_from_params(params, image)
+        rgb = apply_palette(image.pixels, palette, flux_min, flux_max)
+        try:
+            write_png_from_rgb(rgb, str(path))
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to save png: {exc}") from exc
         return {"path": str(path), "bytes_written": int(Path(str(path)).stat().st_size)}
 
     def _save_rgb_png(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1372,18 +1407,29 @@ class RpcServer:
                 f"source sweep index out of range: {index} (0..{ws.source_count - 1})",
             )
         raw = ws.source_sweeps[index]
-        if ws.calibrated and ws.calibrated_source_flux is not None:
-            flux = ws.calibrated_source_flux[index]
+        # BUG-015 (dan): return the most-recent PROCESSED flux/dec (reduced by
+        # smooth/baseline/align on the Pre Image screen) whenever a reduction
+        # has run — even on a workspace that was never gain-calibrated — so
+        # "Back to Sweeps" always shows the processed data. `current_source_*`
+        # fall back to the calibrated flux / raw dec when no reduction has run.
+        has_reduction = (
+            ws.reduced_source_flux is not None or ws.reduced_source_dec is not None
+        )
+        if has_reduction or (ws.calibrated and ws.calibrated_source_flux is not None):
+            flux = current_source_flux(ws)[index]
+            dec = current_source_dec(ws)[index]
             # After noise-injection bracket gain calibration the values are
             # raw_volts / cal_volts — dimensionless. The legacy app didn't
             # label this state; we call it "gain calibration units" until a
             # `.cal` file (flux calibration) converts the survey to janskies.
-            unit = "jy" if ws.flux_calibrated else "gain"
+            # Reductions on a never-calibrated workspace are still in volts.
+            unit = "jy" if ws.flux_calibrated else ("gain" if ws.calibrated else "volts")
         else:
             flux = raw.flux
+            dec = raw.dec
             unit = "volts"
         max_points = int(params.get("max_points", 4000))
-        ra, dec, flux_d = _maybe_downsample(raw.ra, raw.dec, flux, max_points)
+        ra, dec, flux_d = _maybe_downsample(raw.ra, dec, flux, max_points)
         return {
             "ra": _array_to_jsonable_list(ra),
             "dec": _array_to_jsonable_list(dec),
@@ -1838,6 +1884,22 @@ class RpcServer:
         except ValueError as exc:
             raise RpcError(ERR_INVALID_PARAMS, str(exc)) from exc
         return {"overview": self._scan_overview(ws)}
+
+    def _append_scan(self, params: dict[str, Any]) -> dict[str, Any]:
+        ws = self._resolve_scan_workspace(int(params.get("handle", -1)))
+        path = params.get("path")
+        if not path:
+            raise RpcError(ERR_INVALID_PARAMS, "path is required")
+        if not ws.calibrated:
+            raise RpcError(
+                ERR_INVALID_PARAMS, "scan must be calibrated before appending scans"
+            )
+        try:
+            scan = read_scn(Path(str(path)))
+        except Exception as exc:  # noqa: BLE001
+            raise RpcError(ERR_IO, f"failed to open scan: {exc}") from exc
+        added = append_scan_source(ws, scan)
+        return {"added": int(added), "overview": self._scan_overview(ws)}
 
     def _determine_scan_peak(self, params: dict[str, Any]) -> dict[str, Any]:
         ws = self._resolve_scan_workspace(int(params.get("handle", -1)))

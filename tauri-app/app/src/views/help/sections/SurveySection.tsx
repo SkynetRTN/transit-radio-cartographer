@@ -43,7 +43,9 @@ export function SurveySection() {
         The bracket-cleaning UI is the <em>same</em> as Calibrate Scan: Cut
         Segment (horizontal drag), Select Declination (vertical drag), toggle
         Pre / Post, Undo, then click <strong>Calibrate Survey</strong>{' '}
-        to apply.
+        to apply. The gain calibration stays available afterward — the button
+        becomes <strong>Re-Calibrate Survey</strong> so you can go back and redo
+        it at any time.
       </p>
       <figure className="help-figure">
         <img src={calibrateBracketsShot} alt="The two-bracket survey calibration UI" />
@@ -66,13 +68,15 @@ export function SurveySection() {
           changes to <code>Remove RFI (click…)</code> to confirm it's armed.
         </li>
         <li>
-          <strong>Click one endpoint</strong> on the Flux plot. A pending
-          marker appears.
+          <strong>Click one endpoint anywhere</strong> on the Flux plot — the
+          endpoints are free-floating and are <em>not</em> snapped to data
+          points. A pending marker appears.
         </li>
         <li>
           <strong>Click a second endpoint.</strong> A line is drawn between the
-          two points and samples inside that declination band are moved to the
-          Removed plot. The tool stays armed so you can keep removing.
+          two free-cursor points (the preview follows your cursor) and samples
+          inside that declination band are moved to the Removed plot. The tool
+          stays armed so you can keep removing.
         </li>
       </ol>
       <figure className="help-figure">
@@ -138,7 +142,10 @@ export function SurveySection() {
         When the sweep looks clean, click <strong>Accept Sweep</strong>. The
         sweep is marked accepted (a tag appears next to the file name and sweep number) and pending
         edits are committed. When you click <strong>Accept Sweep</strong> it will
-        automatically advance to the next unaccepted sweep.
+        automatically advance to the next unaccepted sweep. Accepting the{' '}
+        <em>final</em> sweep keeps you on that sweep and simply enables the{' '}
+        <strong>Create Pre-Image</strong> button — it no longer jumps straight
+        to the pre-image, so nothing is built until you ask for it.
       </p>
       <p>
         Accepting isn't final — you can navigate back to an accepted sweep and
@@ -153,10 +160,18 @@ export function SurveySection() {
       <h3>4. Navigate sweeps</h3>
       <p>
         Use the <strong>Prev</strong> / <strong>Next</strong> buttons or{' '}
-        <strong>type a sweep number</strong> in the sweep input field — these
+        <strong>type a sweep number</strong> in the sweep input field (type the
+        number and press <kbd>Enter</kbd> — there are no up/down arrows) — these
         just move between sweeps and do <em>not</em> accept anything. This allows you to
         navigate between sweeps without committing changes. The
         progress indicator <code>N / M sweeps accepted</code> updates live.
+      </p>
+      <p>
+        If you edit an already-accepted sweep and then try to move away without
+        clicking <strong>Apply Edits</strong>, a prompt asks whether to save
+        those edits first — <strong>Yes</strong> applies them and moves on,{' '}
+        <strong>No</strong> leaves them unapplied, and <strong>Cancel</strong>{' '}
+        keeps you on the sweep.
       </p>
       <p>
         <strong>Keyboard shortcuts</strong> (active whenever the sweep-number

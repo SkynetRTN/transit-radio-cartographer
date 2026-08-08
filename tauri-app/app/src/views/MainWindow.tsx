@@ -13,7 +13,6 @@ import { AboutBox } from './AboutBox';
 import { PreImageView } from './PreImageView';
 import { ImageView } from './ImageView';
 import { NumericInputDialog, type NumericPrompt } from './dialogs/NumericInputDialog';
-import { SelectInputDialog, type SelectPrompt } from './dialogs/SelectInputDialog';
 import { TextInputDialog, type TextPrompt } from './dialogs/TextInputDialog';
 import { YesNoCancelDialog } from './dialogs/YesNoCancelDialog';
 import { ColorPickDialog } from './dialogs/ColorPickDialog';
@@ -23,7 +22,7 @@ import { useImageSave } from '../lib/useImageSave';
 import { MenuBarShell, MenuTrigger } from './chrome/MenuBar';
 import { StatusBar } from './chrome/StatusBar';
 import { useSurvey } from '../state/survey-context';
-import { useScan, type PeakFitKind } from '../state/scan-context';
+import { useScan } from '../state/scan-context';
 import { useFluxCal } from '../state/flux-cal-context';
 import { useTheme, type Theme } from '../state/theme-context';
 import { rpcClient, type ChannelColor, type ImageMeta, type RgbImageMeta } from '../ipc/client';
@@ -86,12 +85,11 @@ export function MainWindow() {
     dirty: scanDirty,
     save: saveScan,
     setScanName,
-    peakFitKind,
-    setPeakFitKind,
+    appendScan,
     resetForEngineRestart: resetScanForEngineRestart,
   } = useScan();
   const fluxCal = useFluxCal();
-  const { saveImageQuick, saveImageAs, saveBitmapAs } = useImageSave();
+  const { saveImageQuick, saveImageAs, savePngAs } = useImageSave();
   const { theme, setTheme } = useTheme();
   const hasSurvey = survey !== null;
   // Image-menu items act on a built image, so they enable as soon as one
@@ -209,7 +207,6 @@ export function MainWindow() {
   } | null>(null);
 
   const [numericPrompt, setNumericPrompt] = useState<NumericPrompt | null>(null);
-  const [selectPrompt, setSelectPrompt] = useState<SelectPrompt | null>(null);
   const [textPrompt, setTextPrompt] = useState<TextPrompt | null>(null);
   const [yesNoPrompt, setYesNoPrompt] = useState<{
     title: string;
@@ -454,6 +451,30 @@ export function MainWindow() {
     await openScan(path);
   }, [openScan]);
 
+  // BUG-006 (dan): append another `.scn`'s samples onto the current scan plot.
+  const handleAppendScan = useCallback(async () => {
+    setOpenMenu(null);
+    if (!hasScan) return;
+    let path: string | null = null;
+    try {
+      const selected = await openDialog({
+        multiple: false,
+        directory: false,
+        title: 'Append Scan',
+        filters: [
+          { name: 'Scan (.scn)', extensions: ['scn'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      });
+      path = typeof selected === 'string' ? selected : null;
+    } catch (err) {
+      console.error('file dialog failed', err);
+      return;
+    }
+    if (!path) return;
+    await appendScan(path);
+  }, [hasScan, appendScan]);
+
   const pickAndLoadCal = useCallback(async () => {
     setOpenMenu(null);
     let path: string | null = null;
@@ -518,9 +539,12 @@ export function MainWindow() {
     await fluxCal.saveAs(target);
   }, [fluxCal]);
 
-  const handleNewCalibration = useCallback(() => {
+  // BUG-004 (dan): "Open Flux Calibration Tool" — open the editor. If a
+  // calibration is already loaded/selected, show it populated; otherwise start a
+  // fresh blank table. (Merges the old "New Calibration" + "Open Calibration".)
+  const handleOpenFluxCalTool = useCallback(() => {
     setOpenMenu(null);
-    fluxCal.newCalibration();
+    if (!fluxCal.table) fluxCal.newCalibration();
     setAuxView('flux-cal');
   }, [fluxCal]);
 
@@ -589,14 +613,14 @@ export function MainWindow() {
     }
   }, [saveImageAs]);
 
-  const handleSaveBitmapAs = useCallback(async () => {
+  const handleSavePngAs = useCallback(async () => {
     setOpenMenu(null);
     try {
-      await saveBitmapAs();
+      await savePngAs();
     } catch (e) {
       setWarning((e as Error).message);
     }
-  }, [saveBitmapAs]);
+  }, [savePngAs]);
 
   const startCompose = useCallback(
     async (mode: ComposeMode) => {
@@ -1244,20 +1268,6 @@ export function MainWindow() {
     }
   }, [colorCompose, image, rgbImage, setRgbImage]);
 
-  const handleChangeCalibrationName = useCallback(() => {
-    setOpenMenu(null);
-    if (!fluxCal.table) return;
-    setTextPrompt({
-      title: 'Change Calibration Name',
-      label: 'Calibration name:',
-      defaultValue: fluxCal.table.caption,
-      onSubmit: (value) => {
-        setTextPrompt(null);
-        fluxCal.setCaption(value);
-      },
-    });
-  }, [fluxCal]);
-
   const handleChangeImageName = useCallback(() => {
     setOpenMenu(null);
     if (!image) return;
@@ -1450,10 +1460,10 @@ export function MainWindow() {
               <button
                 role="menuitem"
                 disabled={!hasImage}
-                onClick={() => void handleSaveBitmapAs()}
+                onClick={() => void handleSavePngAs()}
                 title={hasImage ? undefined : 'Available after you build or upload an image'}
               >
-                Save Bitmap As…
+                Save as PNG…
               </button>
               <div className="menu-sep" />
               <button
@@ -1524,7 +1534,7 @@ export function MainWindow() {
                   if (!image) return;
                   setNumericPrompt({
                     title: 'Change Magnifier Size',
-                    label: 'Magnifier half-width (cells, 1–200):',
+                    label: 'Magnifier half-width (degrees):',
                     defaultValue: magnifierHalfSize,
                     onSubmit: (value) => {
                       setNumericPrompt(null);
@@ -1626,14 +1636,26 @@ export function MainWindow() {
               </button>
               <button
                 role="menuitem"
-                disabled={!hasSurvey || !hasSurveySavePath}
+                disabled={!hasSurvey || !workspace?.calibrated || !hasSurveySavePath}
+                // BUG-003 (dan): data-tooltip renders via CSS — native `title`
+                // never shows on disabled buttons in the embedded webview.
+                data-tooltip={
+                  hasSurvey && !workspace?.calibrated
+                    ? 'Must calibrate before saving as .srv'
+                    : undefined
+                }
                 onClick={() => void handleSaveSurvey()}
               >
                 Save Survey
               </button>
               <button
                 role="menuitem"
-                disabled={!hasSurvey}
+                disabled={!hasSurvey || !workspace?.calibrated}
+                data-tooltip={
+                  hasSurvey && !workspace?.calibrated
+                    ? 'Must calibrate before saving as .srv'
+                    : undefined
+                }
                 onClick={() => void handleSaveSurveyAs()}
               >
                 Save Survey As…
@@ -1672,20 +1694,40 @@ export function MainWindow() {
               </button>
               <button
                 role="menuitem"
-                disabled={!hasScan || !hasScanSavePath}
+                disabled={!hasScan || !scanOverview?.calibrated || !hasScanSavePath}
+                data-tooltip={
+                  hasScan && !scanOverview?.calibrated
+                    ? 'Must calibrate before saving as .scn'
+                    : undefined
+                }
                 onClick={() => void handleSaveScan()}
               >
                 Save Scan
               </button>
               <button
                 role="menuitem"
-                disabled={!hasScan}
+                disabled={!hasScan || !scanOverview?.calibrated}
+                data-tooltip={
+                  hasScan && !scanOverview?.calibrated
+                    ? 'Must calibrate before saving as .scn'
+                    : undefined
+                }
                 onClick={() => void handleSaveScanAs()}
               >
                 Save Scan As…
               </button>
               <div className="menu-sep" />
-              <button role="menuitem" disabled={!hasScan}>
+              <button
+                role="menuitem"
+                disabled={!hasScan || !scanOverview?.calibrated}
+                data-tooltip={
+                  hasScan && !scanOverview?.calibrated
+                    ? 'Calibrate the scan before appending scans'
+                    : undefined
+                }
+                title="Add another .scn’s samples onto the current scan plot"
+                onClick={() => void handleAppendScan()}
+              >
                 Append Scan…
               </button>
               <div className="menu-sep" />
@@ -1695,33 +1737,6 @@ export function MainWindow() {
                 onClick={handleChangeScanName}
               >
                 Change Scan Name…
-              </button>
-              <div className="menu-sep" />
-              <button
-                role="menuitem"
-                disabled={!hasScan}
-                onClick={() => {
-                  setOpenMenu(null);
-                  setSelectPrompt({
-                    title: 'Change Determine Peak Fit',
-                    label: 'Fit kind:',
-                    defaultValue: peakFitKind,
-                    options: [
-                      { value: 'gaussian', label: 'Gaussian' },
-                      { value: 'cos2', label: 'Squared Cosine' },
-                      { value: 'poly2', label: '2nd Degree Polynomial' },
-                      { value: 'poly3', label: '3rd Degree Polynomial' },
-                      { value: 'poly4', label: '4th Degree Polynomial' },
-                      { value: 'max', label: 'Max Value' },
-                    ],
-                    onSubmit: (value) => {
-                      setSelectPrompt(null);
-                      setPeakFitKind(value as PeakFitKind);
-                    },
-                  });
-                }}
-              >
-                Change Determine Peak Fit…
               </button>
             </div>
           )}
@@ -1738,20 +1753,10 @@ export function MainWindow() {
               <button role="menuitem" onClick={() => void pickAndLoadCal()}>
                 Select Calibration…
               </button>
+              <button role="menuitem" onClick={handleOpenFluxCalTool}>
+                Open Flux Calibration Tool
+              </button>
               <div className="menu-sep" />
-              <button role="menuitem" onClick={handleNewCalibration}>
-                New Calibration…
-              </button>
-              <button
-                role="menuitem"
-                onClick={() => {
-                  setOpenMenu(null);
-                  if (fluxCal.table) setAuxView('flux-cal');
-                  else void pickAndLoadCal();
-                }}
-              >
-                Open Calibration…
-              </button>
               <button
                 role="menuitem"
                 disabled={!fluxCal.table || !fluxCal.filePath || !fluxCal.dirty}
@@ -1765,14 +1770,6 @@ export function MainWindow() {
                 onClick={() => void handleSaveCalAs()}
               >
                 Save Calibration As…
-              </button>
-              <div className="menu-sep" />
-              <button
-                role="menuitem"
-                disabled={!fluxCal.table}
-                onClick={handleChangeCalibrationName}
-              >
-                Change Calibration Name…
               </button>
             </div>
           )}
@@ -1880,12 +1877,6 @@ export function MainWindow() {
             cancelCompose();
             cancelColorCompose();
           }}
-        />
-      )}
-      {selectPrompt && (
-        <SelectInputDialog
-          prompt={selectPrompt}
-          onCancel={() => setSelectPrompt(null)}
         />
       )}
       {textPrompt && (

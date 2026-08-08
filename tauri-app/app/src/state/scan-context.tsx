@@ -39,6 +39,9 @@ export interface ScanState {
   setViewMode: (mode: ScanViewMode) => void;
   setOverview: (overview: ScanOverview) => void;
   setScanName: (name: string) => Promise<void>;
+  // BUG-006 (dan): append another `.scn`'s samples onto the current scan plot,
+  // matching the legacy "Append Scan" overlay (vb/scanform.frm:1948-2002).
+  appendScan: (path: string) => Promise<void>;
   markDirty: () => void;
   refreshOverview: () => Promise<void>;
   save: (path?: string) => Promise<string | null>;
@@ -66,7 +69,10 @@ export function ScanProvider({ children }: { children: ReactNode }) {
   const [savePath, setSavePath] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [peakFitKind, setPeakFitKind] = useState<PeakFitKind>('gaussian');
+  // BUG-001 (dan): default the Determine Peak fit to a 2nd-order polynomial —
+  // the tutorial now tells the user to drag over the peak only and let the
+  // quadratic find its maximum.
+  const [peakFitKind, setPeakFitKind] = useState<PeakFitKind>('poly2');
 
   const handleRef = useRef<number | null>(handle);
   const savePathRef = useRef<string | null>(savePath);
@@ -104,6 +110,9 @@ export function ScanProvider({ children }: { children: ReactNode }) {
         setError('Engine handle expired. Please re-open your files.');
         return;
       }
+      // BUG-005 (dan): this used to call itself here — infinite recursion, so
+      // every non-stale RPC error surfaced as "Maximum call stack size
+      // exceeded" instead of its real message. Surface the message instead.
       setError(e instanceof Error ? e.message : String(e));
     },
     [resetForEngineRestart],
@@ -163,6 +172,18 @@ export function ScanProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const appendScan = useCallback(async (path: string) => {
+    const h = handleRef.current;
+    if (h === null) return;
+    try {
+      const res = await rpcClient.appendScan(h, path);
+      setOverview(res.overview);
+      setDirty(true);
+    } catch (e) {
+      handleRpcError(e);
+    }
+  }, []);
+
   const refreshOverview = useCallback(async () => {
     const h = handleRef.current;
     if (h === null) return;
@@ -210,6 +231,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       setViewMode,
       setOverview,
       setScanName,
+      appendScan,
       markDirty,
       refreshOverview,
       save,
@@ -230,6 +252,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       open,
       close,
       setScanName,
+      appendScan,
       markDirty,
       refreshOverview,
       save,

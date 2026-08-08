@@ -80,6 +80,13 @@ export function useResizable(
       if (!d) return;
       const pos = axis === 'x' ? e.clientX : e.clientY;
       setSizeState(clamp(d.start + (d.origin - pos), min, max));
+      // The plot components that use Plotly's `responsive: true` (PointScatter,
+      // SweepPlot) only refit on a *window* resize — dragging this divider
+      // changes their container but fires no such event, so the plot used to
+      // stay its old width while only the panel moved. Nudge a resize so they
+      // reflow live with the drag. ImagePlot has its own ResizeObserver and is
+      // unaffected by the extra event. Plotly debounces resize internally.
+      window.dispatchEvent(new Event('resize'));
     };
     const onUp = () => {
       if (!dragRef.current) return;

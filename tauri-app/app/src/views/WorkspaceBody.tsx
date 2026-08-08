@@ -23,7 +23,11 @@ export function WorkspaceBody({ plots, side }: WorkspaceBodyProps) {
     axis: 'x',
   });
 
-  const sideTrack = size != null ? `${size}px` : 'clamp(150px, 16%, 220px)';
+  // Default a touch wider than the old clamp(150px, 16%, 220px): the survey
+  // side panel has the most buttons, and at the narrow end their labels wrapped
+  // to multiple lines, making the column tall enough to need scrolling to reach
+  // the last button. This fits the labels on one line at the default width.
+  const sideTrack = size != null ? `${size}px` : 'clamp(190px, 17%, 260px)';
 
   const onDividerDown = (e: React.PointerEvent) => {
     // Seed the first drag from the side panel's current rendered width (the

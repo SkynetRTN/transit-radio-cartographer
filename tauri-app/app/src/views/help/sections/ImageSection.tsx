@@ -12,7 +12,6 @@
 
 import imageShot from '../images/image.png?url';
 import paletteShot from '../images/image-palette.png?url';
-import saveShot from '../images/image-save.png?url';
 
 export function ImageSection() {
   return (
@@ -45,10 +44,13 @@ export function ImageSection() {
       <h4>1a. Zoom and pan</h4>
       <p>
         <strong>Drag a box</strong> anywhere on the image to zoom the axes to
-        that region — any shape works, the view fits exactly what you draw.{' '}
-        <strong>Double-click</strong> to reset to the full map. The default view
-        preserves the true sky shape; because zooming is free, a zoomed-in
-        region may look stretched, which is expected.
+        that region — any shape works, the view fits exactly what you draw and
+        keeps the correct (dec-corrected) sky proportions of the zoomed region.
+        You can also zoom with <strong>Ctrl</strong> <code>+</code> /{' '}
+        <strong>Ctrl</strong> <code>-</code> (⌘ on macOS).{' '}
+        <strong>Double-click</strong> to reset to the full map — which restores
+        the full-image shape. The <strong>right mouse button</strong> never
+        zooms; it only opens the magnifier.
       </p>
 
       <h4>1b. Pin a pixel</h4>
@@ -59,18 +61,22 @@ export function ImageSection() {
         mouse or zoom elsewhere. Click <code>Unpin</code> — directly under the
         readout — to release it. If you zoom to a region that doesn't contain
         the pinned pixel, the readout still shows its values even though the ring
-        is off-screen.
+        is off-screen. <strong>Double-clicking</strong> to zoom back out never
+        pins a point — and it releases any pin you had.
       </p>
 
       <h4>1c. Magnifier</h4>
       <p>
-        <strong>Right-click</strong> a pixel to open the{' '}
-        <strong>magnifier</strong> — a zoomed inset of the region around that
-        spot, shown in the side panel. Use the <strong>arrow keys</strong> to
-        nudge the magnified area (hold <code>Shift</code> for ×5 steps), and{' '}
-        <code>Close Magnifier</code> to dismiss it. Change how many cells it
-        covers with <code>Image → Change Magnifier Size…</code>. Right-clicking
-        only opens the magnifier — it never disturbs your current zoom.
+        Click <strong>Open Magnifier</strong> in the side panel to open the{' '}
+        <strong>magnifier</strong> — a zoomed inset of the sky, shown right below
+        the button. (<strong>Right-clicking</strong> a pixel also opens it,
+        centered on that cell; neither way pins a point.) Use the{' '}
+        <strong>arrow keys</strong> to nudge the magnified area (hold{' '}
+        <code>Shift</code> for ×5 steps), and <strong>Close Magnifier</strong>{' '}
+        (same button) to dismiss it. The loupe is always square on the
+        dec-corrected sky; set its half-width in <strong>degrees</strong> with{' '}
+        <code>Image → Change Magnifier Size…</code>. Right-clicking only opens
+        the magnifier — it never disturbs your current zoom.
       </p>
       <p>
         While the magnifier is open, three buttons below the RA/Dec/Flux readout
@@ -173,10 +179,8 @@ export function ImageSection() {
 
       <h3>4. Save the image</h3>
       <p>
-        The scalar Image view has in-view buttons on the right —{' '}
-        <code>Save Image</code>, <code>Save Image As…</code>, and{' '}
-        <code>Save Bitmap As…</code> — so you can save without opening a menu.
-        The same actions are also on the <code>Image</code> menu:
+        Saving lives on the <code>Image</code> menu (the Image view itself has no
+        save buttons):
       </p>
       <ul>
         <li>
@@ -184,20 +188,14 @@ export function ImageSection() {
           the current path.
         </li>
         <li>
-          <code>Save Image As…</code> — Saves to a new path.
+          <code>Save Image As…</code> — Saves to a new path (<code>.img</code> or{' '}
+          <code>.fits</code>).
         </li>
         <li>
-          <code>Save Bitmap As…</code> — Exports a <code>.png</code> /{' '}
-          <code>.bmp</code> for use in papers / slides.
+          <code>Save as PNG…</code> — Exports a full-resolution <code>.png</code>
+          {' '}for use in papers / slides.
         </li>
       </ul>
-      <figure className="help-figure">
-        <img src={saveShot} alt="In-view Save Image, Save Image As, and Save Bitmap As buttons" />
-        <figcaption>
-          The in-view Save buttons on the right of the Image view: Save Image,
-          Save Image As…, and Save Bitmap As….
-        </figcaption>
-      </figure>
 
       <h3>5. Compose multiple images</h3>
       <ul>

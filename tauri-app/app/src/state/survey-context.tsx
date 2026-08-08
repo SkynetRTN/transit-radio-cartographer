@@ -70,14 +70,19 @@ export interface SurveyState {
   currentSweepIndex: number;
   acceptedSweeps: Set<number>;
   // Which pre-image reductions have been applied to the engine workspace.
-  // Lives here (not in PreImageView) so "Back to Pre Image" from the Image
-  // view doesn't forget them — the reductions are already applied engine-side,
-  // and re-running them would apply them a second time.
+  // Lives here (not in PreImageView) so navigating away (Back to Sweeps, or
+  // "Back to Pre Image" from the Image view) doesn't forget them — the
+  // reductions are already applied engine-side, and re-running them would
+  // apply them a second time (BUG-010 dan).
   reductionsDone: { smooth: boolean; baseline: boolean; align: boolean };
   markReductionDone: (op: 'smooth' | 'baseline' | 'align') => void;
   // The engine drops prior reductions when gain calibration is (re)applied —
   // callers of apply_gain_calibration must reset the flags to match.
   resetReductions: () => void;
+  // BUG-010 (dan): the Make Image pixel size also persists across pre-image ↔
+  // survey navigation.
+  preImagePix: number;
+  setPreImagePix: (pix: number) => void;
   open: (path: string) => Promise<void>;
   close: () => Promise<void>;
   setViewMode: (mode: WorkspaceViewMode) => void;
@@ -147,7 +152,8 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     pixels: ImagePixels;
     savePath: string | null;
   } | null>(null);
-  const [magnifierHalfSize, setMagnifierHalfSizeState] = useState<number>(15);
+  // BUG-025 (dan): magnifier half-window in DEGREES (was cells). ~1° default.
+  const [magnifierHalfSize, setMagnifierHalfSizeState] = useState<number>(1.0);
   const [imageDisplay, setImageDisplayState] = useState<ImageDisplayMode>('sky');
   const [loading, setLoading] = useState(false);
   const [reducing, setReducing] = useState(false);
@@ -157,11 +163,16 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   const [savePath, setSavePath] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  // BUG-010 (dan): the pre-image reduction pipeline progress and its pixel
+  // size persist across pre-image ↔ survey navigation, so re-entering the
+  // pre-image (via Create Pre-Image) doesn't reset the progress and re-stack
+  // the reductions. Reset on open / close / resetSweepReview / recalibration.
   const [reductionsDone, setReductionsDone] = useState({
     smooth: false,
     baseline: false,
     align: false,
   });
+  const [preImagePix, setPreImagePix] = useState<number>(0.06);
 
   const surveyRef = useRef<SurveyMeta | null>(survey);
   const workspaceHandleRef = useRef<number | null>(workspaceHandle);
@@ -258,6 +269,9 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
         setError('Engine handle expired. Please re-open your files.');
         return;
       }
+      // BUG-005 (dan): this used to call itself here — infinite recursion, so
+      // every non-stale RPC error surfaced as "Maximum call stack size
+      // exceeded" instead of its real message. Surface the message instead.
       setError(e instanceof Error ? e.message : String(e));
     },
     [resetForEngineRestart],
@@ -285,6 +299,8 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       setImageFluxRangeState(null);
       setImageSavePath(null);
       setImageNameState(meta.workspace?.name ?? 'image');
+      // Fresh survey → reset the pre-image pipeline progress (BUG-010).
+      setPreImagePix(0.06);
       setReductionsDone({ smooth: false, baseline: false, align: false });
       if (isSaved) {
         const sweepCount = meta.workspace?.source_count ?? 0;
@@ -350,6 +366,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     setViewMode('survey');
     setCurrentSweepIndex(0);
     setAcceptedSweeps(new Set());
+    setPreImagePix(0.06);
     setSavePath(null);
     setDirty(false);
     setReductionsDone({ smooth: false, baseline: false, align: false });
@@ -361,10 +378,10 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     const next = new Set(acceptedSweeps);
     next.add(currentSweepIndex);
     setAcceptedSweeps(next);
-    if (next.size >= sourceCount) {
-      setViewMode('pre-image');
-      return;
-    }
+    // BUG-010 (dan): accepting the final sweep no longer jumps to the pre-image.
+    // Stay on the last sweep — the "Create Pre-Image" button becomes enabled and
+    // is the only way into the pre-image, so it isn't rebuilt until asked for.
+    if (next.size >= sourceCount) return;
     // Advance to the next un-accepted sweep, wrapping if needed.
     for (let i = 1; i <= sourceCount; i++) {
       const candidate = (currentSweepIndex + i) % sourceCount;
@@ -378,18 +395,21 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   // Bulk-accept every sweep at once (bound to a keyboard shortcut, not an
   // exposed button — the one-by-one review is the intended default). Callers
   // in SurveyView commit any pending RFI edits on the current sweep first.
+  // BUG-010 (dan): like acceptCurrentSweep, this stays on the current sweep and
+  // just enables "Create Pre-Image" rather than navigating there itself.
   const acceptAll = useCallback(() => {
     const sourceCount = workspace?.source_count ?? 0;
     if (sourceCount <= 0) return;
     const next = new Set<number>();
     for (let i = 0; i < sourceCount; i++) next.add(i);
     setAcceptedSweeps(next);
-    setViewMode('pre-image');
   }, [workspace?.source_count]);
 
   const resetSweepReview = useCallback(() => {
     setAcceptedSweeps(new Set());
     setCurrentSweepIndex(0);
+    setPreImagePix(0.06);
+    setReductionsDone({ smooth: false, baseline: false, align: false });
   }, []);
 
   const markReductionDone = useCallback((op: 'smooth' | 'baseline' | 'align') => {
@@ -592,10 +612,11 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setMagnifierHalfSizeAction = useCallback((n: number) => {
-    // Clamp to a sane range so the magnifier always has at least a 3×3
-    // window and never asks for more cells than the image actually contains.
-    if (!Number.isFinite(n)) return;
-    setMagnifierHalfSizeState(Math.max(1, Math.min(200, Math.round(n))));
+    // BUG-025 (dan): the half-window is in DEGREES now. Clamp to a sane angular
+    // range so the loupe is neither a single cell nor larger than a typical
+    // survey field.
+    if (!Number.isFinite(n) || n <= 0) return;
+    setMagnifierHalfSizeState(Math.max(0.05, Math.min(20, n)));
   }, []);
 
   const saveImageAction = useCallback(async (path: string): Promise<string | null> => {
@@ -623,14 +644,19 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
     // saved image is at least gain-calibrated, so default to GCU.
     opts.unit = current.unit ?? 'GCU';
     try {
-      if (ext === '.bmp') {
-        const bmpOpts: { palette?: PaletteStop[]; flux_min?: number; flux_max?: number } = {};
-        if (palette) bmpOpts.palette = palette;
+      if (ext === '.bmp' || ext === '.png') {
+        const rasterOpts: { palette?: PaletteStop[]; flux_min?: number; flux_max?: number } = {};
+        if (palette) rasterOpts.palette = palette;
         if (flux) {
-          bmpOpts.flux_min = flux.min;
-          bmpOpts.flux_max = flux.max;
+          rasterOpts.flux_min = flux.min;
+          rasterOpts.flux_max = flux.max;
         }
-        const r = await rpcClient.saveBitmap(current.handle, path, bmpOpts);
+        // BUG-005 (dan): .png is the new raster export; .bmp still works if the
+        // user types it.
+        const r =
+          ext === '.png'
+            ? await rpcClient.savePng(current.handle, path, rasterOpts)
+            : await rpcClient.saveBitmap(current.handle, path, rasterOpts);
         return r.path;
       }
       const r = await rpcClient.saveImage(current.handle, path, opts);
@@ -747,6 +773,8 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       reductionsDone,
       markReductionDone,
       resetReductions,
+      preImagePix,
+      setPreImagePix,
       open,
       close,
       setViewMode,
@@ -801,6 +829,7 @@ export function SurveyProvider({ children }: { children: ReactNode }) {
       reductionsDone,
       markReductionDone,
       resetReductions,
+      preImagePix,
       open,
       close,
       acceptCurrentSweep,

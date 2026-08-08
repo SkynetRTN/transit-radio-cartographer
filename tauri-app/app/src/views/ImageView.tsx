@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { save as saveDialog } from '@tauri-apps/plugin-dialog';
-import { useSurvey, type ImageDisplayMode } from '../state/survey-context';
+import { useSurvey } from '../state/survey-context';
 import { ImagePlot, type ImagePoint, type BoxOverlay } from '../lib/plots/ImagePlot';
 import { RgbImagePlot, type RgbImagePoint } from '../lib/plots/RgbImagePlot';
-import { useImageSave } from '../lib/useImageSave';
 import { computeFluxStats } from '../lib/fluxStats';
 import { ResizeDivider, useResizable } from '../lib/useResizable';
 import { WorkspaceBody } from './WorkspaceBody';
@@ -80,18 +79,17 @@ interface MagnifierData {
   bounds: { colMin: number; colMax: number; rowMin: number; rowMax: number };
 }
 
-// Choose the half-window (in cells) so the magnified region is roughly SQUARE
-// ON SCREEN for the current display mode — not a square block of cells. On a
-// sky-aspect image a square cell block draws as a rectangle, which made the
-// magnifier's location box look nothing like the (square) magnifier. Balancing
-// the two cell counts by the on-screen cell aspect keeps the box square and the
-// magnified region honest.
+// BUG-025 (dan): the magnifier half-window is now specified in DEGREES and is
+// always square on the DEC-CORRECTED sky (independent of display mode). Convert
+// that angular half-size into per-axis cell counts: the box spans `halfDeg`
+// degrees of declination and `halfDeg` degrees of on-sky arc in the RA
+// direction (RA·cos(dec)). One degree of RA is 240 stored seconds, so the
+// on-sky RA extent in seconds is halfDeg·240/cos(dec).
 function magnifierHalfExtents(
-  meta: ImageMeta | null,
+  meta: ImageMeta | { min_ra: number; max_ra: number; min_dec: number; max_dec: number } | null,
   w: number,
   h: number,
-  half: number,
-  displayMode: ImageDisplayMode,
+  halfDeg: number,
 ): { colHalf: number; rowHalf: number } {
   const bounded =
     meta &&
@@ -103,28 +101,21 @@ function magnifierHalfExtents(
     Number.isFinite(meta.max_dec) &&
     meta.max_ra > meta.min_ra &&
     meta.max_dec > meta.min_dec;
-  // No sky geometry to honor ('stretch' or an unbounded image) — fall back to a
-  // square cell block.
-  if (!bounded || displayMode === 'stretch') return { colHalf: half, rowHalf: half };
-  const raSpan = meta!.max_ra - meta!.min_ra;
-  const decSpan = meta!.max_dec - meta!.min_dec;
+  // No sky geometry to honor (unbounded/pixel-index image) — approximate cells
+  // from a nominal 0.06°/cell so the window is still sized in degrees.
+  if (!bounded) {
+    const cells = Math.max(1, Math.round(halfDeg / 0.06));
+    return { colHalf: cells, rowHalf: cells };
+  }
+  const raSpan = meta!.max_ra - meta!.min_ra; // seconds of RA
+  const decSpan = meta!.max_dec - meta!.min_dec; // degrees of dec
   const decCenter = (meta!.min_dec + meta!.max_dec) / 2;
-  const raPerCell = raSpan / (w - 1);
-  const decPerCell = decSpan / (h - 1);
-  // px-per-RA ÷ px-per-Dec — the same `ratio` ImagePlot.plotAspect uses.
-  const ratio =
-    displayMode === 'raw'
-      ? 1 / 240
-      : displayMode === 'pixel'
-        ? (decSpan * w) / (raSpan * h)
-        : Math.cos((decCenter * Math.PI) / 180) / 240;
-  // On-screen width of one column-cell ÷ height of one row-cell. The box is
-  // square on screen when rowHalf / colHalf == cellAspect; split the change
-  // around a geometric mean so neither dimension's window blows up.
-  const cellAspect = (ratio * raPerCell) / decPerCell;
-  if (!Number.isFinite(cellAspect) || cellAspect <= 0) return { colHalf: half, rowHalf: half };
-  const k = Math.sqrt(cellAspect);
-  return { colHalf: Math.max(1, Math.round(half / k)), rowHalf: Math.max(1, Math.round(half * k)) };
+  const raPerCell = raSpan / (w - 1); // seconds / cell
+  const decPerCell = decSpan / (h - 1); // degrees / cell
+  const cosd = Math.max(0.01, Math.cos((decCenter * Math.PI) / 180));
+  const rowHalf = Math.max(1, Math.round(halfDeg / decPerCell));
+  const colHalf = Math.max(1, Math.round((halfDeg * 240) / (raPerCell * cosd)));
+  return { colHalf, rowHalf };
 }
 
 // Slice the source pixel grid around (col, row) with per-axis half-sizes in
@@ -135,10 +126,9 @@ function buildMagnifier(
   pixels: ImagePixels,
   meta: ImageMeta | null,
   center: { col: number; row: number },
-  half: number,
-  displayMode: ImageDisplayMode,
+  halfDeg: number,
 ): MagnifierData {
-  const { colHalf, rowHalf } = magnifierHalfExtents(meta, pixels.width, pixels.height, half, displayMode);
+  const { colHalf, rowHalf } = magnifierHalfExtents(meta, pixels.width, pixels.height, halfDeg);
   const colMin = Math.max(0, center.col - colHalf);
   const colMax = Math.min(pixels.width - 1, center.col + colHalf);
   const rowMin = Math.max(0, center.row - rowHalf);
@@ -219,12 +209,15 @@ function buildRgbMagnifier(
   pixels: RgbImagePixels,
   meta: RgbImageMeta | null,
   center: { col: number; row: number },
-  half: number,
+  halfDeg: number,
 ): RgbMagnifierData {
-  const colMin = Math.max(0, center.col - half);
-  const colMax = Math.min(pixels.width - 1, center.col + half);
-  const rowMin = Math.max(0, center.row - half);
-  const rowMax = Math.min(pixels.height - 1, center.row + half);
+  // BUG-025: size the RGB loupe in degrees, square on the dec-corrected sky,
+  // the same way the scalar magnifier does.
+  const { colHalf, rowHalf } = magnifierHalfExtents(meta, pixels.width, pixels.height, halfDeg);
+  const colMin = Math.max(0, center.col - colHalf);
+  const colMax = Math.min(pixels.width - 1, center.col + colHalf);
+  const rowMin = Math.max(0, center.row - rowHalf);
+  const rowMax = Math.min(pixels.height - 1, center.row + rowHalf);
   const slice = (grid: (number | null)[][]) => {
     const out: (number | null)[][] = [];
     for (let r = rowMin; r <= rowMax; r++) out.push(grid[r].slice(colMin, colMax + 1));
@@ -276,8 +269,6 @@ export function ImageView() {
     canRestoreScalar,
   } = useSurvey();
 
-  const { saveImageQuick, saveImageAs, saveBitmapAs } = useImageSave();
-
   // Draggable magnifier height (persisted). Replaces the old fixed 200px so a
   // cramped loupe can be dragged taller via the divider above it.
   const magHeight = useResizable('ogrc.magnifierHeight', 200, {
@@ -306,6 +297,14 @@ export function ImageView() {
     setMagnifierCenter(null);
     setShownStats(new Set());
   }, []);
+  // BUG-024/028 (dan): an always-present "Open Magnifier" button opens the loupe
+  // centered on the image (not on a clicked cell) and does NOT pin a point.
+  const openMagnifier = useCallback(() => {
+    if (!imagePixels) return;
+    const col = Math.floor((imagePixels.width - 1) / 2);
+    const row = Math.floor((imagePixels.height - 1) / 2);
+    setMagnifierCenter(pointFromColRow(imagePixels, image, col, row));
+  }, [imagePixels, image]);
   // RGB-composite cursor + magnifier (BUG-017). Kept separate from the scalar
   // state above because RGB cells carry no flux.
   const [rgbHover, setRgbHover] = useState<RgbImagePoint | null>(null);
@@ -368,10 +367,16 @@ export function ImageView() {
     setPinnedPoint(p);
   }, []);
 
+  // BUG-020 (dan): zooming back out (double-click reset) never pins — and it
+  // clears any pin left over from before the zoom.
+  const handleZoomReset = useCallback(() => {
+    setPinnedPoint(null);
+  }, []);
+
   const magnifier = useMemo(() => {
     if (!magnifierCenter || !imagePixels) return null;
-    return buildMagnifier(imagePixels, image, magnifierCenter, magnifierHalfSize, imageDisplay);
-  }, [magnifierCenter, imagePixels, image, magnifierHalfSize, imageDisplay]);
+    return buildMagnifier(imagePixels, image, magnifierCenter, magnifierHalfSize);
+  }, [magnifierCenter, imagePixels, image, magnifierHalfSize]);
 
   // Live flux stats for the current magnifier box. Recomputed whenever the box
   // (or the underlying image) changes, so the shown values track arrow-key
@@ -390,6 +395,22 @@ export function ImageView() {
     if (!rgbMagCenter || !rgbImagePixels) return null;
     return buildRgbMagnifier(rgbImagePixels, rgbImage, rgbMagCenter, magnifierHalfSize);
   }, [rgbMagCenter, rgbImagePixels, rgbImage, magnifierHalfSize]);
+
+  // BUG-024 (dan): open the RGB loupe centered on the composite (no pin).
+  const openRgbMagnifier = useCallback(() => {
+    if (!rgbImagePixels) return;
+    const col = Math.floor((rgbImagePixels.width - 1) / 2);
+    const row = Math.floor((rgbImagePixels.height - 1) / 2);
+    const ra =
+      rgbImage && rgbImagePixels.width > 1
+        ? rgbImage.max_ra - (col / (rgbImagePixels.width - 1)) * (rgbImage.max_ra - rgbImage.min_ra)
+        : col;
+    const dec =
+      rgbImage && rgbImagePixels.height > 1
+        ? rgbImage.min_dec + (row / (rgbImagePixels.height - 1)) * (rgbImage.max_dec - rgbImage.min_dec)
+        : row;
+    setRgbMagCenter({ col, row, ra, dec });
+  }, [rgbImagePixels, rgbImage]);
 
   // Arrow keys nudge the magnifier center while it's open. Hold Shift to
   // step in larger jumps. We skip the handler when an input is focused so
@@ -476,6 +497,7 @@ export function ImageView() {
                 onHover={setHoverPoint}
                 onClick={handleClick}
                 onContextMenu={handleContextMenu}
+                onZoomReset={handleZoomReset}
                 boxOverlay={magnifier?.overlay ?? null}
                 pinnedMarker={pinnedMarker}
                 displayMode={imageDisplay}
@@ -498,148 +520,44 @@ export function ImageView() {
           }
           side={
           <div className="workspace-side">
-            {hasScalar && (
-              <div className="side-hint">
-                Right-click the image to open the magnifier.
-                {magnifierCenter && <> Arrow keys move it (Shift = ×5).</>}
-              </div>
-            )}
-            {hasRgb && (
-              <div className="side-hint">
-                Drag to zoom (double-click to reset) · right-click to open the
-                magnifier.
-              </div>
-            )}
+            {/* BUG-027 (dan): side-panel order is Open/Close Magnifier →
+                magnifier → pin/hover readout → sum/avg/outside at the bottom.
+                BUG-026: the in-view scalar Save buttons are gone — saving lives
+                in the Image menu. */}
             <div className="side-buttons">
               {(workspace || (rgbImage && canRestoreScalar)) && (
                 <button onClick={handleBack}>
                   {rgbImage ? 'Back to Image' : 'Back to Pre Image'}
                 </button>
               )}
-              {magnifierCenter && (
-                <button onClick={closeMagnifier}>
-                  Close Magnifier
-                </button>
-              )}
-              {rgbMagCenter && (
-                <button onClick={() => setRgbMagCenter(null)}>
-                  Close Magnifier
-                </button>
-              )}
+              {/* BUG-024: an always-present Open/Close Magnifier toggle. */}
               {hasScalar && (
-                <>
-                  <div className="button-gap" />
-                  <button onClick={() => void runSave(saveImageQuick)}>
-                    Save Image
-                  </button>
-                  <button onClick={() => void runSave(saveImageAs)}>
-                    Save Image As…
-                  </button>
-                  <button onClick={() => void runSave(saveBitmapAs)}>
-                    Save Bitmap As…
-                  </button>
-                </>
+                <button onClick={magnifierCenter ? closeMagnifier : openMagnifier}>
+                  {magnifierCenter ? 'Close Magnifier' : 'Open Magnifier'}
+                </button>
               )}
               {hasRgb && (
-                <>
-                  <div className="button-gap" />
-                  <button onClick={() => void runSave(exportRgbPng)}>
-                    Export as PNG…
-                  </button>
-                </>
+                <button onClick={rgbMagCenter ? () => setRgbMagCenter(null) : openRgbMagnifier}>
+                  {rgbMagCenter ? 'Close Magnifier' : 'Open Magnifier'}
+                </button>
+              )}
+              {hasRgb && (
+                <button onClick={() => void runSave(exportRgbPng)}>
+                  Export as PNG…
+                </button>
               )}
               {saveError && <div className="side-error">{saveError}</div>}
             </div>
 
-            <div className="readout">
-              <div>
-                Image:{' '}
-                {hasScalar
-                  ? `${imagePixels!.width} × ${imagePixels!.height}`
-                  : `${rgbImagePixels!.width} × ${rgbImagePixels!.height} (RGB)`}
+            {hasScalar && (
+              <div className="side-hint">
+                Right-click the image also opens the magnifier at that cell.
+                {magnifierCenter && <> Arrow keys move it (Shift = ×5).</>}
               </div>
-              {/* Readout stays visible even when the cursor is off the image
-                  — em-dashes fill in when there's no point under the cursor
-                  (and no pinned point overriding it). */}
-              {hasScalar && (
-                <div className="point-readout">
-                  <div>RA: {displayPoint ? formatRaSeconds(displayPoint.ra) : '—'}</div>
-                  <div>Dec: {displayPoint ? formatDecDegrees(displayPoint.dec) : '—'}</div>
-                  <div>
-                    Flux:{' '}
-                    {displayPoint
-                      ? displayPoint.flux === null
-                        ? '—'  /* BUG-014: no-coverage cell — blank, not "0.0000" */
-                        : `${displayPoint.flux.toFixed(4)}${fluxUnit ? ` ${fluxUnit}` : ''}`
-                      : '—'}
-                  </div>
-                  {pinnedPoint && <div className="pinned-tag">pinned</div>}
-                  {pinnedPoint && (
-                    <button
-                      className="unpin-button"
-                      onClick={() => setPinnedPoint(null)}
-                    >
-                      Unpin
-                    </button>
-                  )}
-                </div>
-              )}
-              {hasRgb && (
-                <div className="point-readout">
-                  <div>RA: {rgbHover ? formatRaSeconds(rgbHover.ra) : '—'}</div>
-                  <div>Dec: {rgbHover ? formatDecDegrees(rgbHover.dec) : '—'}</div>
-                </div>
-              )}
-            </div>
-
-            {/* Flux-aggregation buttons live directly below the RA/Dec/Flux
-                readout (not up in the top button group) so they stay visible
-                when the panel is scrolled down to the magnifier. */}
-            {hasScalar && magnifierCenter && (
-              <div className="side-buttons">
-                <button
-                  className={shownStats.has('sum') ? 'active' : undefined}
-                  onClick={() => toggleStat('sum')}
-                >
-                  Sum Flux (Box)
-                </button>
-                <button
-                  className={shownStats.has('avg') ? 'active' : undefined}
-                  onClick={() => toggleStat('avg')}
-                >
-                  Average Flux (Box)
-                </button>
-                <button
-                  className={shownStats.has('outside') ? 'active' : undefined}
-                  onClick={() => toggleStat('outside')}
-                >
-                  Sum Flux (Outside Box)
-                </button>
-                {fluxStats && shownStats.size > 0 && (
-                  <div className="magnifier-stats">
-                    {shownStats.has('sum') && (
-                      <div>
-                        Box sum: {formatFlux(fluxStats.boxSum, fluxUnit)}
-                        <span className="magnifier-stats-note">
-                          {' '}({fluxStats.boxCount} cells)
-                        </span>
-                      </div>
-                    )}
-                    {shownStats.has('avg') && (
-                      <div>
-                        Box average:{' '}
-                        {fluxStats.boxMean === null
-                          ? '—'
-                          : formatFlux(fluxStats.boxMean, fluxUnit)}
-                      </div>
-                    )}
-                    {shownStats.has('outside') && (
-                      <div>
-                        Outside sum: {formatFlux(fluxStats.outsideSum, fluxUnit)}
-                      </div>
-                    )}
-                  </div>
-                )}
+            )}
+            {hasRgb && (
+              <div className="side-hint">
+                Drag to zoom (double-click to reset).
               </div>
             )}
 
@@ -690,6 +608,96 @@ export function ImageView() {
                   />
                 </div>
               </>
+            )}
+
+            <div className="readout">
+              <div>
+                Image:{' '}
+                {hasScalar
+                  ? `${imagePixels!.width} × ${imagePixels!.height}`
+                  : `${rgbImagePixels!.width} × ${rgbImagePixels!.height} (RGB)`}
+              </div>
+              {/* Readout stays visible even when the cursor is off the image
+                  — em-dashes fill in when there's no point under the cursor
+                  (and no pinned point overriding it). */}
+              {hasScalar && (
+                <div className="point-readout">
+                  <div>RA: {displayPoint ? formatRaSeconds(displayPoint.ra) : '—'}</div>
+                  <div>Dec: {displayPoint ? formatDecDegrees(displayPoint.dec) : '—'}</div>
+                  <div>
+                    Flux:{' '}
+                    {displayPoint
+                      ? displayPoint.flux === null
+                        ? '—'  /* BUG-014: no-coverage cell — blank, not "0.0000" */
+                        : `${displayPoint.flux.toFixed(4)}${fluxUnit ? ` ${fluxUnit}` : ''}`
+                      : '—'}
+                  </div>
+                  {pinnedPoint && <div className="pinned-tag">pinned</div>}
+                  {pinnedPoint && (
+                    <button
+                      className="unpin-button"
+                      onClick={() => setPinnedPoint(null)}
+                    >
+                      Unpin
+                    </button>
+                  )}
+                </div>
+              )}
+              {hasRgb && (
+                <div className="point-readout">
+                  <div>RA: {rgbHover ? formatRaSeconds(rgbHover.ra) : '—'}</div>
+                  <div>Dec: {rgbHover ? formatDecDegrees(rgbHover.dec) : '—'}</div>
+                </div>
+              )}
+            </div>
+
+            {/* BUG-027: flux-aggregation buttons at the bottom of the panel. */}
+            {hasScalar && magnifierCenter && (
+              <div className="side-buttons">
+                <button
+                  className={shownStats.has('sum') ? 'active' : undefined}
+                  onClick={() => toggleStat('sum')}
+                >
+                  Sum Flux (Box)
+                </button>
+                <button
+                  className={shownStats.has('avg') ? 'active' : undefined}
+                  onClick={() => toggleStat('avg')}
+                >
+                  Average Flux (Box)
+                </button>
+                <button
+                  className={shownStats.has('outside') ? 'active' : undefined}
+                  onClick={() => toggleStat('outside')}
+                >
+                  Sum Flux (Outside Box)
+                </button>
+                {fluxStats && shownStats.size > 0 && (
+                  <div className="magnifier-stats">
+                    {shownStats.has('sum') && (
+                      <div>
+                        Box sum: {formatFlux(fluxStats.boxSum, fluxUnit)}
+                        <span className="magnifier-stats-note">
+                          {' '}({fluxStats.boxCount} cells)
+                        </span>
+                      </div>
+                    )}
+                    {shownStats.has('avg') && (
+                      <div>
+                        Box average:{' '}
+                        {fluxStats.boxMean === null
+                          ? '—'
+                          : formatFlux(fluxStats.boxMean, fluxUnit)}
+                      </div>
+                    )}
+                    {shownStats.has('outside') && (
+                      <div>
+                        Outside sum: {formatFlux(fluxStats.outsideSum, fluxUnit)}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             )}
           </div>
           }

@@ -456,10 +456,12 @@ export class RpcClient {
   smooth(handle: number, width = 5, workspaceHandle?: number | null) {
     return this.request<ReductionResult>('smooth', this._reductionParams(handle, { width }, workspaceHandle));
   }
-  baseline(handle: number, degree = 1, workspaceHandle?: number | null) {
+  // `baseDeg` is the legacy "Baseline Length (Degrees)" — the angular width
+  // of the lower-envelope window in declination, not a polynomial degree.
+  baseline(handle: number, baseDeg = 5, workspaceHandle?: number | null) {
     return this.request<ReductionResult>(
       'baseline',
-      this._reductionParams(handle, { degree }, workspaceHandle),
+      this._reductionParams(handle, { base_deg: baseDeg }, workspaceHandle),
     );
   }
   align(handle: number, factor = 0.5, workspaceHandle?: number | null) {
@@ -543,6 +545,19 @@ export class RpcClient {
     if (options?.flux_min !== undefined) params.flux_min = options.flux_min;
     if (options?.flux_max !== undefined) params.flux_max = options.flux_max;
     return this.request<{ path: string; bytes_written: number }>('save_bitmap', params);
+  }
+  // BUG-005 (dan): full-resolution PNG export of the scalar image (replaces the
+  // old .bmp path). Same palette/flux-range options as saveBitmap.
+  savePng(
+    handle: number,
+    path: string,
+    options?: { palette?: PaletteStop[]; flux_min?: number; flux_max?: number },
+  ) {
+    const params: Record<string, unknown> = { handle, path };
+    if (options?.palette !== undefined) params.palette = options.palette;
+    if (options?.flux_min !== undefined) params.flux_min = options.flux_min;
+    if (options?.flux_max !== undefined) params.flux_max = options.flux_max;
+    return this.request<{ path: string; bytes_written: number }>('save_png', params);
   }
   // Write a client-rendered PNG (bi/tri-color composite) to disk. `data` is the
   // canvas data URL / base64 PNG; the engine decodes and writes the bytes. Used
@@ -762,6 +777,12 @@ export class RpcClient {
       flux0,
       ra1,
       flux1,
+    });
+  }
+  appendScan(handle: number, path: string) {
+    return this.request<{ added: number; overview: ScanOverview }>('append_scan', {
+      handle,
+      path,
     });
   }
   determineScanPeak(handle: number, flux: number) {

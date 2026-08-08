@@ -5,6 +5,8 @@ import { useTheme } from '../state/theme-context';
 import { PointScatter, type Point } from '../lib/plots/PointScatter';
 import { dataColors } from '../lib/plots/plot-theme';
 import { WorkspaceBody } from './WorkspaceBody';
+import { SelectInputDialog } from './dialogs/SelectInputDialog';
+import type { PeakFitKind } from '../state/scan-context';
 
 function formatRa(seconds: number): string {
   // RA in `.md1` is given in arc-time seconds (matches the survey format).
@@ -42,11 +44,11 @@ export function ScanView() {
     overview,
     handle,
     setViewMode,
-    close,
     refreshOverview,
     setOverview,
     markDirty,
     peakFitKind,
+    setPeakFitKind,
   } = useScan();
   const { theme } = useTheme();
   const dc = useMemo(() => dataColors(theme), [theme]);
@@ -61,6 +63,13 @@ export function ScanView() {
   const [pendingBaselinePoint, setPendingBaselinePoint] = useState<
     { ra: number; flux: number } | null
   >(null);
+  // BUG-007 (dan): the baseline rubber-band tracks the FREE cursor (raw data
+  // coords), not the nearest data point — matching the survey "Removed" plot's
+  // free-floating recovery line. Endpoints come from `onCursorClick`.
+  const [baselineCursor, setBaselineCursor] = useState<{ x: number; y: number } | null>(null);
+  // BUG-002 (dan): the Determine-Peak fit model is chosen from a side button on
+  // the scan screen (moved off the Scan menu), backed by this local dialog.
+  const [fitDialogOpen, setFitDialogOpen] = useState(false);
   // Polynomial / Gaussian / cos² curve from the most recent Determine Peak
   // fit. Drawn over the flux plot so the user can see how the fit lays
   // through their selection; cleared whenever the view reloads. Engine
@@ -124,8 +133,10 @@ export function ScanView() {
     // Jy as soon as a `.cal` is loaded. Without this the engine workspace is
     // converted but the cached `view` state stays in GCU, and any subsequent
     // Determine Peak fit (run on the engine in Jy) overlays a curve that
-    // doesn't sit on the visible points.
-  }, [loadView, overview?.flux_calibrated]);
+    // doesn't sit on the visible points. Also re-fetch when the source count
+    // grows (BUG-006 append), which is driven from the Scan menu rather than
+    // from this view's own handlers.
+  }, [loadView, overview?.flux_calibrated, overview?.source_count]);
 
   // Reset transient interaction state whenever the underlying view changes
   // (e.g. after a Cut / Baseline Source / Select Declination completes). The
@@ -134,6 +145,7 @@ export function ScanView() {
   useEffect(() => {
     setStickyPoint(null);
     setPendingBaselinePoint(null);
+    setBaselineCursor(null);
     setDragRange(null);
     setDragDecRange(null);
     const restore = overlayRestoreRef.current;
@@ -251,48 +263,60 @@ export function ScanView() {
   }, []);
 
   const handleClick = useCallback(
-    async (p: Point) => {
-      if (mode.kind === 'peak') {
-        // Peak fits are committed by the drag-end handler on the flux plot,
-        // not by clicks on individual data points.
-        return;
-      }
-      if (mode.kind === 'baseline' && handle !== null) {
-        if (!pendingBaselinePoint) {
-          setPendingBaselinePoint({ ra: p.ra, flux: p.flux });
-          return;
-        }
-        try {
-          pushOverlayHistory();
-          await rpcClient.baselineScanSource(
-            handle,
-            pendingBaselinePoint.ra,
-            pendingBaselinePoint.flux,
-            p.ra,
-            p.flux,
-          );
-          await Promise.all([loadView(), refreshOverview()]);
-          markDirty();
-          setPendingBaselinePoint(null);
-        } catch (e) {
-          setError((e as Error).message);
-        }
-        return;
-      }
+    (p: Point) => {
+      // Peak fits are committed by the drag-end handler; the baseline tool is
+      // driven by the FREE cursor (handleCursorClick) so its endpoints track
+      // the raw cursor rather than snapping to the nearest sample (BUG-007).
+      // In either mode a point click must not pin the readout.
+      if (mode.kind === 'peak' || mode.kind === 'baseline') return;
       setStickyPoint(p);
     },
-    [mode.kind, handle, pendingBaselinePoint, loadView, refreshOverview, setOverview, markDirty],
+    [mode.kind],
   );
 
   const handleEmptyClick = useCallback(() => {
-    if (mode.kind === 'baseline' && pendingBaselinePoint) {
-      // Empty-space click cancels a pending first endpoint (matches the
-      // legacy right-click cancel; we approximate with empty-space click).
-      setPendingBaselinePoint(null);
-      return;
-    }
+    // In baseline mode empty-space clicks are real endpoints (handled by
+    // handleCursorClick); don't treat them as a cancel/unpin.
+    if (mode.kind === 'baseline') return;
     setStickyPoint(null);
-  }, [mode.kind, pendingBaselinePoint]);
+  }, [mode.kind]);
+
+  // BUG-007 (dan): free-cursor baseline. First click sets the anchor endpoint at
+  // the raw cursor position; the second click subtracts the line between the two
+  // free-cursor positions. The rubber-band preview follows the live cursor.
+  const handleCursorMove = useCallback(
+    (x: number, y: number) => {
+      if (mode.kind === 'baseline') setBaselineCursor({ x, y });
+    },
+    [mode.kind],
+  );
+
+  const handleCursorClick = useCallback(
+    async (x: number, y: number) => {
+      if (mode.kind !== 'baseline' || handle === null) return;
+      if (!pendingBaselinePoint) {
+        setPendingBaselinePoint({ ra: x, flux: y });
+        return;
+      }
+      try {
+        pushOverlayHistory();
+        await rpcClient.baselineScanSource(
+          handle,
+          pendingBaselinePoint.ra,
+          pendingBaselinePoint.flux,
+          x,
+          y,
+        );
+        await Promise.all([loadView(), refreshOverview()]);
+        markDirty();
+        setPendingBaselinePoint(null);
+        setBaselineCursor(null);
+      } catch (e) {
+        setError((e as Error).message);
+      }
+    },
+    [mode.kind, handle, pendingBaselinePoint, pushOverlayHistory, loadView, refreshOverview, markDirty],
+  );
 
   const fluxDragHandlers = useMemo(
     () => ({
@@ -422,6 +446,7 @@ export function ScanView() {
     (kind: Mode['kind']) => {
       setMode((m) => (m.kind === kind ? { kind: 'idle' } : { kind }));
       setPendingBaselinePoint(null);
+      setBaselineCursor(null);
     },
     [],
   );
@@ -444,20 +469,22 @@ export function ScanView() {
     }
   }, [handle, loadView, refreshOverview, markDirty]);
 
-  // Live baseline rubber-band — first endpoint to current hover point.
+  // Live baseline rubber-band — first endpoint to the FREE cursor position
+  // (BUG-007), so the line can sit above every sample the way the legacy
+  // "Baseline Source" gesture drew it.
   const baselineOverlay = useMemo(() => {
-    if (mode.kind !== 'baseline' || !pendingBaselinePoint || !hoverPoint) return [];
+    if (mode.kind !== 'baseline' || !pendingBaselinePoint || !baselineCursor) return [];
     return [
       {
         points: [
           { x: pendingBaselinePoint.ra, y: pendingBaselinePoint.flux },
-          { x: hoverPoint.ra, y: hoverPoint.flux },
+          { x: baselineCursor.x, y: baselineCursor.y },
         ],
         color: dc.baseline,
         width: 1,
       },
     ];
-  }, [mode.kind, pendingBaselinePoint, hoverPoint, dc]);
+  }, [mode.kind, pendingBaselinePoint, baselineCursor, dc]);
 
   if (!scan || !overview || handle === null) {
     return (
@@ -492,7 +519,9 @@ export function ScanView() {
     if (mode.kind === 'cut') return 'Cut Segment: drag on the flux plot…';
     if (mode.kind === 'select-dec') return 'Select Declination: drag on the declination plot…';
     if (mode.kind === 'baseline')
-      return pendingBaselinePoint ? 'Baseline Source: click endpoint…' : 'Baseline Source: click first point…';
+      return pendingBaselinePoint
+        ? 'Baseline Source: click the second point (the line follows your cursor)…'
+        : 'Baseline Source: click anywhere for the first point…';
     if (mode.kind === 'peak') {
       const fitLabel = {
         gaussian: 'Gaussian',
@@ -531,6 +560,8 @@ export function ScanView() {
                     onHover={handleHover}
                     onPointClick={handleClick}
                     onEmptyClick={handleEmptyClick}
+                    onCursorMove={handleCursorMove}
+                    onCursorClick={handleCursorClick}
                     pinnedPoint={
                       pendingBaselinePoint
                         ? { x: pendingBaselinePoint.ra, y: pendingBaselinePoint.flux }
@@ -595,59 +626,83 @@ export function ScanView() {
           side={
           <div className="workspace-side">
             <div className="side-buttons">
-              {!calibrated && (
-                <button
-                  onClick={() => setViewMode('calibrate-scan')}
-                  className="primary"
-                  title="Open the cut-segment / select-declination view for the cal brackets"
-                >
-                  Calibrate Scan
-                </button>
-              )}
-              {calibrated && (
-                <>
-                  <button
-                    onClick={() => toggleMode('select-dec')}
-                    className={mode.kind === 'select-dec' ? 'active' : ''}
-                    title="KEEPS data: drag on the declination plot to keep only the source samples inside that band (everything outside is removed). (Opposite of Cut Segment, which removes.)"
-                  >
-                    {mode.kind === 'select-dec' ? 'Select Declination (drag…)' : 'Select Declination'}
-                  </button>
-                  <button
-                    onClick={() => toggleMode('baseline')}
-                    className={mode.kind === 'baseline' ? 'active' : ''}
-                    title="Click two points on the flux plot to subtract the line between them as a baseline"
-                  >
-                    {mode.kind === 'baseline'
-                      ? pendingBaselinePoint
-                        ? 'Baseline Source (click…)'
-                        : 'Baseline Source (click…)'
-                      : 'Baseline Source'}
-                  </button>
-                  <button
-                    onClick={() => toggleMode('peak')}
-                    className={mode.kind === 'peak' ? 'active' : ''}
-                    title="Drag an RA range over the peak; a polynomial is fit and its maximum becomes the peak flux"
-                  >
-                    {mode.kind === 'peak' ? 'Determine Peak (drag…)' : 'Determine Peak'}
-                  </button>
-                  <button
-                    onClick={() => toggleMode('cut')}
-                    className={mode.kind === 'cut' ? 'active' : ''}
-                    title="REMOVES data: drag on the flux plot to delete the source samples inside that RA range. (Opposite of Select Declination, which keeps.)"
-                  >
-                    {mode.kind === 'cut' ? 'Cut Segment (drag…)' : 'Cut Segment'}
-                  </button>
-                </>
-              )}
+              <button
+                onClick={() => setViewMode('calibrate-scan')}
+                // BUG-008 (dan): blue (primary) only until the first
+                // calibration — after that it grays like the other buttons.
+                className={calibrated ? undefined : 'primary'}
+                title="Open the cut-segment / select-declination view for the cal brackets"
+              >
+                {calibrated ? 'Re-Calibrate Scan' : 'Calibrate Scan'}
+              </button>
+              {/* BUG-009 (dan): the reduction tools stay visible but grayed
+                  until the scan is calibrated, matching the survey screen. */}
+              <button
+                onClick={() => toggleMode('select-dec')}
+                className={mode.kind === 'select-dec' ? 'active' : ''}
+                disabled={!calibrated}
+                title={
+                  calibrated
+                    ? 'KEEPS data: drag on the declination plot to keep only the source samples inside that band (everything outside is removed). (Opposite of Cut Segment, which removes.)'
+                    : 'Calibrate the scan first'
+                }
+              >
+                {mode.kind === 'select-dec' ? 'Select Declination (drag…)' : 'Select Declination'}
+              </button>
+              <button
+                onClick={() => toggleMode('baseline')}
+                className={mode.kind === 'baseline' ? 'active' : ''}
+                disabled={!calibrated}
+                title={
+                  calibrated
+                    ? 'Click two points anywhere on the flux plot to subtract the line between them as a baseline (the line follows your cursor).'
+                    : 'Calibrate the scan first'
+                }
+              >
+                {mode.kind === 'baseline' ? 'Baseline Source (click…)' : 'Baseline Source'}
+              </button>
+              <button
+                onClick={() => toggleMode('peak')}
+                className={mode.kind === 'peak' ? 'active' : ''}
+                disabled={!calibrated}
+                title={
+                  calibrated
+                    ? 'Drag an RA range over the peak only; the chosen model is fit and its maximum becomes the peak flux.'
+                    : 'Calibrate the scan first'
+                }
+              >
+                {mode.kind === 'peak' ? 'Determine Peak (drag…)' : 'Determine Peak'}
+              </button>
+              <button
+                onClick={() => setFitDialogOpen(true)}
+                disabled={!calibrated}
+                title={
+                  calibrated
+                    ? 'Choose the model used by Determine Peak (polynomial degree, Gaussian, squared cosine, or max value).'
+                    : 'Calibrate the scan first'
+                }
+              >
+                Change Peak Fit…
+              </button>
+              <button
+                onClick={() => toggleMode('cut')}
+                className={mode.kind === 'cut' ? 'active' : ''}
+                disabled={!calibrated}
+                title={
+                  calibrated
+                    ? 'REMOVES data: drag on the flux plot to delete the source samples inside that RA range. (Opposite of Select Declination, which keeps.)'
+                    : 'Calibrate the scan first'
+                }
+              >
+                {mode.kind === 'cut' ? 'Cut Segment (drag…)' : 'Cut Segment'}
+              </button>
               <button
                 onClick={() => void handleUndo()}
                 disabled={!overview.can_undo}
-                title="Undo the most recent cut / baseline / peak operation"
+                title="Undo the most recent cut / baseline / peak / append operation"
               >
                 Undo
               </button>
-              <button onClick={() => void close()}>Cancel</button>
             </div>
 
             {calibrated && overview.peak_flux !== null && (
@@ -681,6 +736,29 @@ export function ScanView() {
           }
         />
       </div>
+
+      {fitDialogOpen && (
+        <SelectInputDialog
+          prompt={{
+            title: 'Change Determine Peak Fit',
+            label: 'Fit model:',
+            defaultValue: peakFitKind,
+            options: [
+              { value: 'poly2', label: '2nd Degree Polynomial' },
+              { value: 'poly3', label: '3rd Degree Polynomial' },
+              { value: 'poly4', label: '4th Degree Polynomial' },
+              { value: 'gaussian', label: 'Gaussian' },
+              { value: 'cos2', label: 'Squared Cosine' },
+              { value: 'max', label: 'Max Value' },
+            ],
+            onSubmit: (value) => {
+              setFitDialogOpen(false);
+              setPeakFitKind(value as PeakFitKind);
+            },
+          }}
+          onCancel={() => setFitDialogOpen(false)}
+        />
+      )}
     </div>
   );
 }

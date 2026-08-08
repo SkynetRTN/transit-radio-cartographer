@@ -10,10 +10,10 @@ import { ImagePlot, type ImagePoint } from '../lib/plots/ImagePlot';
 import { NumericInputDialog, type NumericPrompt } from './dialogs/NumericInputDialog';
 import { WorkspaceBody } from './WorkspaceBody';
 
-// Default on-sky pixel size in DEGREES for the auto-generated pre-image and
-// the Make Image dialog: 1/20 of the 40 ft beam (1.2°) = 0.06° per pixel.
-// Smaller = finer. (Legacy VB used a unitless integer coarseness factor.)
-const DEFAULT_PIX = 0.06;
+// The default on-sky pixel size (0.06° = 1/20 of the 40 ft beam) now lives on
+// the survey context as `preImagePix`, so it persists across pre-image ↔ survey
+// navigation (BUG-010). Smaller = finer. (Legacy VB used a unitless integer
+// coarseness factor.)
 
 function pad2(n: number): string {
   return n < 10 ? `0${n}` : `${n}`;
@@ -127,6 +127,8 @@ export function PreImageView() {
     setViewMode,
     makeImage,
     imageDisplay,
+    preImagePix,
+    setPreImagePix,
     reductionsDone,
     markReductionDone,
   } = useSurvey();
@@ -137,7 +139,11 @@ export function PreImageView() {
   // shifts dec) keeps the readout accurate.
   const [sweepPaths, setSweepPaths] = useState<SweepPath[]>([]);
   const [hoverPoint, setHoverPoint] = useState<ImagePoint | null>(null);
-  const [pix, setPix] = useState<number>(DEFAULT_PIX);
+  // BUG-010 (dan): pixel size and the Smooth/Baseline/Align pipeline progress
+  // (`reductionsDone`) live in the survey context so they persist across
+  // pre-image ↔ survey navigation (re-entering the pre-image no longer resets
+  // the flags and re-stacks the reductions).
+  const pix = preImagePix;
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -223,10 +229,14 @@ export function PreImageView() {
   );
 
   useEffect(() => {
-    void generateImage(DEFAULT_PIX);
-    // Rebuild the preview when flux calibration flips, so loading a `.cal`
-    // while sitting on the Pre Image refreshes the gridded image in Jy
-    // instead of leaving the GCU preview on screen.
+    // Build the pre-image on entry (this view is only reached via the
+    // "Create Pre-Image" button, BUG-010) at the persisted pixel size. Rebuild
+    // when flux calibration flips, so loading a `.cal` while sitting on the Pre
+    // Image refreshes the gridded image in Jy instead of leaving the GCU
+    // preview on screen. `pix` is intentionally not a dep — changing it happens
+    // via the Make Image prompt, which navigates away.
+    void generateImage(pix);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [generateImage, workspace?.flux_calibrated]);
 
   const openMakeImagePrompt = useCallback(() => {
@@ -243,7 +253,7 @@ export function PreImageView() {
           return;
         }
         setPrompt(null);
-        setPix(value);
+        setPreImagePix(value);
         // Commit: build the final gridded image and switch to the Image view.
         // `makeImage` on the survey context stores meta+pixels and flips
         // `viewMode` to 'image' so MainWindow unmounts PreImageView.
@@ -286,6 +296,13 @@ export function PreImageView() {
       label: 'Baseline Length (Degrees):',
       defaultValue: 5,
       onSubmit: async (value) => {
+        // Legacy: MsgBox "Invalid Baseline Length" for Val(Dc$) <= 0
+        // (vb/survform.frm:2388-2389).
+        if (!(value > 0)) {
+          setError('Baseline length must be a positive number of degrees');
+          setPrompt(null);
+          return;
+        }
         setPrompt(null);
         setBusy(true);
         setError(null);
@@ -360,6 +377,25 @@ export function PreImageView() {
   // calibration state (an image always implies at least gain calibration).
   const fluxUnit = imageMeta?.unit ?? (workspace?.flux_calibrated ? 'Jy' : 'GCU');
 
+  // BUG-012 (dan): before the baseline runs, scale the pre-image color ramp to
+  // the data's actual min→max (NaN cells excluded), so faint structure isn't
+  // crushed against the palette's black end. Once the survey has been
+  // baselined the fluxes are zero-referenced, so the ramp anchors at 0→max.
+  const fluxRange = useMemo<{ min: number; max: number } | null>(() => {
+    if (!imagePixels) return null;
+    let min = Infinity;
+    let max = -Infinity;
+    for (const row of imagePixels.pixels) {
+      for (const v of row) {
+        if (v === null || v === undefined || !Number.isFinite(v)) continue;
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+    }
+    if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return null;
+    return { min: reductionsDone.baseline ? 0 : min, max };
+  }, [imagePixels, reductionsDone.baseline]);
+
   if (!workspace) {
     return (
       <div className="survey-view empty">
@@ -384,6 +420,8 @@ export function PreImageView() {
                 title=""
                 testId="pre-image-plot"
                 displayMode={imageDisplay}
+                fluxRange={fluxRange}
+                showGrid={false}
                 onHover={setHoverPoint}
               />
             ) : (
