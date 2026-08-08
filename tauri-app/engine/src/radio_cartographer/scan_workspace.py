@@ -534,8 +534,8 @@ def determine_peak_fit(
     — the grid arrays are returned so the UI can draw the fit on top of the
     data; nothing about the grid is persisted on the workspace.
 
-    Uses the same `np.polyfit` pattern as `scan.subtract_baseline` so we don't
-    invent a second polynomial-fit code path.
+    Uses the same `np.polyfit` pattern as `scan.subtract_baseline_off_source`
+    so we don't invent a second polynomial-fit code path.
     """
     if degree not in (2, 3, 4):
         raise ValueError(f"degree must be 2, 3, or 4 (got {degree})")

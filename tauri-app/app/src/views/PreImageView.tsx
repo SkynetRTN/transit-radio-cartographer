@@ -296,6 +296,13 @@ export function PreImageView() {
       label: 'Baseline Length (Degrees):',
       defaultValue: 5,
       onSubmit: async (value) => {
+        // Legacy: MsgBox "Invalid Baseline Length" for Val(Dc$) <= 0
+        // (vb/survform.frm:2388-2389).
+        if (!(value > 0)) {
+          setError('Baseline length must be a positive number of degrees');
+          setPrompt(null);
+          return;
+        }
         setPrompt(null);
         setBusy(true);
         setError(null);

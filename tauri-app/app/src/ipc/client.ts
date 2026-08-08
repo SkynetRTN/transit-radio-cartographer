@@ -456,10 +456,12 @@ export class RpcClient {
   smooth(handle: number, width = 5, workspaceHandle?: number | null) {
     return this.request<ReductionResult>('smooth', this._reductionParams(handle, { width }, workspaceHandle));
   }
-  baseline(handle: number, degree = 1, workspaceHandle?: number | null) {
+  // `baseDeg` is the legacy "Baseline Length (Degrees)" — the angular width
+  // of the lower-envelope window in declination, not a polynomial degree.
+  baseline(handle: number, baseDeg = 5, workspaceHandle?: number | null) {
     return this.request<ReductionResult>(
       'baseline',
-      this._reductionParams(handle, { degree }, workspaceHandle),
+      this._reductionParams(handle, { base_deg: baseDeg }, workspaceHandle),
     );
   }
   align(handle: number, factor = 0.5, workspaceHandle?: number | null) {

@@ -467,7 +467,9 @@ def _force_calibrated_if_requested(image: GriddedImage, params: dict[str, Any]) 
 _REDUCTION_PARAMS: dict[str, tuple[str, str, float]] = {
     # rpc_key -> (front-end param name, apply_to_survey kwarg, default)
     "smooth": ("width", "window", 5.0),
-    "baseline": ("degree", "degree", 1.0),
+    # base_deg is the legacy "Baseline Length (Degrees)" window — angular
+    # degrees of declination, not a polynomial degree.
+    "baseline": ("base_deg", "base_deg", 5.0),
     "align": ("factor", "offset", 0.5),
 }
 
@@ -867,7 +869,14 @@ class RpcServer:
             raise RpcError(
                 ERR_INVALID_PARAMS, f"{op}: {rpc_key} must be numeric, got {raw_value!r}"
             ) from exc
-        kwargs: dict[str, float | int] = {kwarg_name: int(value) if op != "align" else value}
+        # smooth's window is a sample count; baseline's base_deg and align's
+        # offset are angular degrees and must keep their fractional part.
+        kwargs: dict[str, float | int] = {kwarg_name: int(value) if op == "smooth" else value}
+        if op == "baseline" and value <= 0:
+            raise RpcError(
+                ERR_INVALID_PARAMS,
+                f"baseline: base_deg must be a positive number of degrees, got {raw_value!r}",
+            )
         # Workspace-aware path: when the caller passes `workspace_handle`, the
         # reduction lands on the workspace's source sweeps so the next
         # `make_image(workspace_handle=...)` call grids the reduced flux.

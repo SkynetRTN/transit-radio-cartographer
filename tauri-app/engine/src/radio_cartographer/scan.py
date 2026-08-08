@@ -18,14 +18,80 @@ def smooth_flux(flux: NDArray[np.float64], window: int = 5) -> NDArray[np.float6
     return np.convolve(xp, kernel, mode="valid")[: x.size]
 
 
-def subtract_baseline(
-    dec: NDArray[np.float64], flux: NDArray[np.float64], degree: int = 1
+def subtract_baseline_envelope(
+    dec: NDArray[np.float64], flux: NDArray[np.float64], base_deg: float = 5.0
 ) -> NDArray[np.float64]:
+    """Subtract the legacy *Baseline Sweeps* lower envelope from one sweep.
+
+    Literal port of the legacy Command14 loop (`vb/survform.frm:2420-2449`).
+    For each sample the legacy code draws a support line to the first sample
+    at least ``base_deg`` declination degrees further along the sweep, then
+    walks the interior backwards, re-anchoring the far endpoint to any sample
+    that falls below the current line (each re-anchor rotates the line down
+    about the left endpoint). A sample's baseline is the pointwise minimum of
+    every support line covering it, so the baseline hugs the off-source noise
+    floor and passes *under* any source narrower than ``base_deg`` —
+    subtracting it preserves the source (disk, shoulders, Airy rings) rather
+    than fitting through it. The residual is >= 0 wherever a line covers the
+    sample: no line's final segment has data below it.
+
+    The legacy program normalises each sweep at load time before this loop
+    runs: a flat sweep gets its last dec nudged by +0.01
+    (`vb/survform.frm:757-758`), descending sweeps are reversed (`:760-779`)
+    and samples are bubble-sorted into ascending dec order (`:780-791`,
+    stable). This port applies the same normalisation to a working copy and
+    scatters the subtracted flux back to the caller's sample order, so every
+    ``(dec, flux)`` pair receives exactly the value the legacy code would
+    give it without reordering the caller's arrays.
+
+    Two deliberate deviations from the VB source, both in its "impossible"
+    regime: the uncovered-sample sentinel is ``inf`` rather than ``1000`` (a
+    literal 1000 would clamp the baseline under any flux brighter than 1000
+    and inject ``flux - 1000`` spikes at uncovered samples), and samples no
+    line covers — possible only with duplicated maximum dec — keep their
+    flux unchanged instead of having 1000 subtracted.
+    """
+    if base_deg <= 0:
+        raise ValueError(f"base_deg must be positive (got {base_deg})")
     deca = np.asarray(dec, dtype=np.float64)
     fluxa = np.asarray(flux, dtype=np.float64)
-    coeff = np.polyfit(deca, fluxa, deg=degree)
-    baseline = np.polyval(coeff, deca)
-    return fluxa - baseline
+    n = deca.size
+    if n < 2:
+        return fluxa.copy()
+    d = deca.copy()
+    f = fluxa.copy()
+    flipped = d[0] > d[-1]
+    if flipped:
+        d = d[::-1].copy()
+        f = f[::-1].copy()
+    if d.min() == d.max():
+        d[-1] += 0.01
+    order = np.argsort(d, kind="stable")
+    d = d[order]
+    f = f[order]
+    base = np.full(n, np.inf)
+    number = 0  # Number% (0-based)
+    while d[number] < d[n - 1]:
+        num = number + 1  # Num%
+        while d[number] + base_deg > d[num] and num < n - 1:
+            num += 1
+        a = (f[num] - f[number]) / (d[num] - d[number])
+        b = f[num] - a * d[num]
+        # Numb% counts down from the initial Num%-1 even after Num% is
+        # re-anchored below it, exactly as the VB While loop does.
+        for numb in range(num - 1, number, -1):
+            if f[numb] < a * d[numb] + b and d[numb] != d[number]:
+                num = numb
+                a = (f[num] - f[number]) / (d[num] - d[number])
+                b = f[num] - a * d[num]
+        segment = a * d[number : num + 1] + b
+        np.minimum(base[number : num + 1], segment, out=base[number : num + 1])
+        number += 1
+    base[np.isinf(base)] = 0.0
+    residual = f - base
+    out = np.empty(n, dtype=np.float64)
+    out[order] = residual
+    return out[::-1].copy() if flipped else out
 
 
 def align_by_offset(
