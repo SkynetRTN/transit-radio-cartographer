@@ -697,14 +697,16 @@ export function ImagePlot({
 
     // BUG-023 (dan): after the magnifier closes, the boxOverlay change fires a
     // `shapes` relayout — which Plotly escalates to a FULL layout replot — and
-    // Plotly's internal double-click reset machinery can die afterwards,
-    // leaving the user stuck zoomed in. Do our own deterministic reset off the
-    // native dblclick (browser-counted, independent of Plotly's click
-    // tracking) so zoom-out always works. Idempotent when Plotly's own reset
-    // also ran: the autorange recompute lands on the same full ranges.
-    const onNativeDblClick = (e: MouseEvent) => {
-      const t = e.target as Element | null;
-      if (!t || !t.closest('.draglayer')) return; // plot area only, like Plotly
+    // Plotly's internal double-click reset stops firing afterwards, leaving the
+    // user stuck zoomed in (reopening the magnifier replots again and revives
+    // it, which is the confusing symptom). Do our own deterministic reset off
+    // the native DOM `dblclick`, which the browser dispatches regardless of
+    // Plotly's internal click bookkeeping. Registered in the CAPTURE phase so
+    // Plotly's own drag-layer handler can't swallow it via stopPropagation, and
+    // with no target filter — any double-click on the plot means "reset".
+    // Idempotent when Plotly's own reset also ran (autorange lands on the same
+    // full ranges).
+    const onNativeDblClick = () => {
       if (pendingClick !== null) {
         clearTimeout(pendingClick);
         pendingClick = null;
@@ -716,7 +718,7 @@ export function ImagePlot({
         'yaxis.autorange': hasBounds ? true : 'reversed',
       } as unknown as Partial<Plotly.Layout>);
     };
-    node.addEventListener('dblclick', onNativeDblClick);
+    node.addEventListener('dblclick', onNativeDblClick, true);
 
     return () => {
       plotEl.removeAllListeners?.('plotly_hover');
@@ -726,7 +728,7 @@ export function ImagePlot({
       plotEl.removeAllListeners?.('plotly_relayout');
       node.removeEventListener('contextmenu', onContextCapture, true);
       node.removeEventListener('mousedown', onMouseDownCapture, true);
-      node.removeEventListener('dblclick', onNativeDblClick);
+      node.removeEventListener('dblclick', onNativeDblClick, true);
       window.removeEventListener('keydown', onKeyZoom);
       if (pendingClick !== null) clearTimeout(pendingClick);
       Plotly.purge(node);

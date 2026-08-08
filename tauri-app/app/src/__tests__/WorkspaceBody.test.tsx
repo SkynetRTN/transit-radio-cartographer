@@ -17,9 +17,9 @@ function renderBody() {
 test('defaults to the CSS clamp width and renders a vertical divider', () => {
   const { container } = renderBody();
   const body = container.querySelector('.workspace-body') as HTMLElement;
-  // Undragged: third track is the original clamp, so the default layout is
-  // unchanged.
-  expect(body.style.gridTemplateColumns).toContain('clamp(150px, 16%, 220px)');
+  // Undragged: third track is the default clamp (widened so the survey side
+  // panel's buttons fit on one line without needing to scroll).
+  expect(body.style.gridTemplateColumns).toContain('clamp(190px, 17%, 260px)');
   const divider = screen.getByRole('separator');
   expect(divider).toHaveAttribute('aria-orientation', 'vertical');
 });
