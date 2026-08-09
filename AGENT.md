@@ -7,7 +7,7 @@ A Visual Basic 5 desktop application for reducing and visualizing single-dish ra
 This repo holds two things:
 
 1. The **legacy VB5 source** under [vb/](vb/) — read-only, the authority for behavior we must preserve.
-2. A **modern cross-platform port** under [tauri-app/](tauri-app/) — Tauri 2 + React + Python 3.13 (uv-managed), in progress. The plan is in [agents/tauri_plan.md](agents/tauri_plan.md); Phase 0a (workspace) and Phase 1 (codecs) are done — see [agents/tauri_plan_phase_1.md](agents/tauri_plan_phase_1.md).
+2. A **modern cross-platform port** under [tauri-app/](tauri-app/) — Tauri 2 + React + Python 3.13 (uv-managed). This is now a working, packaged desktop app (current version 0.1.4) that reproduces the legacy workflow and adds FITS export. The plan is in [agents/tauri_plan.md](agents/tauri_plan.md); all planned phases (codecs → numerics → RPC + sidecar → FITS → UI → packaging) have landed, with active work now on usability polish ([docs/tester-feedback-triage.md](docs/tester-feedback-triage.md)).
 
 Shared regression fixtures captured from `vb/KARALEAH2002.exe` live at repo-root [fixtures/](fixtures/) with [fixtures/README.md](fixtures/README.md) documenting provenance and [fixtures/MANIFEST.sha256](fixtures/MANIFEST.sha256) enforcing byte-identity in CI. End-user documentation lives in [docs/](docs/) — currently just [docs/Radio Cartographer Tutorial.docx.pdf](docs/Radio Cartographer Tutorial.docx.pdf), a 7-page walkthrough that this file's "Intended workflow" section summarizes.
 
@@ -94,9 +94,9 @@ Architecture (per plan §2):
   lifecycle. Pinned at `~2.11` in [tauri-app/app/src-tauri/Cargo.toml](tauri-app/app/src-tauri/Cargo.toml).
 - **React + TypeScript + Vite** front-end — view + interaction only, no
   science logic. Node pinned to 22 via [tauri-app/app/.nvmrc](tauri-app/app/.nvmrc).
-- **Python 3.13 sidecar** (`radio_cartographer` package, uv-managed) — file
-  I/O codecs, numerics (numpy/scipy/astropy), and a JSON-RPC server over
-  stdio. Bundled via PyInstaller in Phase 3.
+- **Python 3.13 engine** (`radio_cartographer` package, uv-managed) — file
+  I/O codecs, numerics (numpy/astropy), and a JSON-RPC server over stdio.
+  Bundled into a standalone binary via PyInstaller ([engine/sidecar.spec](tauri-app/engine/sidecar.spec)).
 
 Top-level layout under [tauri-app/](tauri-app/):
 
@@ -105,50 +105,58 @@ tauri-app/
 ├── pyproject.toml         uv workspace root, Python 3.13 pin
 ├── uv.lock                committed
 ├── justfile               canonical task runner (just test, just dev, …)
-├── engine/                Python sidecar
+├── engine/                Python engine
+│   ├── PROTOCOL.md        JSON-RPC method reference
+│   ├── sidecar.spec       PyInstaller spec for the standalone binary
 │   ├── src/radio_cartographer/
 │   │   ├── models.py      single source of truth for in-memory types
-│   │   └── io/            one codec module per legacy format
-│   └── tests/io/          one test file per format + fixture manifest check
+│   │   ├── io/            one codec module per legacy format (+ fits.py)
+│   │   ├── rpc.py         JSON-RPC server (stdio) + binary side-channel
+│   │   └── scan / survey / calibration / flux_calibration /
+│   │       image / image_compose / palette / workspace   numerics
+│   └── tests/             pytest suites (codecs, numerics, rpc, fixtures)
 └── app/
-    ├── src/               React + TS (currently a placeholder shell)
-    └── src-tauri/         Rust shell
+    ├── src/               React + TS UI (views/, dialogs, help, chrome)
+    └── src-tauri/         Rust shell — spawns/supervises the engine sidecar
 ```
 
 ### Phase status
+
+All planned phases have landed; the port is a working, packaged app (v0.1.4).
 
 | Phase | Status | Evidence |
 |---|---|---|
 | 0a — workspace bootstrap | Done | `uv sync`, `just test`, `just build`, `cargo check` all green; CI matrix (Linux/macOS/Windows) in [.github/workflows/](.github/workflows/) |
 | 0b — fixture capture | Done | [fixtures/](fixtures/) populated; [fixtures/MANIFEST.sha256](fixtures/MANIFEST.sha256) enforced |
-| 1 — codecs | Done | 94 tests passing; every fixture round-trips bytes-identically except `.bmp` (opaque pass-through, scheduled for Phase 6 capture). See [agents/tauri_plan_phase_1.md](agents/tauri_plan_phase_1.md). |
-| 2 — numerics | Not started | survey/scan/calibration/image/palette reductions |
-| 3 — RPC + sidecar binary | Not started | `just sidecar` is currently a stub |
-| 4 — pipeline glue + FITS export | Not started | |
-| 5 — Tauri shell + React UI | Not started | [tauri-app/app/src/App.tsx](tauri-app/app/src/App.tsx) is a placeholder |
-| 6 — release hardening | Not started | |
+| 1 — codecs | Done | Byte-compatible round-trip for every fixture. See [agents/tauri_plan_phase_1.md](agents/tauri_plan_phase_1.md). |
+| 2 — numerics | Done | scan/survey reduction, calibration, image gridding + composition ([tauri_plan_phase_2.md](agents/tauri_plan_phase_2.md)) |
+| 3 — RPC + sidecar binary | Done | JSON-RPC server ([engine/rpc.py](tauri-app/engine/src/radio_cartographer/rpc.py), [engine/PROTOCOL.md](tauri-app/engine/PROTOCOL.md)); `just sidecar` builds the binary |
+| 4 — pipeline glue + FITS export | Done | FITS reader/writer ([io/fits.py](tauri-app/engine/src/radio_cartographer/io/fits.py)); `Save Image As FITS…` |
+| 5 — Tauri shell + React UI | Done | full UI under [tauri-app/app/src/views/](tauri-app/app/src/views/) |
+| 6 — release hardening | Done | `just package` builds installable bundles; version 0.1.4 |
 
-### Codec layer (Phase 1)
+Active work is usability polish driven by tester feedback — see
+[docs/tester-feedback-triage.md](docs/tester-feedback-triage.md).
 
-The eight legacy formats each have a module under
+### Codec layer
+
+The legacy formats each have a module under
 [tauri-app/engine/src/radio_cartographer/io/](tauri-app/engine/src/radio_cartographer/io/)
-with a `read(path)` / `write(model, path)` pair. The in-memory types they
-return live in
+with a `read(path)` / `write(model, path)` pair, plus a `fits.py` writer for
+the new FITS export. The in-memory types they return live in
 [tauri-app/engine/src/radio_cartographer/models.py](tauri-app/engine/src/radio_cartographer/models.py)
 (`Scan`, `Survey`, `CalibrationTable`, `Palette`, `MD1Document`,
 `MD2Document`, `Image`, `Bitmap`). Each model carries an optional
 `raw_bytes` field: when a model was loaded from disk, `write` short-circuits
-to emit those bytes verbatim; models constructed programmatically (Phase 2
-onward) serialize through
+to emit those bytes verbatim; models constructed programmatically serialize
+through
 [`io/_vb_format.py`](tauri-app/engine/src/radio_cartographer/io/_vb_format.py),
 which encapsulates VB's `Print #1` / `Str$` / `Format$` semantics
 (leading-space-for-positive-numbers, `Format$(0, "#.####") → "."`, etc.).
 
 `.md1` and `.md2` are acquisition-system inputs that the legacy app only
-reads; their codecs are bytes pass-through. `.bmp` is also pass-through for
-now — VB's `SavePicture` byte-fidelity is deferred to Phase 6 (plan §9).
-
-The Channel-B guard (filename stem ending in `b`) is centralized in
+reads; their codecs are bytes pass-through. The Channel-B guard (filename stem
+ending in `b`) is centralized in
 [`io/common.py`](tauri-app/engine/src/radio_cartographer/io/common.py)
 and applied to `.md1` / `.md2` reads only (the tutorial rule).
 
@@ -160,6 +168,6 @@ and applied to `.md1` / `.md2` reads only (the tutorial rule).
 - Legacy `vb/` is not multi-platform — the code uses `\` path separators,
   `PrintForm`, `SavePicture`, and the VB5 runtime, all Windows-only. The
   modern port in `tauri-app/` targets Windows + macOS + Linux.
-- The modern port does **not** yet have a runnable app — Phase 5 lands the
-  UI. `just dev` today only shows the placeholder React shell with no
-  sidecar wired in.
+- The modern port in `tauri-app/` is a runnable, packaged desktop app:
+  `just dev` launches the full UI with the Python engine wired in, and
+  `just package` produces installable bundles.
