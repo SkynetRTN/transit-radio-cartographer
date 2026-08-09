@@ -1,0 +1,79 @@
+name: release
+
+# Builds installers on a version tag (v*) and attaches them to a draft
+# GitHub release. Windows: NSIS .exe. Linux: .deb, .rpm, and AppImage —
+# built on ubuntu-22.04 (not -latest) deliberately: binaries link against
+# the build machine's glibc, so building on the oldest supported Ubuntu
+# keeps the bundles runnable on 22.04 and everything newer. See
+# tauri-app/PACKAGING.md for the release procedure.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the draft release and attach files
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: tauri-app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential \
+            curl wget file libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: tauri-app/uv.lock
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: tauri-app/app/.nvmrc
+          cache: npm
+          cache-dependency-path: tauri-app/app/package-lock.json
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tauri-app/app/src-tauri
+
+      - name: Sync Python deps
+        run: just sync
+
+      # sidecar (PyInstaller + ping smoke test) -> web bundle -> tauri build.
+      # Same single entry point as a local build, so CI can't drift from it.
+      - name: Build installers
+        run: just package
+
+      - name: Attach bundles to draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            tauri-app/app/src-tauri/target/release/bundle/nsis/*.exe
+            tauri-app/app/src-tauri/target/release/bundle/deb/*.deb
+            tauri-app/app/src-tauri/target/release/bundle/rpm/*.rpm
+            tauri-app/app/src-tauri/target/release/bundle/appimage/*.AppImage
