@@ -1,7 +1,8 @@
 # Packaging Radio Cartographer
 
-How the Windows installer is built, what's inside it, and how to ship a new
-release. macOS is similar but untried — see the bottom.
+How the installers are built, what's inside them, and how to ship a new
+release. Windows and Linux are built automatically in CI on a version tag;
+macOS is similar but untried — see the bottom.
 
 ## Architecture in one paragraph
 
@@ -123,25 +124,56 @@ release.
 
 ## Releasing a new version
 
-1. Bump `version` in both `app/src-tauri/tauri.conf.json` and
-   `app/src-tauri/Cargo.toml`.
-2. `just package` from `tauri-app/`. Smoke-check the .exe on a clean
-   machine if you can — at minimum verify the engine still responds:
+Releases are built by CI: pushing a `v<version>` tag triggers
+`.github/workflows/release.yml`, which runs `just package` on
+`windows-latest` and `ubuntu-22.04` and attaches every installer to a
+draft GitHub release. You review the draft and publish.
+
+1. If `version` in `app/src-tauri/tauri.conf.json` and
+   `app/src-tauri/Cargo.toml` has already been released, bump both,
+   commit, and merge to main. (Skip if the current version was bumped but
+   never tagged — check `git tag --list`.)
+2. Tag the release commit on main and push the tag:
    ```bash
-   echo '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' \
-     | ./app/src-tauri/binaries/radio-cartographer-engine-x86_64-pc-windows-msvc.exe
+   git tag v<version>
+   git push origin v<version>
    ```
-   Expect: `{"jsonrpc": "2.0", "id": 1, "result": "pong"}`.
-3. Commit the version bumps, push, merge to main.
-4. On github.com → **Releases → Draft new release**:
-   - Create tag `v<version>` targeting main
+3. Wait for the `release` workflow (~15–25 min cold, faster with warm
+   caches). A draft release appears under **Releases** with the Windows
+   `.exe` and the Linux `.deb`, `.rpm`, and `.AppImage` attached. The
+   sidecar ping smoke test runs inside `just package` on both runners, so
+   a frozen engine that can't start fails the build rather than shipping.
+4. Open the draft on github.com:
    - Title: `Radio Cartographer v<version> — <short summary>`
-   - Drag in `app/src-tauri/target/release/bundle/nsis/Radio Cartographer_<version>_x64-setup.exe`
    - Check *Set as the latest release*, publish
-5. Share the release URL with the lab. Lab members will see a SmartScreen
-   warning (the installer is unsigned) — they click **More info → Run
-   anyway**. This is expected for internal distribution; signing requires
-   an EV/OV certificate that isn't worth it for lab-internal builds.
+5. Share the release URL with the lab.
+   - **Windows** members will see a SmartScreen warning (the installer is
+     unsigned) — they click **More info → Run anyway**. This is expected
+     for internal distribution; signing requires an EV/OV certificate
+     that isn't worth it for lab-internal builds.
+   - **Linux** members who don't know their distro should grab the
+     `.AppImage`: it runs on any distro with no install —
+     `chmod +x`, then double-click or `./Radio*.AppImage`. The `.deb`
+     (Ubuntu/Debian) and `.rpm` (Fedora/RHEL) are for people who prefer a
+     managed install with a menu entry.
+
+A manual local build (`just package` from `tauri-app/`) still works and
+produces the same artifacts for the current OS — useful for smoke-checking
+before tagging. To verify a locally built engine responds:
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' \
+  | ./app/src-tauri/binaries/radio-cartographer-engine-x86_64-pc-windows-msvc.exe
+```
+Expect: `{"jsonrpc": "2.0", "id": 1, "result": "pong"}`.
+
+### Linux notes
+
+- The workflow pins `ubuntu-22.04` (not `-latest`) on purpose: binaries
+  inherit the build machine's glibc floor, so building on the oldest
+  supported Ubuntu keeps the bundles runnable everywhere newer. Don't
+  "upgrade" the runner without deciding to drop older machines.
+- The AppImage bundles webkit2gtk, so it's ~100 MB — much bigger than the
+  Windows installer. Normal, not a regression.
 
 ## Excluded by design
 
