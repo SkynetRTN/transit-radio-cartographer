@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react';
-import { PaletteEditor, spaceStops, type EditStop } from '../views/PaletteEditor';
+import { PaletteEditor, spaceStops, tidyFlux, type EditStop } from '../views/PaletteEditor';
 import { SurveyProvider } from '../state/survey-context';
 
 vi.mock('../ipc/client', () => ({
@@ -89,4 +89,22 @@ test('spaceStops sorts by anchor and preserves ids', () => {
   expect(result.map((s) => s.anchor)).toEqual([10, 100, 200]);
   // ids travel with their stop (id 1 was anchor 10, id 2 was 100, id 0 was 200).
   expect(result.map((s) => s.id)).toEqual([1, 2, 0]);
+});
+
+// tidyFlux keeps the Min/Max fields readable: computational-zero snaps to 0
+// (so -8.9e-16 doesn't read as "-8...") and long float tails are trimmed.
+test('tidyFlux snaps float-noise near zero to exactly 0', () => {
+  expect(tidyFlux(-8.881784197001252e-16)).toBe(0);
+  expect(tidyFlux(1e-12)).toBe(0);
+});
+
+test('tidyFlux trims long tails to ~6 significant figures', () => {
+  expect(tidyFlux(10.044474667282456)).toBe(10.0445);
+  expect(tidyFlux(-3.14159265358979)).toBe(-3.14159);
+});
+
+test('tidyFlux leaves clean values and non-finite input untouched', () => {
+  expect(tidyFlux(0)).toBe(0);
+  expect(tidyFlux(5)).toBe(5);
+  expect(tidyFlux(NaN)).toBeNaN();
 });

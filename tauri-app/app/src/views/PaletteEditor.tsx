@@ -17,6 +17,21 @@ const PRESETS: Record<string, PaletteStop[]> = {
     { anchor: (255 * 6) / 7, r: 255, g: 0, b: 0 },
     { anchor: 255, r: 255, g: 255, b: 255 },
   ],
+  // Legacy fixtures/palettes/FAINT.PAL: the same black→magenta→…→white ramp as
+  // the default, but with the low end compressed (black holds only to ~anchor 3,
+  // magenta by ~6) so faint / low-flux structure is spread across far more of
+  // the color range instead of being crushed against the black end.
+  'Faint': [
+    { anchor: 1, r: 0, g: 0, b: 0 },
+    { anchor: 2.84058, r: 0, g: 0, b: 0 },
+    { anchor: 5.908213, r: 255, g: 0, b: 255 },
+    { anchor: 27.38164, r: 0, g: 0, b: 255 },
+    { anchor: 54.37681, r: 0, g: 255, b: 255 },
+    { anchor: 91.18841, r: 0, g: 255, b: 0 },
+    { anchor: 136.5894, r: 255, g: 255, b: 0 },
+    { anchor: 191.8068, r: 255, g: 0, b: 0 },
+    { anchor: 255, r: 255, g: 255, b: 255 },
+  ],
   'Grayscale': [
     { anchor: 0, r: 0, g: 0, b: 0 },
     { anchor: 255, r: 255, g: 255, b: 255 },
@@ -56,6 +71,18 @@ function clamp(v: number, lo: number, hi: number): number {
   // poison the palette state and crash Plotly downstream.
   if (!Number.isFinite(v)) return lo;
   return Math.max(lo, Math.min(hi, v));
+}
+
+// Tidy a flux value for display in the Min/Max fields. Values seeded from the
+// image can carry float noise (a data minimum of -8.9e-16 — i.e. computational
+// zero — that reads misleadingly as "-8...") or long tails (10.044474667...).
+// Snap sub-nano magnitudes to exactly 0 and keep ~6 significant figures, so the
+// fields read "0" and "10.0445" instead of the raw 17-digit float. Only applied
+// to seeded / Reset values — anything the user types is preserved as entered.
+export function tidyFlux(v: number): number {
+  if (!Number.isFinite(v)) return v;
+  if (Math.abs(v) < 1e-9) return 0;
+  return Number(v.toPrecision(6));
 }
 
 function interpRgb(stops: PaletteStop[], anchor: number): { r: number; g: number; b: number } {
@@ -263,8 +290,8 @@ export function PaletteEditor({ onClose }: Props = {}) {
   // follows a peg as the array reorders under it (BUG-018 / BUG-021).
   const [stops, setStops] = useState<EditStop[]>(() => defaultStops.map((s) => ({ ...s, id: idRef.current++ })));
   const [selectedId, setSelectedId] = useState<number | null>(null);
-  const initialMin = imageFluxRange?.min ?? image?.min_flux ?? 0;
-  const initialMax = imageFluxRange?.max ?? image?.max_flux ?? 1;
+  const initialMin = tidyFlux(imageFluxRange?.min ?? image?.min_flux ?? 0);
+  const initialMax = tidyFlux(imageFluxRange?.max ?? image?.max_flux ?? 1);
   const [fluxMin, setFluxMin] = useState<number>(initialMin);
   const [fluxMax, setFluxMax] = useState<number>(initialMax);
   const [error, setError] = useState<string | null>(null);
@@ -446,8 +473,8 @@ export function PaletteEditor({ onClose }: Props = {}) {
 
   const resetFluxRange = useCallback(() => {
     if (image) {
-      setFluxMin(image.min_flux);
-      setFluxMax(image.max_flux);
+      setFluxMin(tidyFlux(image.min_flux));
+      setFluxMax(tidyFlux(image.max_flux));
     }
   }, [image]);
 

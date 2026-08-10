@@ -77,5 +77,19 @@ export function useImageSave() {
     await saveImage(target);
   }, [image, imageName, saveImage, pickPath]);
 
-  return { saveImageQuick, saveImageAs, savePngAs };
+  // Dedicated FITS export, mirroring savePngAs — the .fits format is otherwise
+  // only reachable via the Save Image As… filter. Routes through the same
+  // saveImage path (which sends .fits to the image writer).
+  const saveFitsAs = useCallback(async () => {
+    if (!image) return;
+    const target = await pickPath({
+      title: 'Save as FITS',
+      defaultPath: `${imageName || 'image'}.fits`,
+      filters: [{ name: 'FITS (.fits)', extensions: ['fits'] }],
+    });
+    if (!target) return;
+    await saveImage(target);
+  }, [image, imageName, saveImage, pickPath]);
+
+  return { saveImageQuick, saveImageAs, savePngAs, saveFitsAs };
 }

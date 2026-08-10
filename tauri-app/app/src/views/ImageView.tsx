@@ -450,6 +450,25 @@ export function ImageView() {
     [pinnedPoint],
   );
 
+  // Default the color-scale window to the image's own data min→max — the same
+  // values the Palette editor seeds its Min/Max from (image.min_flux /
+  // image.max_flux). This makes the image render on that window immediately,
+  // without the user having to open the editor first, and keeps it consistent
+  // with the pre-image (which also anchors on the data minimum, not 0). A
+  // user-chosen window (imageFluxRange) still wins once set.
+  const effectiveFluxRange = useMemo<{ min: number; max: number } | null>(() => {
+    if (imageFluxRange) return imageFluxRange;
+    if (
+      image &&
+      Number.isFinite(image.min_flux) &&
+      Number.isFinite(image.max_flux) &&
+      image.max_flux > image.min_flux
+    ) {
+      return { min: image.min_flux, max: image.max_flux };
+    }
+    return null;
+  }, [imageFluxRange, image]);
+
   const hasScalar = image !== null && imagePixels !== null;
   const hasRgb = rgbImage !== null && rgbImagePixels !== null;
   if (!hasScalar && !hasRgb) {
@@ -493,7 +512,7 @@ export function ImageView() {
                 title=""
                 testId="image-plot"
                 palette={imagePalette}
-                fluxRange={imageFluxRange}
+                fluxRange={effectiveFluxRange}
                 onHover={setHoverPoint}
                 onClick={handleClick}
                 onContextMenu={handleContextMenu}

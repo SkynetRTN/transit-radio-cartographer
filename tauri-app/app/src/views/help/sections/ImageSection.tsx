@@ -192,6 +192,10 @@ export function ImageSection() {
           <code>.fits</code>).
         </li>
         <li>
+          <code>Save as FITS…</code> — Exports directly to a <code>.fits</code>
+          {' '}file for use in other astronomy tools.
+        </li>
+        <li>
           <code>Save as PNG…</code> — Exports a full-resolution <code>.png</code>
           {' '}for use in papers / slides.
         </li>

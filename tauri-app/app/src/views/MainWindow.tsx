@@ -89,7 +89,7 @@ export function MainWindow() {
     resetForEngineRestart: resetScanForEngineRestart,
   } = useScan();
   const fluxCal = useFluxCal();
-  const { saveImageQuick, saveImageAs, savePngAs } = useImageSave();
+  const { saveImageQuick, saveImageAs, savePngAs, saveFitsAs } = useImageSave();
   const { theme, setTheme } = useTheme();
   const hasSurvey = survey !== null;
   // Image-menu items act on a built image, so they enable as soon as one
@@ -630,6 +630,15 @@ export function MainWindow() {
       setWarning((e as Error).message);
     }
   }, [savePngAs]);
+
+  const handleSaveFitsAs = useCallback(async () => {
+    setOpenMenu(null);
+    try {
+      await saveFitsAs();
+    } catch (e) {
+      setWarning((e as Error).message);
+    }
+  }, [saveFitsAs]);
 
   const startCompose = useCallback(
     async (mode: ComposeMode) => {
@@ -1466,6 +1475,14 @@ export function MainWindow() {
                 Save Image As…
               </button>
               <div className="menu-sep" />
+              <button
+                role="menuitem"
+                disabled={!hasImage}
+                onClick={() => void handleSaveFitsAs()}
+                title={hasImage ? undefined : 'Available after you build or upload an image'}
+              >
+                Save as FITS…
+              </button>
               <button
                 role="menuitem"
                 disabled={!hasImage}

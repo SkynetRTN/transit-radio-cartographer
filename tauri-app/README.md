@@ -55,6 +55,12 @@ just package     # (Phase 6) Tauri bundle (.msi/.dmg/.AppImage)
 
 `just` with no recipe lists everything.
 
+> Run the engine through `just test` / `uv run pytest` (or an activated
+> `.venv`), never a bare `python`/`pytest`. The engine pins Python 3.13
+> (`requires-python = "==3.13.*"`) and uses 3.10+ syntax; a system interpreter
+> like 3.9 on `PATH` fails with errors such as `zip() takes no keyword
+> arguments`. `uv` selects the pinned 3.13 for you.
+
 ### Live development loop
 
 `just dev` sources nvm (if installed), runs `nvm use` against

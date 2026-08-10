@@ -127,6 +127,8 @@ export function PreImageView() {
     setViewMode,
     makeImage,
     imageDisplay,
+    imagePalette,
+    imageFluxRange,
     preImagePix,
     setPreImagePix,
     reductionsDone,
@@ -377,11 +379,21 @@ export function PreImageView() {
   // calibration state (an image always implies at least gain calibration).
   const fluxUnit = imageMeta?.unit ?? (workspace?.flux_calibrated ? 'Jy' : 'GCU');
 
-  // BUG-012 (dan): before the baseline runs, scale the pre-image color ramp to
-  // the data's actual min→max (NaN cells excluded), so faint structure isn't
-  // crushed against the palette's black end. Once the survey has been
-  // baselined the fluxes are zero-referenced, so the ramp anchors at 0→max.
+  // Once the user has chosen a palette + flux stretch on the Image screen, the
+  // pre-image adopts that same window so the applied palette renders
+  // identically across both screens.
+  //
+  // With no Image-screen window chosen yet, scale the color ramp to the data's
+  // actual min→max (NaN cells excluded). We deliberately do NOT force the floor
+  // to 0 after baselining: the Palette editor seeds its Min from the image's
+  // data minimum (not 0), so a pre-image → image → pre-image round trip that
+  // touches the palette would otherwise come back with a different (non-zero)
+  // floor and look different. Anchoring on the data minimum here keeps the
+  // pre-image's appearance stable across that round trip and matches what the
+  // Image screen shows once a palette range is set (BUG-012 originally forced
+  // 0 here; that made the round trip inconsistent).
   const fluxRange = useMemo<{ min: number; max: number } | null>(() => {
+    if (imageFluxRange) return imageFluxRange;
     if (!imagePixels) return null;
     let min = Infinity;
     let max = -Infinity;
@@ -393,8 +405,8 @@ export function PreImageView() {
       }
     }
     if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return null;
-    return { min: reductionsDone.baseline ? 0 : min, max };
-  }, [imagePixels, reductionsDone.baseline]);
+    return { min, max };
+  }, [imageFluxRange, imagePixels]);
 
   if (!workspace) {
     return (
@@ -420,6 +432,7 @@ export function PreImageView() {
                 title=""
                 testId="pre-image-plot"
                 displayMode={imageDisplay}
+                palette={imagePalette}
                 fluxRange={fluxRange}
                 showGrid={false}
                 onHover={setHoverPoint}

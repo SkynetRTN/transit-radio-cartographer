@@ -369,6 +369,56 @@ test('Pre Image hover readout reports RA/Dec/Flux and the source sweep number', 
   await waitFor(() => expect(screen.getByText('Sweep: 1')).toBeInTheDocument());
 });
 
+// Sets a palette + flux window on the shared context (as the Palette editor
+// does on the Image screen), so we can assert the Pre Image screen adopts them.
+function ApplyPalette({
+  palette,
+  flux,
+}: {
+  palette: { anchor: number; r: number; g: number; b: number }[];
+  flux: { min: number; max: number };
+}) {
+  // Apply only once the survey has finished loading — open() clears the palette
+  // as part of loading a fresh survey, so setting it before that would be wiped.
+  const { survey, setImagePalette } = useSurvey();
+  useEffect(() => {
+    if (survey) setImagePalette(palette, flux);
+  }, [survey, setImagePalette, palette, flux]);
+  return null;
+}
+
+test('Pre Image adopts the Image screen palette and flux window', async () => {
+  imagePlotProps.length = 0;
+  const palette = [
+    { anchor: 0, r: 0, g: 0, b: 0 },
+    { anchor: 255, r: 255, g: 255, b: 255 },
+  ];
+  // A non-zero floor: the whole point of Option A is that the pre-image stops
+  // forcing the floor to 0 and uses this window verbatim so the palette matches.
+  const flux = { min: 3, max: 9 };
+  await act(async () => {
+    render(
+      <SurveyProvider>
+        <HydrateSurvey
+          meta={{
+            handle: 1,
+            metadata: { sweep_count: 1, path: '/tmp/and0a.md2' },
+            workspace_handle: 2,
+            workspace: workspaceOverview,
+          }}
+        />
+        <ApplyPalette palette={palette} flux={flux} />
+        <PreImageView />
+      </SurveyProvider>,
+    );
+  });
+  await waitFor(() => {
+    const last = imagePlotProps[imagePlotProps.length - 1];
+    expect(last?.palette).toEqual(palette);
+    expect(last?.fluxRange).toEqual(flux);
+  });
+});
+
 test('Align Sweeps opens a dialog with default 0.5 and submits to align rpc', async () => {
   await act(async () => {
     render(
