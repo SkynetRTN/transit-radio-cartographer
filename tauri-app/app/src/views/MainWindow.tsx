@@ -347,13 +347,22 @@ export function MainWindow() {
   const pickSavePath = useCallback(
     async (kind: 'scan' | 'survey', defaultPath: string | null) => {
       try {
+        const ext = kind === 'scan' ? 'scn' : 'srv';
         const filter =
           kind === 'scan'
             ? { name: 'Scan (.scn)', extensions: ['scn'] }
             : { name: 'Survey (.srv)', extensions: ['srv'] };
+        // The seed path is typically the source file (.md2/.md1). Swap its
+        // extension to the target so the dialog defaults to <name>.srv rather
+        // than the source name — otherwise Windows warns about overwriting the
+        // existing .md2 and would suggest saving with the wrong extension.
+        const seed =
+          defaultPath != null
+            ? `${defaultPath.replace(/\.[^./\\]+$/, '')}.${ext}`
+            : undefined;
         const selected = await saveDialog({
           title: kind === 'scan' ? 'Save Scan As' : 'Save Survey As',
-          defaultPath: defaultPath ?? undefined,
+          defaultPath: seed,
           filters: [filter],
         });
         return typeof selected === 'string' ? selected : null;

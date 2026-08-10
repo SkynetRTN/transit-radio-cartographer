@@ -124,6 +124,45 @@ def test_workspace_to_survey_raw_passthrough(inputs_dir: Path, tmp_path: Path) -
     assert re_read.sweeps[-1].calib == pytest.approx(ws.cal2(), abs=1e-3)
 
 
+@pytest.mark.parametrize("fixture", ["map3_a.md2", "sun1_a.md2"])
+def test_workspace_to_survey_short_cal_brackets(
+    inputs_dir: Path, tmp_path: Path, fixture: str
+) -> None:
+    """Cal brackets shorter than 60 samples round-trip without padding.
+
+    Regression: map3_a.md2 / sun1_a.md2 have 59-sample cal brackets, so the
+    naive concatenation was 237 samples and the (then) fixed-240 serializer
+    overran with "index 237 is out of bounds for axis 0 with size 237". sweep0
+    is now variable-length: every cal sample is emitted at its true length and
+    the four quadrant counts are recorded in `#OGRC_SWEEP0`, so the cal brackets
+    reload bit-for-bit (no synthetic samples).
+    """
+    md2 = read_md2(inputs_dir / fixture)
+    ws = build_workspace(str(inputs_dir / fixture), md2)
+    quad_lengths = (
+        ws.initial.cal_on.ra.size,
+        ws.initial.cal_off.ra.size,
+        ws.terminal.cal_on.ra.size,
+        ws.terminal.cal_off.ra.size,
+    )
+    assert sum(quad_lengths) != 240  # exercises the non-legacy path
+
+    survey = workspace_to_survey(ws)
+    assert survey.cal_lengths == quad_lengths
+    assert survey.sweep0.ra.size == sum(quad_lengths)
+
+    out = tmp_path / f"{fixture}.srv"
+    write_srv(survey, out)  # would have raised before the fix
+    reparsed = read_srv(out)
+    assert reparsed.cal_lengths == quad_lengths
+    loaded, _ = survey_from_srv(reparsed, str(out))
+    # Cal brackets reconstruct exactly — same lengths and same samples.
+    np.testing.assert_array_equal(loaded.initial.cal_on.flux, ws.initial.cal_on.flux)
+    np.testing.assert_array_equal(loaded.terminal.cal_off.flux, ws.terminal.cal_off.flux)
+    assert loaded.cal1() == pytest.approx(ws.cal1(), abs=1e-3)
+    assert loaded.cal2() == pytest.approx(ws.cal2(), abs=1e-3)
+
+
 def test_workspace_to_survey_after_calibration_and_smooth(
     inputs_dir: Path, tmp_path: Path
 ) -> None:

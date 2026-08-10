@@ -69,6 +69,13 @@ class Survey:
     sweeps: tuple[Sweep, ...]
     raw_bytes: bytes | None = None
     accepted: tuple[bool, ...] | None = None
+    # Sample counts of the four cal quadrants packed into `sweep0`
+    # (initial_on, initial_off, terminal_on, terminal_off). `None` means the
+    # legacy fixed layout of four 60-sample quadrants (240 total). When set,
+    # `sweep0` holds exactly `sum(cal_lengths)` samples and the codec records
+    # the counts in the `#OGRC_SWEEP0` header line so the quadrant boundaries
+    # survive without padding.
+    cal_lengths: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True)

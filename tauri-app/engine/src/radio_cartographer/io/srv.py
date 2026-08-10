@@ -10,8 +10,9 @@ Label2                        (string — source name)
  Swp                          (integer)
 Calib(0)                      (Format$ "#.####")
 Calib(Swp)                    (Format$ "#.####")
+[#OGRC_SWEEP0 l0 l1 l2 l3]    (optional — this app's variable-length cal header)
 Sweep 0:
-  For Num=1..240:
+  For Num=1..N:               (N = 240 legacy, or sum(l0..l3) when header present)
      Ra(0,Num)                (numeric)
     Dec(0,Num)                (Format$ "#.##")
     Flux(0,Num)               (Format$ "#.####")
@@ -44,7 +45,8 @@ from ._vb_format import (
 )
 from .common import split_crlf_lines
 
-SWEEP0_LENGTH = 240
+SWEEP0_LENGTH = 240  # legacy fixed cal block: four 60-sample quadrants
+SWEEP0_HEADER = "#OGRC_SWEEP0"  # marks this app's variable-length cal layout
 
 
 def _vb_float(token: str) -> float:
@@ -90,10 +92,32 @@ def _parse_srv(raw: bytes) -> Survey:
     # `Sweep` in `sweeps` once that block is parsed below.
     _calib_swp_redundant = _vb_float(take())  # noqa: F841 — consumed for layout
 
-    sweep0_ra = np.empty(SWEEP0_LENGTH, dtype=np.float64)
-    sweep0_dec = np.empty(SWEEP0_LENGTH, dtype=np.float64)
-    sweep0_flux = np.empty(SWEEP0_LENGTH, dtype=np.float64)
-    for i in range(SWEEP0_LENGTH):
+    # Optional variable-length cal header written by this app. Legacy files go
+    # straight into the sweep0 numeric block (240 samples, four 60-sample
+    # quadrants); when the header is present it declares the four real quadrant
+    # counts so no padding is needed.
+    cal_lengths: tuple[int, int, int, int] | None = None
+    if cursor < len(lines) and lines[cursor].strip().startswith(SWEEP0_HEADER):
+        parts = lines[cursor].strip().split()
+        cursor += 1
+        if len(parts) != 5:
+            raise ValueError(
+                f"{SWEEP0_HEADER} header must list 4 quadrant counts, got {parts[1:]}"
+            )
+        try:
+            cal_lengths = (int(parts[1]), int(parts[2]), int(parts[3]), int(parts[4]))
+        except ValueError as exc:
+            raise ValueError(f"{SWEEP0_HEADER} counts must be integers: {parts[1:]}") from exc
+        if any(length < 0 for length in cal_lengths):
+            raise ValueError(f"{SWEEP0_HEADER} counts must be non-negative: {cal_lengths}")
+        sweep0_length = sum(cal_lengths)
+    else:
+        sweep0_length = SWEEP0_LENGTH
+
+    sweep0_ra = np.empty(sweep0_length, dtype=np.float64)
+    sweep0_dec = np.empty(sweep0_length, dtype=np.float64)
+    sweep0_flux = np.empty(sweep0_length, dtype=np.float64)
+    for i in range(sweep0_length):
         sweep0_ra[i] = _vb_float(take())
         sweep0_dec[i] = _vb_float(take())
         sweep0_flux[i] = _vb_float(take())
@@ -152,6 +176,7 @@ def _parse_srv(raw: bytes) -> Survey:
         sweeps=tuple(sweeps),
         raw_bytes=raw,
         accepted=accepted,
+        cal_lengths=cal_lengths,
     )
 
 
@@ -170,7 +195,27 @@ def _serialize_srv(survey: Survey) -> bytes:
     if not survey.sweeps:
         raise ValueError("cannot serialize a survey with no sweeps")
     out += vb_print_formatted(vb_format_fixed(_must(survey.sweeps[-1].calib), 4))
-    for i in range(SWEEP0_LENGTH):
+    # sweep0 is either the legacy fixed 240-sample block or, when `cal_lengths`
+    # is set, a variable-length block prefixed by an `#OGRC_SWEEP0` header that
+    # records the four real cal-quadrant counts (so short .md2 cal brackets need
+    # no padding). Validate the length up front so a mismatch is a clear error,
+    # not an opaque `index N out of bounds` from the loop below.
+    if survey.cal_lengths is None:
+        sweep0_length = SWEEP0_LENGTH
+    else:
+        sweep0_length = sum(survey.cal_lengths)
+        out += vb_print_string(f"{SWEEP0_HEADER} " + " ".join(str(n) for n in survey.cal_lengths))
+    for _name, _arr in (
+        ("ra", survey.sweep0.ra),
+        ("dec", survey.sweep0.dec),
+        ("flux", survey.sweep0.flux),
+    ):
+        if _arr.shape[0] != sweep0_length:
+            raise ValueError(
+                f".srv sweep0 {_name} must be {sweep0_length} samples, "
+                f"got {_arr.shape[0]}"
+            )
+    for i in range(sweep0_length):
         out += vb_print_number(_compact(float(survey.sweep0.ra[i])))
         out += vb_print_formatted(vb_format_fixed(float(survey.sweep0.dec[i]), 2))
         out += vb_print_formatted(vb_format_fixed(float(survey.sweep0.flux[i]), 4))

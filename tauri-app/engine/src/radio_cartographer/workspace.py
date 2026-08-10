@@ -444,10 +444,15 @@ def workspace_to_survey(
 ) -> Survey:
     """Project the workspace's current state into a `Survey` for .srv writing.
 
-    The `.srv` format expects a fixed 240-sample `sweep0` that is the
-    concatenation of the four cal sub-sweeps (initial_on + initial_off +
-    terminal_on + terminal_off, 60 samples each — verified against
-    fixtures/intermediates/and0a.srv vs fixtures/inputs/and0a.md2). Per-sweep
+    `sweep0` is the concatenation of the four cal sub-sweeps (initial_on +
+    initial_off + terminal_on + terminal_off). Legacy `.srv` assumed a fixed
+    240-sample block of four 60-sample quadrants (the VB loader reads exactly 60
+    lines per bracket, `vb/survform.frm:4129-4191`), but real `.md2` cal
+    brackets are not always 60 (e.g. `map3_a.md2`/`sun1_a.md2` are 59). We emit
+    every cal sample at its true length and record the four quadrant counts in
+    `Survey.cal_lengths`, which the codec writes as the `#OGRC_SWEEP0` header so
+    `survey_from_srv` can split the quadrants back out — no padding, exact
+    round-trip. Per-sweep
     `calib` carries Cal1 on sweep0, Cal2 on the last sweep, and 0.0 in
     between (the legacy writer only stores the bracket voltages, not a
     Jy/count conversion, until a .cal file is applied — out of scope here).
@@ -469,30 +474,27 @@ def workspace_to_survey(
     cal1 = workspace.cal1()
     cal2 = workspace.cal2()
 
-    sweep0_ra = np.concatenate(
-        [
-            workspace.initial.cal_on.ra,
-            workspace.initial.cal_off.ra,
-            workspace.terminal.cal_on.ra,
-            workspace.terminal.cal_off.ra,
-        ]
-    ).astype(np.float64)
-    sweep0_dec = np.concatenate(
-        [
-            workspace.initial.cal_on.dec,
-            workspace.initial.cal_off.dec,
-            workspace.terminal.cal_on.dec,
-            workspace.terminal.cal_off.dec,
-        ]
-    ).astype(np.float64)
-    sweep0_flux = np.concatenate(
-        [
-            workspace.initial.cal_on.flux,
-            workspace.initial.cal_off.flux,
-            workspace.terminal.cal_on.flux,
-            workspace.terminal.cal_off.flux,
-        ]
-    ).astype(np.float64)
+    quadrants = (
+        workspace.initial.cal_on,
+        workspace.initial.cal_off,
+        workspace.terminal.cal_on,
+        workspace.terminal.cal_off,
+    )
+    sweep0_ra = np.concatenate([np.asarray(q.ra, dtype=np.float64) for q in quadrants])
+    sweep0_dec = np.concatenate([np.asarray(q.dec, dtype=np.float64) for q in quadrants])
+    sweep0_flux = np.concatenate([np.asarray(q.flux, dtype=np.float64) for q in quadrants])
+    quad_shape = (
+        int(quadrants[0].ra.shape[0]),
+        int(quadrants[1].ra.shape[0]),
+        int(quadrants[2].ra.shape[0]),
+        int(quadrants[3].ra.shape[0]),
+    )
+    # Only emit the `#OGRC_SWEEP0` header when the cal block is not the legacy
+    # four-60-sample layout; standard surveys then serialize byte-for-byte as
+    # before and only the odd-sized ones (the crash case) carry the header.
+    cal_lengths: tuple[int, int, int, int] | None = (
+        None if quad_shape == (60, 60, 60, 60) else quad_shape
+    )
     sweep0 = Sweep(
         ra=sweep0_ra,
         dec=sweep0_dec,
@@ -540,6 +542,7 @@ def workspace_to_survey(
         sweeps=tuple(sweeps),
         raw_bytes=None,
         accepted=accepted_tuple,
+        cal_lengths=cal_lengths,
     )
 
 
@@ -561,33 +564,43 @@ def survey_from_srv(survey: Survey, path: str) -> tuple[SurveyWorkspace, list[in
     captures the legacy convention from `vb/survform.frm:4432-4475`).
     """
     sweep0 = survey.sweep0
-    if sweep0.ra.size != 240:
+    # Quadrant counts: the `#OGRC_SWEEP0` header (this app) gives the four true
+    # lengths; legacy files without it are the fixed four 60-sample quadrants.
+    if survey.cal_lengths is not None:
+        quad_lengths = survey.cal_lengths
+    else:
+        quad_lengths = (60, 60, 60, 60)
+    expected = sum(quad_lengths)
+    if sweep0.ra.size != expected:
         raise ValueError(
-            f".srv sweep0 must be 240 cal samples, got {sweep0.ra.size}"
+            f".srv sweep0 must be {expected} cal samples "
+            f"(quadrants {quad_lengths}), got {sweep0.ra.size}"
+        )
+    # Cumulative quadrant offsets: [initial_on, initial_off, terminal_on,
+    # terminal_off] laid end to end in sweep0.
+    o0 = 0
+    o1 = o0 + quad_lengths[0]
+    o2 = o1 + quad_lengths[1]
+    o3 = o2 + quad_lengths[2]
+    o4 = o3 + quad_lengths[3]
+
+    def _raw(lo: int, hi: int) -> RawSweep:
+        return RawSweep(
+            ra=np.asarray(sweep0.ra[lo:hi], dtype=np.float64).copy(),
+            dec=np.asarray(sweep0.dec[lo:hi], dtype=np.float64).copy(),
+            flux=np.asarray(sweep0.flux[lo:hi], dtype=np.float64).copy(),
         )
 
-    def _bracket(lo: int, hi: int) -> CalBracket:
-        on_lo, on_hi = lo, lo + 60
-        off_lo, off_hi = lo + 60, hi
-        cal_on = RawSweep(
-            ra=np.asarray(sweep0.ra[on_lo:on_hi], dtype=np.float64).copy(),
-            dec=np.asarray(sweep0.dec[on_lo:on_hi], dtype=np.float64).copy(),
-            flux=np.asarray(sweep0.flux[on_lo:on_hi], dtype=np.float64).copy(),
-        )
-        cal_off = RawSweep(
-            ra=np.asarray(sweep0.ra[off_lo:off_hi], dtype=np.float64).copy(),
-            dec=np.asarray(sweep0.dec[off_lo:off_hi], dtype=np.float64).copy(),
-            flux=np.asarray(sweep0.flux[off_lo:off_hi], dtype=np.float64).copy(),
-        )
+    def _bracket(on_lo: int, on_hi: int, off_lo: int, off_hi: int) -> CalBracket:
         return CalBracket(
-            cal_on=cal_on,
-            cal_off=cal_off,
-            cal_on_mask=np.ones(60, dtype=bool),
-            cal_off_mask=np.ones(60, dtype=bool),
+            cal_on=_raw(on_lo, on_hi),
+            cal_off=_raw(off_lo, off_hi),
+            cal_on_mask=np.ones(on_hi - on_lo, dtype=bool),
+            cal_off_mask=np.ones(off_hi - off_lo, dtype=bool),
         )
 
-    initial = _bracket(0, 120)
-    terminal = _bracket(120, 240)
+    initial = _bracket(o0, o1, o1, o2)
+    terminal = _bracket(o2, o3, o3, o4)
 
     source_sweeps = tuple(
         RawSweep(
